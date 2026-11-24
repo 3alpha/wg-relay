@@ -2,6 +2,7 @@
 //!
 //! Config used throughout: servers `main` and `other`; clients `c1` -> main,
 //! `c2` -> other, `c3` -> main; `st` (stranger) is not listed anywhere.
+#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test setup panics on failure")]
 
 mod common;
 use boringtun::noise::handshake::parse_handshake_anon;

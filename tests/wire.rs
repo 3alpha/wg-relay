@@ -1,4 +1,5 @@
 //! Packet parsing, size checks, mac1 matching and soft-state tables.
+#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test setup panics on failure")]
 
 mod common;
 use boringtun::noise::rate_limiter::RateLimiter;

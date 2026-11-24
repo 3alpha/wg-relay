@@ -1,4 +1,5 @@
 //! Config validation and the `--check-config` flag.
+#![allow(clippy::unwrap_used, clippy::expect_used, reason = "test setup panics on failure")]
 
 mod common;
 use common::*;
