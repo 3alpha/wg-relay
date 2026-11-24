@@ -10,7 +10,7 @@ use boringtun::noise::{Tunn, TunnResult};
 use common::*;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use wg_relay::config::{Config, encode_key};
+use wg_relay::config::Config;
 use wg_relay::relay::{Reason, Relay};
 
 const SRV: &str = "198.51.100.1:51820";
@@ -39,7 +39,7 @@ fn config(w: &W, gate: &str, clients: &[(&str, &Key, &str)]) -> Config {
     let mut s = format!(
         "private_key = \"{}\"\ntunnel_ip = \"10.99.0.254\"\nclient_gate = \"{gate}\"\n\
          [[server]]\nname = \"main\"\npubkey = \"{}\"\n[[server]]\nname = \"other\"\npubkey = \"{}\"\n",
-        encode_key(&w.r.sk.to_bytes()),
+        b64_sk(&w.r),
         b64(&w.srv.pk),
         b64(&w.srv2.pk)
     );
@@ -73,7 +73,7 @@ fn world(gate: &str) -> W {
 fn dummy(r: &Key) -> Config {
     let s = format!(
         "private_key = \"{}\"\ntunnel_ip = \"10.99.0.254\"\n[[server]]\nname = \"x\"\npubkey = \"{}\"\n",
-        encode_key(&r.sk.to_bytes()),
+        b64_sk(r),
         b64(&key().pk)
     );
     Config::parse(&s).unwrap()
@@ -89,7 +89,7 @@ impl W {
         assert_eq!(out.len(), 1, "relay should answer the registration");
         let ka = reply(&mut t, &out[0].1).expect("keepalive to relay");
         assert_eq!(self.fwd(src, &ka), None);
-        assert_eq!(self.relay.registry.addr(k.pk.as_bytes(), Instant::now()), Some(addr(src)));
+        assert_eq!(self.relay.registry.addr(&k.id(), Instant::now()), Some(addr(src)));
         t
     }
 
@@ -257,22 +257,22 @@ fn reload_revokes_immediately() {
     // Remove c1 entirely, and take `main` away from c3.
     let cfg = config(&w, "register", &[("c3", &c3k, "\"other\"")]);
     w.relay.reload(&cfg);
-    assert_eq!(w.relay.registry.addr(c1k.pk.as_bytes(), Instant::now()), None);
+    assert_eq!(w.relay.registry.addr(&c1k.id(), Instant::now()), None);
     assert!(w.relay.sessions.is_empty(), "both sessions revoked");
     assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), None);
     assert_eq!(data(&mut w, &mut sc3, SRV, &mut c3s), None);
     assert_eq!(w.n(Reason::UnknownIndex), 2);
     // c3 is still registered (it is still a client), but may not reach main.
-    assert!(w.relay.registry.addr(c3k.pk.as_bytes(), Instant::now()).is_some());
+    assert!(w.relay.registry.addr(&c3k.id(), Instant::now()).is_some());
     assert_eq!(w.fwd(C3, &initiation(&mut c3s)), None);
     assert_eq!(w.n(Reason::Acl), 1);
     // Servers keep their registrations.
-    assert!(w.relay.registry.addr(w.srv.pk.as_bytes(), Instant::now()).is_some());
+    assert!(w.relay.registry.addr(&w.srv.id(), Instant::now()).is_some());
 
     // Switching to `response` drops client registrations.
     let cfg = config(&w, "response", &[("c3", &c3k, "\"main\"")]);
     w.relay.reload(&cfg);
-    assert_eq!(w.relay.registry.addr(c3k.pk.as_bytes(), Instant::now()), None);
+    assert_eq!(w.relay.registry.addr(&c3k.id(), Instant::now()), None);
     assert_eq!(hs(&mut w, &mut c3s, C3, &mut sc3, SRV), ok3(SRV, C3));
 }
 
@@ -333,7 +333,7 @@ fn expiry_and_rate_limit() {
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     w.relay.tick(Instant::now() + Duration::from_secs(181));
-    assert_eq!(w.relay.registry.addr(w.srv.pk.as_bytes(), Instant::now() + Duration::from_secs(181)), None);
+    assert_eq!(w.relay.registry.addr(&w.srv.id(), Instant::now() + Duration::from_secs(181)), None);
     w.relay.tick(Instant::now() + Duration::from_secs(201));
     assert!(w.relay.sessions.is_empty());
 

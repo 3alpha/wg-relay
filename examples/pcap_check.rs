@@ -19,7 +19,7 @@ use std::error::Error as _;
 use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use wg_relay::config::{KeyError, decode_key};
+use wg_relay::key::{KeyError, PeerKey, PrivateKey};
 use wg_relay::packet;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -99,7 +99,7 @@ fn parse_pcap(b: &[u8]) -> Result<Vec<Udp>, CheckError> {
 }
 
 fn secret(arg: &'static str, b64: &str) -> Result<StaticSecret, CheckError> {
-    decode_key(b64).map(StaticSecret::from).map_err(|source| CheckError::Key { arg, source })
+    b64.parse::<PrivateKey>().map(|k| k.secret().clone()).map_err(|source| CheckError::Key { arg, source })
 }
 
 fn parse_marker(hex: &str) -> Result<Vec<u8>, CheckError> {
@@ -117,7 +117,7 @@ fn initiators(pcap: &str, responder_sk: &str) -> Result<bool, CheckError> {
         if let Ok(Packet::HandshakeInit(h)) = Tunn::parse_incoming_packet(&p.payload)
             && let Ok(half) = parse_handshake_anon(&sk, &pk, &h)
         {
-            seen.insert(wg_relay::config::encode_key(&half.peer_static_public));
+            seen.insert(PeerKey::from(half.peer_static_public).to_string());
         }
     }
     seen.iter().for_each(|k| println!("{k}"));

@@ -4,10 +4,10 @@
 mod common;
 use common::*;
 use std::process::Command;
-use wg_relay::config::{Config, Gate, Role, encode_key};
+use wg_relay::config::{Config, Gate, Role};
 
 fn head(r: &Key, extra: &str) -> String {
-    format!("private_key = \"{}\"\ntunnel_ip = \"10.99.0.254\"\n{extra}", encode_key(&r.sk.to_bytes()))
+    format!("private_key = \"{}\"\ntunnel_ip = \"10.99.0.254\"\n{extra}", b64_sk(r))
 }
 fn server(name: &str, k: &Key) -> String {
     format!("[[server]]\nname = \"{name}\"\npubkey = \"{}\"\n", b64(&k.pk))
@@ -24,17 +24,17 @@ fn roles_defaults_and_acl() {
     let cfg = Config::parse(&text).unwrap();
     assert_eq!(cfg.listen.to_string(), "0.0.0.0:51820");
     assert_eq!(cfg.gate, Gate::Register, "safest gate is the default");
-    assert_eq!(cfg.rate_per_sec, 10.0);
-    assert_eq!(cfg.relay_pubkey(), *r.pk.as_bytes());
+    assert_eq!(cfg.handshake_rate.per_sec(), 10.0);
+    assert_eq!(cfg.private_key.public_key(), r.id());
     let laptop = cfg.peers.iter().find(|p| p.name == "laptop").unwrap();
-    assert_eq!((laptop.role, laptop.servers.clone()), (Role::Client, vec![*s2.pk.as_bytes()]));
+    assert_eq!((laptop.role, laptop.servers.clone()), (Role::Client, vec![s2.id()]));
     assert!(cfg.warnings().is_empty());
 
     let cfg = Config::parse(
         &(head(&r, "client_gate = \"none\"\nhandshake_rate_per_ip = \"60/m\"\n") + &server("main", &s1)),
     )
     .unwrap();
-    assert_eq!((cfg.gate, cfg.rate_per_sec), (Gate::None, 1.0));
+    assert_eq!((cfg.gate, cfg.handshake_rate.per_sec()), (Gate::None, 1.0));
     assert!(cfg.warnings().is_empty(), "clients are optional with gate none");
     let cfg = Config::parse(&(head(&r, "client_gate = \"response\"\n") + &server("main", &s1))).unwrap();
     assert_eq!(cfg.warnings().len(), 1, "no clients with gate response");

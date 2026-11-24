@@ -1,6 +1,6 @@
 //! Soft-state tables: registry, session table, per-IP rate limiter.
 
-use crate::config::Key;
+use crate::key::PeerKey;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::net::{IpAddr, SocketAddr};
@@ -87,8 +87,8 @@ pub struct Session {
     pub open: bool,
     pub last: Instant,
     /// The server end, and the client end once known; used to revoke on reload.
-    pub server: Key,
-    pub client: Option<Key>,
+    pub server: PeerKey,
+    pub client: Option<PeerKey>,
 }
 
 pub struct SessionTable {
@@ -117,7 +117,7 @@ impl SessionTable {
     }
 
     /// Refresh `last`; optionally mark open and record the client.
-    pub fn touch(&mut self, idx: u32, now: Instant, open: bool, client: Option<Key>) {
+    pub fn touch(&mut self, idx: u32, now: Instant, open: bool, client: Option<PeerKey>) {
         if let Some(s) = self.map.get_mut(&idx) {
             s.last = now;
             s.open |= open;
@@ -154,7 +154,7 @@ impl SessionTable {
         self.map.keys().any(|i| i >> 8 == prefix)
     }
 
-    pub fn clients(&self) -> HashSet<Key> {
+    pub fn clients(&self) -> HashSet<PeerKey> {
         self.map.values().filter_map(|s| s.client).collect()
     }
 

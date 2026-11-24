@@ -6,10 +6,11 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
-use wg_relay::config::{Config, Role, encode_key};
+use wg_relay::config::{Config, Role};
 use wg_relay::error::{AppError, Report};
+use wg_relay::key::PeerKey;
 use wg_relay::relay::Relay;
 
 const USAGE: &str = "usage: wg-relay [-c|--config PATH] [--check-config]\n\
@@ -56,15 +57,15 @@ fn run() -> Result<(), AppError> {
     if check {
         println!("config OK: {}", path.display());
         println!("listen       {}", cfg.listen);
-        println!("relay key    {}", encode_key(&cfg.relay_pubkey()));
+        println!("relay key    {}", cfg.private_key.public_key());
         println!("tunnel ip    {}", cfg.tunnel_ip);
         println!("client gate  {:?}", cfg.gate);
-        println!("init rate    {}/s per source IP", cfg.rate_per_sec);
-        let name = |k: &[u8; 32]| cfg.peers.iter().find(|p| &p.pubkey == k).map_or("?", |p| p.name.as_str());
+        println!("init rate    {} per source IP", cfg.handshake_rate);
+        let name = |k: &PeerKey| cfg.peers.iter().find(|p| &p.pubkey == k).map_or("?", |p| p.name.as_str());
         for p in &cfg.peers {
             let reach: Vec<&str> = p.servers.iter().map(name).collect();
             let role = if p.role == Role::Server { "server" } else { "client" };
-            println!("{role} {:<12} {}  {}", p.name, encode_key(&p.pubkey), reach.join(", "));
+            println!("{role} {:<12} {}  {}", p.name, p.pubkey, reach.join(", "));
         }
         return Ok(());
     }
@@ -79,7 +80,16 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
     let mut term = on(SignalKind::terminate(), "SIGTERM")?;
     let mut hup = on(SignalKind::hangup(), "SIGHUP")?;
     let mut relay = Relay::new(&cfg);
-    info!(listen = %cfg.listen, pubkey = %relay.public_key_b64(), peers = relay.peer_count(), gate = ?cfg.gate, "wg-relay started");
+    info!(
+        listen = %cfg.listen,
+        pubkey = %relay.public_key(),
+        tunnel_ip = %cfg.tunnel_ip,
+        gate = ?cfg.gate,
+        handshake_rate = %cfg.handshake_rate,
+        peers = relay.peer_count(),
+        "wg-relay started"
+    );
+    debug!(config = ?cfg, "effective config");
     let mut buf = vec![0u8; 65536];
     let mut timers = tokio::time::interval(Duration::from_millis(250));
     let mut stats = tokio::time::interval(Duration::from_secs(60));

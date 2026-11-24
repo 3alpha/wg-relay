@@ -114,7 +114,7 @@ fn sess(dest: &str, src: &str, t: Instant) -> Session {
         expected_src: src.parse().unwrap(),
         open: false,
         last: t,
-        server: [1; 32],
+        server: [1; 32].into(),
         client: None,
     }
 }
@@ -126,10 +126,10 @@ fn session_table_expiry_and_touch() {
     t.insert(42, sess("192.0.2.1:1", "192.0.2.2:2", t0));
     assert!(t.get(42, t0 + Duration::from_secs(199)).is_some());
     assert!(t.get(42, t0 + Duration::from_secs(200)).is_none());
-    t.touch(42, t0 + Duration::from_secs(150), true, Some([7; 32]));
+    t.touch(42, t0 + Duration::from_secs(150), true, Some([7; 32].into()));
     let s = t.get(42, t0 + Duration::from_secs(300)).unwrap();
     assert!(s.open);
-    assert_eq!(s.client, Some([7; 32]));
+    assert_eq!(s.client, Some([7; 32].into()));
     assert_eq!(t.expire(t0 + Duration::from_secs(349)), 0);
     assert_eq!(t.expire(t0 + Duration::from_secs(351)), 1);
     assert!(t.is_empty());
@@ -195,11 +195,13 @@ fn init_rate_limiter() {
 
 #[test]
 fn rate_strings() {
-    use wg_relay::config::parse_rate;
-    assert_eq!(parse_rate("10/s").ok(), Some(10.0));
-    assert_eq!(parse_rate("120/m").ok(), Some(2.0));
-    assert_eq!(parse_rate(" 5 ").ok(), Some(5.0));
-    for bad in ["0/s", "-1/s", "x/s", "10/h", ""] {
-        assert!(parse_rate(bad).is_err(), "{bad}");
-    }
+    use wg_relay::config::{Rate, RateError};
+    let per_sec = |s: &str| s.parse::<Rate>().map(Rate::per_sec);
+    assert_eq!(per_sec("10/s"), Ok(10.0));
+    assert_eq!(per_sec(" 120 / m "), Ok(2.0));
+    assert_eq!(per_sec("10"), Err(RateError::MissingUnit), "no silent default unit");
+    assert_eq!(per_sec("0/s"), Err(RateError::NotPositive));
+    assert_eq!(per_sec("-1/s"), Err(RateError::NotPositive));
+    assert_eq!(per_sec("x/s"), Err(RateError::Number("x".into())));
+    assert_eq!(per_sec("10/h"), Err(RateError::Unit("h".into())));
 }

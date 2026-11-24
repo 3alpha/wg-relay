@@ -3,7 +3,8 @@
 //! `Relay::handle` does no I/O: it returns where to forward the datagram
 //! (unchanged) and queues the relay's own tunnel output in `outbox`.
 
-use crate::config::{Config, Gate, Key, Role, encode_key};
+use crate::config::{Config, Gate, Role};
+use crate::key::PeerKey;
 use crate::packet::{self, Mac1Key, Packet};
 use crate::tables::{REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, Session, SessionTable};
 use boringtun::noise::handshake::parse_handshake_anon;
@@ -88,7 +89,7 @@ struct PeerState {
     name: String,
     role: Role,
     mac1: Mac1Key,
-    servers: Vec<Key>,
+    servers: Vec<PeerKey>,
     /// Registration tunnel: servers always, clients only with `client_gate = "register"`.
     tunn: Option<Tunn>,
 }
@@ -99,13 +100,13 @@ pub struct Relay {
     relay_mac1: Mac1Key,
     tunnel_ip: Ipv4Addr,
     gate: Gate,
-    peers: HashMap<Key, PeerState>,
+    peers: HashMap<PeerKey, PeerState>,
     /// Upper 24 bits of each relay tunnel's local indexes. Forwarded sessions
     /// may never use these (see `reserved`).
-    tunn_by_base: HashMap<u32, Key>,
-    pub registry: Registry<Key>,
+    tunn_by_base: HashMap<u32, PeerKey>,
+    pub registry: Registry<PeerKey>,
     /// Client addresses learned from accepted server responses (gates none/response).
-    learned: HashMap<Key, SocketAddr>,
+    learned: HashMap<PeerKey, SocketAddr>,
     pub sessions: SessionTable,
     limiter: RateLimiter,
     pub metrics: Metrics,
@@ -116,7 +117,7 @@ pub struct Relay {
 
 impl Relay {
     pub fn new(cfg: &Config) -> Self {
-        let secret = StaticSecret::from(cfg.private_key);
+        let secret = cfg.private_key.secret().clone();
         let public = PublicKey::from(&secret);
         let mut relay = Relay {
             relay_mac1: packet::mac1_key(public.as_bytes()),
@@ -129,7 +130,7 @@ impl Relay {
             registry: Registry::new(REGISTRY_TTL),
             learned: HashMap::new(),
             sessions: SessionTable::new(SESSION_TTL),
-            limiter: RateLimiter::new(cfg.rate_per_sec),
+            limiter: RateLimiter::new(cfg.handshake_rate.per_sec()),
             metrics: Metrics::default(),
             outbox: Vec::new(),
             scratch: vec![0; SCRATCH_LEN],
@@ -138,8 +139,8 @@ impl Relay {
         relay
     }
 
-    pub fn public_key_b64(&self) -> String {
-        encode_key(self.public.as_bytes())
+    pub fn public_key(&self) -> PeerKey {
+        self.public.into()
     }
 
     pub fn peer_count(&self) -> usize {
@@ -149,12 +150,12 @@ impl Relay {
     /// Apply a (re)loaded config. Removed keys, and clients that lost access,
     /// lose their registration and sessions immediately.
     pub fn reload(&mut self, cfg: &Config) {
-        if cfg.private_key != self.secret.to_bytes() {
+        if cfg.private_key.public_key() != self.public_key() {
             warn!("changing private_key requires a restart; keeping the current key");
         }
         self.gate = cfg.gate;
         self.tunnel_ip = cfg.tunnel_ip;
-        self.limiter.set_rate(cfg.rate_per_sec);
+        self.limiter.set_rate(cfg.handshake_rate.per_sec());
         let mut old = std::mem::take(&mut self.peers);
         for p in &cfg.peers {
             let registrable = p.role == Role::Server || cfg.gate == Gate::Register;
@@ -167,7 +168,7 @@ impl Relay {
             let state = PeerState {
                 name: p.name.clone(),
                 role: p.role,
-                mac1: packet::mac1_key(&p.pubkey),
+                mac1: packet::mac1_key(p.pubkey.as_bytes()),
                 servers: p.servers.clone(),
                 tunn,
             };
@@ -190,7 +191,7 @@ impl Relay {
     }
 
     /// A relay tunnel whose index range no live session uses.
-    fn new_tunn(&mut self, peer: Key) -> Tunn {
+    fn new_tunn(&mut self, peer: PeerKey) -> Tunn {
         let base = loop {
             let b = OsRng.next_u32() & 0x00ff_ffff;
             if !self.tunn_by_base.contains_key(&b) && !self.sessions.has_prefix(b) {
@@ -216,24 +217,24 @@ impl Relay {
         self.tunn_by_base.contains_key(&(idx >> 8))
     }
 
-    fn role_of(&self, k: &Key) -> Option<Role> {
+    fn role_of(&self, k: &PeerKey) -> Option<Role> {
         self.peers.get(k).map(|p| p.role)
     }
 
     /// The peer with this role whose key the packet's mac1 was made for.
-    fn mac1_peer(&self, pkt: &[u8], role: Role) -> Option<Key> {
+    fn mac1_peer(&self, pkt: &[u8], role: Role) -> Option<PeerKey> {
         self.peers.iter().find(|(_, p)| p.role == role && packet::mac1_matches(&p.mac1, pkt)).map(|(k, _)| *k)
     }
 
-    fn may_reach(&self, client: &Key, server: &Key) -> bool {
+    fn may_reach(&self, client: &PeerKey, server: &PeerKey) -> bool {
         self.peers.get(client).is_some_and(|p| p.role == Role::Client && p.servers.contains(server))
     }
 
-    fn server_at(&self, src: SocketAddr, now: Instant) -> Option<Key> {
+    fn server_at(&self, src: SocketAddr, now: Instant) -> Option<PeerKey> {
         self.registry.key_at(src, now).filter(|k| self.role_of(k) == Some(Role::Server))
     }
 
-    fn client_addr(&self, c: &Key, now: Instant) -> Option<SocketAddr> {
+    fn client_addr(&self, c: &PeerKey, now: Instant) -> Option<SocketAddr> {
         match self.gate {
             Gate::Register => self.registry.addr(c, now),
             _ => self.learned.get(c).copied(),
@@ -281,13 +282,13 @@ impl Relay {
             }
             _ => None,
         };
-        let Some(key) = half.map(|h| h.peer_static_public) else {
+        let Some(key) = half.map(|h| PeerKey::from(h.peer_static_public)) else {
             self.reject(Reason::TunnelAuth, src);
             return;
         };
         match self.peers.get(&key) {
             None => {
-                debug!(%src, key = %encode_key(&key), "registration from key not in allowlist");
+                debug!(%src, %key, "registration from key not in allowlist");
                 self.reject(Reason::UnknownKey, src);
             }
             Some(p) if p.tunn.is_none() => {
@@ -299,7 +300,7 @@ impl Relay {
 
     /// Feed a datagram to `key`'s registration tunnel; on authentication,
     /// (re-)register the source address.
-    fn tunnel_rx(&mut self, key: Key, src: SocketAddr, pkt: &[u8], now: Instant) {
+    fn tunnel_rx(&mut self, key: PeerKey, src: SocketAddr, pkt: &[u8], now: Instant) {
         let Some(PeerState { name, tunn: Some(tunn), .. }) = self.peers.get_mut(&key) else { return };
         let (authenticated, reply) = match tunn.decapsulate(Some(src.ip()), pkt, &mut self.scratch) {
             TunnResult::Err(e) => {
@@ -504,7 +505,7 @@ impl Relay {
 }
 
 /// May this session survive a config change?
-fn session_allowed(peers: &HashMap<Key, PeerState>, gate: Gate, s: &Session) -> bool {
+fn session_allowed(peers: &HashMap<PeerKey, PeerState>, gate: Gate, s: &Session) -> bool {
     if !peers.get(&s.server).is_some_and(|p| p.role == Role::Server) {
         return false;
     }

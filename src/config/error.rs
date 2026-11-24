@@ -2,12 +2,16 @@ use std::fmt;
 
 use super::Gate;
 
-#[derive(Debug, thiserror::Error)]
-pub enum KeyError {
-    #[error("invalid base64")]
-    Base64(#[from] base64::DecodeError),
-    #[error("key must be 32 bytes, got {0}")]
-    Length(usize),
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RateError {
+    #[error("missing unit, expected \"<n>/s\" or \"<n>/m\"")]
+    MissingUnit,
+    #[error("invalid number {0:?}")]
+    Number(String),
+    #[error("unknown unit {0:?}")]
+    Unit(String),
+    #[error("rate must be positive")]
+    NotPositive,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -16,16 +20,6 @@ pub enum ConfigError {
     Read(#[from] std::io::Error),
     #[error("invalid toml")]
     Parse(#[from] toml::de::Error),
-    #[error("invalid private_key")]
-    PrivateKey(#[source] KeyError),
-    #[error("invalid pubkey for {name}")]
-    Pubkey {
-        name: String,
-        #[source]
-        source: KeyError,
-    },
-    #[error("invalid handshake_rate_per_ip {value:?}")]
-    Rate { value: String },
     #[error("at least one [[server]] is required")]
     NoServer,
     #[error("{name} uses the relay's own key")]

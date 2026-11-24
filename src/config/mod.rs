@@ -1,16 +1,17 @@
 //! `relay.toml` loading and validation.
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
-use x25519_dalek::{PublicKey, StaticSecret};
+
+use serde::Deserialize;
+
+use crate::key::{PeerKey, PrivateKey};
 
 pub mod error;
-pub use error::{ConfigError, ConfigWarning, KeyError};
-
-pub type Key = [u8; 32];
+mod rate;
+pub use error::{ConfigError, ConfigWarning, RateError};
+pub use rate::Rate;
 
 /// How strictly clients are admitted before their traffic reaches a server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -35,12 +36,12 @@ pub enum Role {
 struct RawConfig {
     #[serde(default = "default_listen")]
     listen: SocketAddr,
-    private_key: String,
+    private_key: PrivateKey,
     tunnel_ip: Ipv4Addr,
     #[serde(default = "default_gate")]
     client_gate: Gate,
-    #[serde(default = "default_rate")]
-    handshake_rate_per_ip: String,
+    #[serde(default)]
+    handshake_rate_per_ip: Rate,
     #[serde(default)]
     server: Vec<RawServer>,
     #[serde(default)]
@@ -51,14 +52,14 @@ struct RawConfig {
 #[serde(deny_unknown_fields)]
 struct RawServer {
     name: String,
-    pubkey: String,
+    pubkey: PeerKey,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawClient {
     name: String,
-    pubkey: String,
+    pubkey: PeerKey,
     servers: Vec<String>,
 }
 
@@ -68,49 +69,24 @@ fn default_listen() -> SocketAddr {
 fn default_gate() -> Gate {
     Gate::Register
 }
-fn default_rate() -> String {
-    "10/s".into()
-}
 
 #[derive(Debug, Clone)]
 pub struct Peer {
     pub name: String,
-    pub pubkey: Key,
+    pub pubkey: PeerKey,
     pub role: Role,
     /// For clients: the servers it may reach.
-    pub servers: Vec<Key>,
+    pub servers: Vec<PeerKey>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
-    pub private_key: Key,
+    pub private_key: PrivateKey,
     pub tunnel_ip: Ipv4Addr,
     pub gate: Gate,
-    pub rate_per_sec: f64,
+    pub handshake_rate: Rate,
     pub peers: Vec<Peer>,
-}
-
-pub fn decode_key(s: &str) -> Result<Key, KeyError> {
-    let v = STANDARD.decode(s.trim())?;
-    <Key>::try_from(v.as_slice()).map_err(|_| KeyError::Length(v.len()))
-}
-
-pub fn encode_key(k: &Key) -> String {
-    STANDARD.encode(k)
-}
-
-/// "10/s", "600/m" or "10" -> events per second.
-pub fn parse_rate(s: &str) -> Result<f64, ConfigError> {
-    let bad = || ConfigError::Rate { value: s.to_owned() };
-    let (n, unit) = s.trim().split_once('/').unwrap_or((s.trim(), "s"));
-    let n: f64 = n.trim().parse().map_err(|_| bad())?;
-    let div = match unit.trim() {
-        "s" => 1.0,
-        "m" => 60.0,
-        _ => return Err(bad()),
-    };
-    if n.is_finite() && n > 0.0 { Ok(n / div) } else { Err(bad()) }
 }
 
 impl Config {
@@ -122,20 +98,15 @@ impl Config {
     /// Parse and validate config text.
     pub fn parse(s: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
-        let private_key = decode_key(&raw.private_key).map_err(ConfigError::PrivateKey)?;
-        let relay_pub = PublicKey::from(&StaticSecret::from(private_key)).to_bytes();
-        let rate_per_sec = parse_rate(&raw.handshake_rate_per_ip)?;
         if raw.server.is_empty() {
             return Err(ConfigError::NoServer);
         }
-
+        let relay_pub = raw.private_key.public_key();
         let mut peers: Vec<Peer> = Vec::new();
         let (mut names, mut keys) = (HashSet::new(), HashSet::new());
-        let servers = raw.server.iter().map(|s| (&s.name, &s.pubkey, Role::Server, None));
-        let clients = raw.client.iter().map(|c| (&c.name, &c.pubkey, Role::Client, Some(&c.servers)));
+        let servers = raw.server.iter().map(|s| (&s.name, s.pubkey, Role::Server, None));
+        let clients = raw.client.iter().map(|c| (&c.name, c.pubkey, Role::Client, Some(&c.servers)));
         for (name, pubkey, role, allowed) in servers.chain(clients) {
-            let pubkey =
-                decode_key(pubkey).map_err(|source| ConfigError::Pubkey { name: name.clone(), source })?;
             if pubkey == relay_pub {
                 return Err(ConfigError::RelayKeyReused { name: name.clone() });
             }
@@ -160,16 +131,12 @@ impl Config {
         }
         Ok(Config {
             listen: raw.listen,
-            private_key,
+            private_key: raw.private_key,
             tunnel_ip: raw.tunnel_ip,
             gate: raw.client_gate,
-            rate_per_sec,
+            handshake_rate: raw.handshake_rate_per_ip,
             peers,
         })
-    }
-
-    pub fn relay_pubkey(&self) -> Key {
-        PublicKey::from(&StaticSecret::from(self.private_key)).to_bytes()
     }
 
     /// List valid but probably unintended settings.

@@ -11,6 +11,13 @@ pub struct Key {
     pub pk: PublicKey,
 }
 
+impl Key {
+    /// The public key as the relay identifies peers.
+    pub fn id(&self) -> wg_relay::key::PeerKey {
+        self.pk.into()
+    }
+}
+
 pub fn key() -> Key {
     let sk = StaticSecret::random_from_rng(OsRng);
     let pk = PublicKey::from(&sk);
@@ -22,7 +29,13 @@ pub fn tunn(me: &Key, peer: &Key) -> Tunn {
 }
 
 pub fn b64(k: &PublicKey) -> String {
-    wg_relay::config::encode_key(k.as_bytes())
+    wg_relay::key::PeerKey::from(*k).to_string()
+}
+
+/// The private key as base64, as written in a config file.
+pub fn b64_sk(k: &Key) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(k.sk.to_bytes())
 }
 
 pub fn initiation(t: &mut Tunn) -> Vec<u8> {
