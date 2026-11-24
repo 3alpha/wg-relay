@@ -3,6 +3,9 @@
 use blake2::digest::{KeyInit, Mac, consts::U16};
 use blake2::{Blake2s256, Blake2sMac, Digest};
 
+pub mod error;
+pub use error::ParseError;
+
 pub const INIT_LEN: usize = 148;
 pub const RESP_LEN: usize = 92;
 pub const COOKIE_LEN: usize = 64;
@@ -32,14 +35,6 @@ impl Packet {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseError {
-    TooShort,
-    BadType,
-    BadReserved,
-    BadLength,
-}
-
 fn le32(b: &[u8], off: usize) -> Result<u32, ParseError> {
     b.get(off..off + 4)
         .and_then(|s| <[u8; 4]>::try_from(s).ok())
@@ -55,9 +50,8 @@ pub fn parse(b: &[u8]) -> Result<Packet, ParseError> {
     if b[1..4] != [0, 0, 0] {
         return Err(ParseError::BadReserved);
     }
-    let exact = |n: usize| {
-        if b.len() == n { Ok(()) } else { Err(ParseError::BadLength) }
-    };
+    let bad_length = ParseError::BadLength { kind: b[0], len: b.len() };
+    let exact = |n: usize| if b.len() == n { Ok(()) } else { Err(bad_length) };
     match b[0] {
         1 => {
             exact(INIT_LEN)?;
@@ -71,9 +65,9 @@ pub fn parse(b: &[u8]) -> Result<Packet, ParseError> {
             exact(COOKIE_LEN)?;
             Ok(Packet::Cookie { receiver: le32(b, 4)? })
         }
-        4 if b.len() < DATA_MIN_LEN => Err(ParseError::BadLength),
+        4 if b.len() < DATA_MIN_LEN => Err(bad_length),
         4 => Ok(Packet::Data { receiver: le32(b, 4)? }),
-        _ => Err(ParseError::BadType),
+        t => Err(ParseError::BadType(t)),
     }
 }
 

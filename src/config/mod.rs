@@ -7,6 +7,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+pub mod error;
+pub use error::{ConfigError, ConfigWarning, KeyError};
+
 pub type Key = [u8; 32];
 
 /// How strictly clients are admitted before their traffic reaches a server.
@@ -88,9 +91,9 @@ pub struct Config {
     pub peers: Vec<Peer>,
 }
 
-pub fn decode_key(s: &str) -> Result<Key, String> {
-    let v = STANDARD.decode(s.trim()).map_err(|e| format!("invalid base64 key: {e}"))?;
-    <Key>::try_from(v.as_slice()).map_err(|_| format!("key must be 32 bytes, got {}", v.len()))
+pub fn decode_key(s: &str) -> Result<Key, KeyError> {
+    let v = STANDARD.decode(s.trim())?;
+    <Key>::try_from(v.as_slice()).map_err(|_| KeyError::Length(v.len()))
 }
 
 pub fn encode_key(k: &Key) -> String {
@@ -98,30 +101,32 @@ pub fn encode_key(k: &Key) -> String {
 }
 
 /// "10/s", "600/m" or "10" -> events per second.
-pub fn parse_rate(s: &str) -> Result<f64, String> {
+pub fn parse_rate(s: &str) -> Result<f64, ConfigError> {
+    let bad = || ConfigError::Rate { value: s.to_owned() };
     let (n, unit) = s.trim().split_once('/').unwrap_or((s.trim(), "s"));
-    let n: f64 = n.trim().parse().map_err(|_| format!("bad rate {s:?}"))?;
+    let n: f64 = n.trim().parse().map_err(|_| bad())?;
     let div = match unit.trim() {
         "s" => 1.0,
         "m" => 60.0,
-        _ => return Err(format!("bad rate unit in {s:?} (use /s or /m)")),
+        _ => return Err(bad()),
     };
-    if n.is_finite() && n > 0.0 { Ok(n / div) } else { Err(format!("rate must be positive: {s:?}")) }
+    if n.is_finite() && n > 0.0 { Ok(n / div) } else { Err(bad()) }
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<Self, String> {
-        let s = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Self::parse(&s)
+    /// Read and validate a config file.
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        Self::parse(&std::fs::read_to_string(path)?)
     }
 
-    pub fn parse(s: &str) -> Result<Self, String> {
-        let raw: RawConfig = toml::from_str(s).map_err(|e| e.to_string())?;
-        let private_key = decode_key(&raw.private_key).map_err(|e| format!("private_key: {e}"))?;
+    /// Parse and validate config text.
+    pub fn parse(s: &str) -> Result<Self, ConfigError> {
+        let raw: RawConfig = toml::from_str(s)?;
+        let private_key = decode_key(&raw.private_key).map_err(ConfigError::PrivateKey)?;
         let relay_pub = PublicKey::from(&StaticSecret::from(private_key)).to_bytes();
         let rate_per_sec = parse_rate(&raw.handshake_rate_per_ip)?;
         if raw.server.is_empty() {
-            return Err("at least one [[server]] is required".into());
+            return Err(ConfigError::NoServer);
         }
 
         let mut peers: Vec<Peer> = Vec::new();
@@ -129,15 +134,16 @@ impl Config {
         let servers = raw.server.iter().map(|s| (&s.name, &s.pubkey, Role::Server, None));
         let clients = raw.client.iter().map(|c| (&c.name, &c.pubkey, Role::Client, Some(&c.servers)));
         for (name, pubkey, role, allowed) in servers.chain(clients) {
-            let pubkey = decode_key(pubkey).map_err(|e| format!("{name}: {e}"))?;
+            let pubkey =
+                decode_key(pubkey).map_err(|source| ConfigError::Pubkey { name: name.clone(), source })?;
             if pubkey == relay_pub {
-                return Err(format!("{name}: pubkey equals the relay's own key"));
+                return Err(ConfigError::RelayKeyReused { name: name.clone() });
             }
             if !keys.insert(pubkey) {
-                return Err(format!("{name}: duplicate pubkey"));
+                return Err(ConfigError::DuplicatePubkey { name: name.clone() });
             }
             if !names.insert(name.clone()) {
-                return Err(format!("duplicate name {name}"));
+                return Err(ConfigError::DuplicateName { name: name.clone() });
             }
             let servers = allowed
                 .into_iter()
@@ -147,7 +153,7 @@ impl Config {
                         .iter()
                         .find(|p| p.role == Role::Server && &p.name == s)
                         .map(|p| p.pubkey)
-                        .ok_or_else(|| format!("client {name}: unknown server {s:?}"))
+                        .ok_or_else(|| ConfigError::UnknownServer { client: name.clone(), server: s.clone() })
                 })
                 .collect::<Result<_, _>>()?;
             peers.push(Peer { name: name.clone(), pubkey, role, servers });
@@ -166,16 +172,18 @@ impl Config {
         PublicKey::from(&StaticSecret::from(self.private_key)).to_bytes()
     }
 
-    /// Valid but probably unintended settings.
-    pub fn warnings(&self) -> Vec<String> {
+    /// List valid but probably unintended settings.
+    pub fn warnings(&self) -> Vec<ConfigWarning> {
         let clients = self.peers.iter().filter(|p| p.role == Role::Client);
         let mut w = Vec::new();
         if self.gate != Gate::None && clients.clone().next().is_none() {
-            w.push(format!("client_gate = {:?} but no [[client]] entries: no client can connect", self.gate));
+            w.push(ConfigWarning::NoClients { gate: self.gate });
         }
-        for c in clients.filter(|c| c.servers.is_empty()) {
-            w.push(format!("client {} may not reach any server", c.name));
-        }
+        w.extend(
+            clients
+                .filter(|c| c.servers.is_empty())
+                .map(|c| ConfigWarning::ClientWithoutServers { name: c.name.clone() }),
+        );
         w
     }
 }

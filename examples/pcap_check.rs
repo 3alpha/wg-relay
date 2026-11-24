@@ -19,7 +19,7 @@ use std::error::Error as _;
 use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use wg_relay::config::decode_key;
+use wg_relay::config::{KeyError, decode_key};
 use wg_relay::packet;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -40,8 +40,12 @@ enum CheckError {
     NotPcap,
     #[error("unsupported pcap link type {0}")]
     LinkType(u32),
-    #[error("invalid {arg} key: {reason}")]
-    Key { arg: &'static str, reason: String },
+    #[error("invalid {arg} key")]
+    Key {
+        arg: &'static str,
+        #[source]
+        source: KeyError,
+    },
     #[error("invalid relay address")]
     Addr(#[from] AddrParseError),
     #[error("marker must be an even-length hex string, got {0:?}")]
@@ -95,7 +99,7 @@ fn parse_pcap(b: &[u8]) -> Result<Vec<Udp>, CheckError> {
 }
 
 fn secret(arg: &'static str, b64: &str) -> Result<StaticSecret, CheckError> {
-    decode_key(b64).map(StaticSecret::from).map_err(|reason| CheckError::Key { arg, reason })
+    decode_key(b64).map(StaticSecret::from).map_err(|source| CheckError::Key { arg, source })
 }
 
 fn parse_marker(hex: &str) -> Result<Vec<u8>, CheckError> {

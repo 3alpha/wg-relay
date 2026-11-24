@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod error;
 pub mod packet;
 pub mod relay;
 pub mod tables;

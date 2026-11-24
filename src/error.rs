@@ -1,0 +1,47 @@
+use std::error::Error;
+use std::fmt;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use crate::config::ConfigError;
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("unknown or incomplete argument {arg:?}")]
+    Usage { arg: String },
+    #[error("invalid config {path}")]
+    Config {
+        path: PathBuf,
+        #[source]
+        source: ConfigError,
+    },
+    #[error("failed to start the async runtime")]
+    Runtime(#[source] std::io::Error),
+    #[error("failed to bind {addr}")]
+    Bind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to install the {signal} handler")]
+    Signal {
+        signal: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Display an error followed by its `source()` chain, joined with ": ".
+pub struct Report<'a>(pub &'a dyn Error);
+
+impl fmt::Display for Report<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)?;
+        let mut source = self.0.source();
+        while let Some(e) = source {
+            write!(f, ": {e}")?;
+            source = e.source();
+        }
+        Ok(())
+    }
+}

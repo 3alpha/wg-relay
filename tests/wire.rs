@@ -53,17 +53,17 @@ fn size_and_header_checks() {
     let (mut ta, mut tb) = (tunn(&a, &b), tunn(&b, &a));
     let (init, resp, ka) = handshake(&mut ta, &mut tb);
 
-    for (pkt, len) in [(&init, 148), (&resp, 92)] {
-        assert_eq!(packet::parse(&pkt[..len - 1]), Err(BadLength));
+    for (pkt, kind, len) in [(&init, 1, 148), (&resp, 2, 92)] {
+        assert_eq!(packet::parse(&pkt[..len - 1]), Err(BadLength { kind, len: len - 1 }));
         let mut long = pkt.clone();
         long.push(0);
-        assert_eq!(packet::parse(&long), Err(BadLength));
+        assert_eq!(packet::parse(&long), Err(BadLength { kind, len: len + 1 }));
     }
     let mut cookie = vec![3, 0, 0, 0];
     cookie.resize(64, 0);
     assert!(packet::parse(&cookie).is_ok());
-    assert_eq!(packet::parse(&cookie[..63]), Err(BadLength));
-    assert_eq!(packet::parse(&ka[..31]), Err(BadLength));
+    assert_eq!(packet::parse(&cookie[..63]), Err(BadLength { kind: 3, len: 63 }));
+    assert_eq!(packet::parse(&ka[..31]), Err(BadLength { kind: 4, len: 31 }));
     assert!(packet::parse(&[ka.clone(), vec![0; 1000]].concat()).is_ok());
 
     let mut bad = init.clone();
@@ -72,7 +72,7 @@ fn size_and_header_checks() {
     for t in [0u8, 5, 255] {
         let mut p = init.clone();
         p[0] = t;
-        assert_eq!(packet::parse(&p), Err(BadType));
+        assert_eq!(packet::parse(&p), Err(BadType(t)));
     }
     assert_eq!(packet::parse(&[]), Err(TooShort));
     assert_eq!(packet::parse(&[1, 0, 0]), Err(TooShort));
@@ -196,9 +196,9 @@ fn init_rate_limiter() {
 #[test]
 fn rate_strings() {
     use wg_relay::config::parse_rate;
-    assert_eq!(parse_rate("10/s"), Ok(10.0));
-    assert_eq!(parse_rate("120/m"), Ok(2.0));
-    assert_eq!(parse_rate(" 5 "), Ok(5.0));
+    assert_eq!(parse_rate("10/s").ok(), Some(10.0));
+    assert_eq!(parse_rate("120/m").ok(), Some(2.0));
+    assert_eq!(parse_rate(" 5 ").ok(), Some(5.0));
     for bad in ["0/s", "-1/s", "x/s", "10/h", ""] {
         assert!(parse_rate(bad).is_err(), "{bad}");
     }
