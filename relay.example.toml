@@ -1,0 +1,21 @@
+# wg-relay configuration. Validate with: wg-relay --check-config -c relay.toml
+# Reload with SIGHUP (listen and private_key changes need a restart).
+listen = "0.0.0.0:51820"
+# The relay's own WireGuard private key (wg genkey). Used only for the
+# registration tunnels; it can never decrypt client<->server traffic.
+private_key = "<base64 private key>"
+# Address the relay answers pings on inside the registration tunnels.
+tunnel_ip = "10.99.0.254"
+# "none" | "response" | "register" (default) -- see README.
+client_gate = "register"
+# Handshake initiations per source IP: "<n>/s" or "<n>/m". Burst = 2 s worth.
+handshake_rate_per_ip = "10/s"
+
+[[server]]
+name = "main"
+pubkey = "<base64 public key of the server>"
+
+[[client]]
+name = "laptop"
+pubkey = "<base64 public key of the laptop>"
+servers = ["main"]           # which servers this client may reach

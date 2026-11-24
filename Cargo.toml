@@ -1,0 +1,16 @@
+[package]
+name = "wg-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+base64 = "0.22"
+blake2 = "0.10"
+boringtun = { version = "0.7.1", default-features = false }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "net", "time", "macros", "signal", "sync"] }
+toml = "1.2.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }

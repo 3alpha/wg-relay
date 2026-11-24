@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# Integration test for wg-relay. Run as root (or in a --privileged container).
+#
+#   srv (10.10.0.2) -- natsrv 192.0.2.10 --+
+#   c1  (10.11.0.2) -- natc1  192.0.2.11 --+-- br0 192.0.2.1 = relay :51820
+#   c2  (10.12.0.2) -- natc2  192.0.2.12 --+
+#   st  (10.13.0.2) -- natst  192.0.2.13 --+
+#
+# Every host runs kernel WireGuard behind its own NAT (MASQUERADE, unsolicited
+# inbound dropped). Tunnel IPs: srv 10.99.0.1, c1 .11, c2 .12, st .13, relay .254.
+# c1 and c2 are allowlisted for server "main"; st (stranger) is not, although it
+# knows the server's public key. For each client_gate (none, response, register):
+#   1. the server (and in `register`, the clients) register with the relay
+#   2. c1 and c2 ping the server
+#   3. the stranger gets nothing through; in `register` mode a capture on the
+#      server's LAN proves its handshakes never reach the server (in the other
+#      modes the same check finds them, as a positive control)
+#   4. pings still work after a server-initiated and a client-initiated rekey
+#   5. (response, register) SIGHUP after removing c2 cuts c2 off immediately
+#   6. the relay capture: forwarded handshakes cannot be opened with the relay
+#      key, forwarding is byte-identical, the ping payload never appears
+#
+# Needs: ip, wg, iptables, tcpdump, ping, the wireguard module, and
+# `cargo build --bins --examples` (or WG_RELAY_BIN / PCAP_CHECK_BIN).
+set -euo pipefail
+
+[[ $EUID -eq 0 ]] || { echo "netns.sh must run as root" >&2; exit 1; }
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+BIN=${WG_RELAY_BIN:-$ROOT/target/debug/wg-relay}
+CHECK=${PCAP_CHECK_BIN:-$ROOT/target/debug/examples/pcap_check}
+for t in ip wg iptables tcpdump ping "$BIN" "$CHECK"; do
+    command -v "$t" >/dev/null || { echo "missing: $t" >&2; exit 1; }
+done
+MODES=${MODES:-none response register}
+
+P="wrt$$"
+HOSTS=(srv c1 c2 st)
+NSS=(relay "${HOSTS[@]}" natsrv natc1 natc2 natst)
+declare -A NET=([srv]=10 [c1]=11 [c2]=12 [st]=13)
+declare -A TIP=([srv]=10.99.0.1 [c1]=10.99.0.11 [c2]=10.99.0.12 [st]=10.99.0.13)
+RELAY=192.0.2.1:51820
+MARKER=c0ffee5ca1ab1e42 # ping payload pattern; must never appear on the wire
+WORK=$(mktemp -d)
+PIDS=()
+LOG=/dev/null
+x() { local ns=$1; shift; ip netns exec "$P-$ns" "$@"; }
+step() { echo "==> $*"; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+stop_bg() {
+    for p in "${PIDS[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
+    for p in "${PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+    PIDS=()
+}
+
+cleanup() {
+    local rc=$?
+    stop_bg
+    if [[ $rc -ne 0 ]]; then
+        echo "---- relay log ($LOG) ----"; tail -n 60 "$LOG" 2>/dev/null || true
+        for n in "${HOSTS[@]}"; do echo "---- wg show ($n) ----"; x "$n" wg show 2>/dev/null || true; done
+        echo "FAILED (rc=$rc); artifacts kept in $WORK"
+    else
+        rm -rf "$WORK"
+    fi
+    for n in "${NSS[@]}"; do ip netns del "$P-$n" 2>/dev/null || true; done
+}
+trap cleanup EXIT
+
+step "building topology"
+for n in "${NSS[@]}"; do ip netns add "$P-$n"; x "$n" ip link set lo up; done
+x relay ip link add br0 type bridge
+x relay ip addr add 192.0.2.1/24 dev br0
+x relay ip link set br0 up
+for h in "${HOSTS[@]}"; do
+    nat="nat$h" i=${NET[$h]}
+    ip link add wan netns "$P-$nat" type veth peer name "up$h" netns "$P-relay"
+    x relay ip link set "up$h" master br0 up
+    x "$nat" ip addr add "192.0.2.$i/24" dev wan
+    x "$nat" ip link set wan up
+    ip link add lan netns "$P-$nat" type veth peer name eth0 netns "$P-$h"
+    x "$nat" ip addr add "10.$i.0.1/24" dev lan
+    x "$nat" ip link set lan up
+    x "$h" ip addr add "10.$i.0.2/24" dev eth0
+    x "$h" ip link set eth0 up
+    x "$h" ip route add default via "10.$i.0.1"
+    x "$nat" sh -c "echo 1 >/proc/sys/net/ipv4/ip_forward"
+    x "$nat" iptables -t nat -A POSTROUTING -o wan -j MASQUERADE
+    x "$nat" iptables -A FORWARD -i wan -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    x "$nat" iptables -A FORWARD -i wan -j DROP
+done
+
+umask 077
+for k in relay "${HOSTS[@]}"; do
+    wg genkey >"$WORK/$k.key"
+    wg pubkey <"$WORK/$k.key" >"$WORK/$k.pub"
+done
+pub() { cat "$WORK/$1.pub"; }
+
+write_config() { # gate clients...
+    local gate=$1; shift
+    {
+        echo "private_key = \"$(cat "$WORK/relay.key")\""
+        echo "tunnel_ip = \"10.99.0.254\""
+        echo "client_gate = \"$gate\""
+        echo "handshake_rate_per_ip = \"10/s\""
+        printf '[[server]]\nname = "main"\npubkey = "%s"\n' "$(pub srv)"
+        for c in "$@"; do printf '[[client]]\nname = "%s"\npubkey = "%s"\nservers = ["main"]\n' "$c" "$(pub "$c")"; done
+    } >"$WORK/relay.toml"
+}
+
+peer_args() { # peer -> wg set arguments for that peer (endpoint is always the relay)
+    case $1 in
+        relay) echo "peer $(pub relay) endpoint $RELAY allowed-ips 10.99.0.254/32 persistent-keepalive 25" ;;
+        *) echo "peer $(pub "$1") endpoint $RELAY allowed-ips ${TIP[$1]}/32 persistent-keepalive 25" ;;
+    esac
+}
+
+setup_wg() { # gate
+    for h in "${HOSTS[@]}"; do
+        local peers
+        if [[ $h == srv ]]; then
+            peers="relay c1 c2" # the server does not know the stranger
+        elif [[ $1 == register ]]; then
+            peers="relay srv"
+        else
+            peers="srv"
+        fi
+        x "$h" ip link del wg0 2>/dev/null || true
+        x "$h" ip link add wg0 type wireguard
+        local args=""
+        for p in $peers; do args+=" $(peer_args "$p")"; done
+        # shellcheck disable=SC2086
+        x "$h" wg set wg0 private-key "$WORK/$h.key" listen-port 51820 $args
+        x "$h" ip addr add "${TIP[$h]}/24" dev wg0
+        x "$h" ip link set wg0 up
+    done
+}
+
+retry_ping() { # ns target tries
+    for _ in $(seq "$3"); do x "$1" ping -c1 -W1 "$2" >/dev/null 2>&1 && return 0; done
+    return 1
+}
+must_ping() { retry_ping "$1" "$2" "${3:-20}" || fail "$1 cannot reach $2"; x "$1" ping -q -c3 -i0.2 -W2 -p "$MARKER" "$2" >/dev/null || fail "$1 -> $2 lossy"; }
+no_ping() { if x "$1" ping -c4 -i0.5 -W1 "$2" >/dev/null 2>&1; then fail "$1 unexpectedly reached $2"; fi; }
+
+run_mode() {
+    local gate=$1 d="$WORK/$1"
+    mkdir -p "$d"
+    LOG="$d/relay.log"
+    step "[$gate] starting relay and captures"
+    write_config "$gate" c1 c2
+    "$BIN" --check-config -c "$WORK/relay.toml" >"$d/check.txt"
+    ip netns exec "$P-relay" tcpdump -i br0 -U -n -w "$d/relay.pcap" udp port 51820 2>"$d/tcpdump-relay.log" &
+    PIDS+=($!)
+    ip netns exec "$P-srv" tcpdump -i eth0 -U -n -w "$d/srv.pcap" udp 2>"$d/tcpdump-srv.log" &
+    PIDS+=($!)
+    for f in "$d"/tcpdump-*.log; do
+        for _ in $(seq 50); do grep -q listening "$f" && break; sleep 0.1; done
+    done
+    RUST_LOG=${RUST_LOG:-wg_relay=debug,info} ip netns exec "$P-relay" "$BIN" -c "$WORK/relay.toml" >"$LOG" 2>&1 &
+    PIDS+=($!)
+    local relay_pid=$!
+    sleep 0.3
+    setup_wg "$gate"
+
+    step "[$gate] 1. registration"
+    retry_ping srv 10.99.0.254 15 || fail "server not registered"
+    if [[ $gate == register ]]; then
+        retry_ping c1 10.99.0.254 15 || fail "c1 not registered"
+        retry_ping c2 10.99.0.254 15 || fail "c2 not registered"
+    fi
+
+    step "[$gate] 2. allowlisted clients ping the server"
+    must_ping c1 10.99.0.1
+    must_ping c2 10.99.0.1
+
+    step "[$gate] 3. the stranger gets nothing through"
+    no_ping st 10.99.0.1
+    if [[ $gate == register ]]; then no_ping st 10.99.0.254; fi
+
+    step "[$gate] 4. rekey: server-initiated (c1), then client-initiated (c2)"
+    x srv wg set wg0 peer "$(pub c1)" remove
+    # shellcheck disable=SC2046
+    x srv wg set wg0 $(peer_args c1)
+    retry_ping srv 10.99.0.11 20 || fail "server-initiated rekey to c1 failed"
+    must_ping c1 10.99.0.1
+    x c2 wg set wg0 peer "$(pub srv)" remove
+    # shellcheck disable=SC2046
+    x c2 wg set wg0 $(peer_args srv)
+    must_ping c2 10.99.0.1
+    must_ping c1 10.99.0.1
+
+    if [[ $gate != none ]]; then
+        step "[$gate] 5. SIGHUP after removing c2 revokes it immediately"
+        write_config "$gate" c1
+        kill -HUP "$relay_pid"
+        for _ in $(seq 20); do grep -q 'dropped_sessions=[1-9]' "$LOG" && break; sleep 0.1; done
+        grep -q 'peer removed from config.*peer=c2' "$LOG" || fail "reload did not remove c2"
+        no_ping c2 10.99.0.1
+        must_ping c1 10.99.0.1
+    fi
+
+    stop_bg
+    step "[$gate] 6. checking captures"
+    "$CHECK" "$d/relay.pcap" "$RELAY" "$(cat "$WORK/relay.key")" "$(cat "$WORK/srv.key")" "$MARKER" | sed 's/^/    /'
+    "$CHECK" --initiators "$d/srv.pcap" "$(cat "$WORK/srv.key")" >"$d/initiators.txt"
+    # Control: c2's rekey in step 4 is always client-initiated, so it must show up.
+    grep -qxF "$(pub c2)" "$d/initiators.txt" || fail "capture at server shows no c2 handshake"
+    if [[ $gate == register ]]; then
+        if grep -qxF "$(pub st)" "$d/initiators.txt"; then fail "stranger's handshake reached the server"; fi
+        echo "    server LAN capture: no stranger handshakes"
+        grep -q 'reject reason=registration_unknown_key' "$LOG" || fail "no registration_unknown_key reject logged"
+        grep -q 'reject reason=src_not_registered_client' "$LOG" || fail "no src_not_registered_client reject logged"
+    else
+        grep -qxF "$(pub st)" "$d/initiators.txt" || fail "positive control: stranger handshake should reach server"
+        echo "    server LAN capture: stranger handshakes present (expected, server drops them)"
+    fi
+    grep -E 'shutting down' "$LOG" | sed 's/^.*metrics=/    metrics: /'
+    echo "[$gate] PASSED"
+}
+
+for m in $MODES; do run_mode "$m"; done
+echo "ALL NETNS CHECKS PASSED ($MODES)"
