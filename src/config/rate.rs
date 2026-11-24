@@ -55,3 +55,32 @@ impl fmt::Display for Rate {
         write!(f, "{}/s", self.per_sec)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn per_sec(s: &str) -> Result<f64, RateError> {
+        s.parse::<Rate>().map(Rate::per_sec)
+    }
+
+    #[test]
+    fn parses_per_second_and_per_minute() {
+        assert_eq!(per_sec("10/s"), Ok(10.0));
+        assert_eq!(per_sec(" 120 / m "), Ok(2.0));
+    }
+
+    #[test]
+    fn rejects_missing_unit_instead_of_defaulting() {
+        assert_eq!(per_sec("10"), Err(RateError::MissingUnit));
+    }
+
+    #[test]
+    fn rejects_bad_numbers_units_and_non_positive_rates() {
+        assert_eq!(per_sec("0/s"), Err(RateError::NotPositive));
+        assert_eq!(per_sec("-1/s"), Err(RateError::NotPositive));
+        assert_eq!(per_sec("inf/s"), Err(RateError::NotPositive));
+        assert_eq!(per_sec("x/s"), Err(RateError::Number("x".into())));
+        assert_eq!(per_sec("10/h"), Err(RateError::Unit("h".into())));
+    }
+}

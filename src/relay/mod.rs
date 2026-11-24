@@ -46,7 +46,7 @@ pub struct Relay {
     /// Index prefix of each relay tunnel. Forwarded sessions may never use
     /// these (see `reserved`).
     tunn_by_prefix: HashMap<IdxPrefix, PeerKey>,
-    registry: Registry<PeerKey>,
+    registry: Registry,
     /// Client addresses learned from accepted server responses (gates none/response).
     learned: HashMap<PeerKey, SocketAddr>,
     sessions: SessionTable,

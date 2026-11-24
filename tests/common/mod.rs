@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, reason = "each test crate uses a different subset of these helpers")]
 //! Shared test helpers: real WireGuard packets generated with boringtun.
 
 use boringtun::noise::{Tunn, TunnResult};

@@ -6,4 +6,4 @@ pub mod error;
 pub mod key;
 pub mod packet;
 pub mod relay;
-pub mod tables;
+pub(crate) mod tables;

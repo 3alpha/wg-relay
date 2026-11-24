@@ -3,7 +3,6 @@
 use crate::key::PeerKey;
 use crate::packet::{IdxPrefix, SessionIdx};
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -16,20 +15,20 @@ fn live(at: Instant, now: Instant, ttl: Duration) -> bool {
 
 /// key -> (address, last authenticated packet), plus the reverse map. Only
 /// written after a packet authenticates on that key's relay tunnel.
-pub struct Registry<K> {
+pub struct Registry {
     ttl: Duration,
-    by_key: HashMap<K, (SocketAddr, Instant)>,
-    by_addr: HashMap<SocketAddr, K>,
+    by_key: HashMap<PeerKey, (SocketAddr, Instant)>,
+    by_addr: HashMap<SocketAddr, PeerKey>,
 }
 
-impl<K: Copy + Eq + Hash> Registry<K> {
+impl Registry {
     pub fn new(ttl: Duration) -> Self {
         Registry { ttl, by_key: HashMap::new(), by_addr: HashMap::new() }
     }
 
     /// Record that `k` authenticated from `addr`. Returns `Some(previous)` if
     /// the address changed (new registration or roaming).
-    pub fn update(&mut self, k: K, addr: SocketAddr, now: Instant) -> Option<Option<SocketAddr>> {
+    pub fn update(&mut self, k: PeerKey, addr: SocketAddr, now: Instant) -> Option<Option<SocketAddr>> {
         let old = self.by_key.insert(k, (addr, now)).map(|(a, _)| a);
         if old == Some(addr) {
             return None;
@@ -47,28 +46,28 @@ impl<K: Copy + Eq + Hash> Registry<K> {
         Some(old)
     }
 
-    pub fn addr(&self, k: &K, now: Instant) -> Option<SocketAddr> {
+    pub fn addr(&self, k: &PeerKey, now: Instant) -> Option<SocketAddr> {
         self.by_key.get(k).filter(|(_, t)| live(*t, now, self.ttl)).map(|(a, _)| *a)
     }
 
-    pub fn key_at(&self, addr: SocketAddr, now: Instant) -> Option<K> {
+    pub fn key_at(&self, addr: SocketAddr, now: Instant) -> Option<PeerKey> {
         let k = *self.by_addr.get(&addr)?;
         self.addr(&k, now).map(|_| k)
     }
 
-    pub fn remove(&mut self, k: &K) -> bool {
+    pub fn remove(&mut self, k: &PeerKey) -> bool {
         let Some((a, _)) = self.by_key.remove(k) else { return false };
         self.by_addr.remove(&a);
         true
     }
 
-    pub fn keys(&self) -> Vec<K> {
+    pub fn keys(&self) -> Vec<PeerKey> {
         self.by_key.keys().copied().collect()
     }
 
     /// Drop stale entries, returning the expired keys.
-    pub fn expire(&mut self, now: Instant) -> Vec<K> {
-        let gone: Vec<K> =
+    pub fn expire(&mut self, now: Instant) -> Vec<PeerKey> {
+        let gone: Vec<PeerKey> =
             self.by_key.iter().filter(|(_, (_, t))| !live(*t, now, self.ttl)).map(|(k, _)| *k).collect();
         for k in &gone {
             self.remove(k);
@@ -201,10 +200,6 @@ impl SessionTable {
     pub fn len(&self) -> usize {
         self.map.len()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
-    }
 }
 
 /// Token bucket per source IP, for handshake initiations.
@@ -240,5 +235,129 @@ impl RateLimiter {
     pub fn prune(&mut self, now: Instant) {
         let full_after = self.burst / self.per_sec;
         self.buckets.retain(|_, (_, last)| now.saturating_duration_since(*last).as_secs_f64() < full_after);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    fn key(n: u8) -> PeerKey {
+        [n; 32].into()
+    }
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    fn idx(i: u32) -> SessionIdx {
+        i.into()
+    }
+
+    fn pending(dest: &str, src: &str, t: Instant) -> Session {
+        Session::pending(addr(dest), addr(src), key(1), None, t)
+    }
+
+    #[test]
+    fn session_expires_after_ttl_unless_touched() {
+        let t0 = Instant::now();
+        let mut t = SessionTable::new(SESSION_TTL);
+        t.insert(idx(42), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        assert!(t.get(idx(42), t0 + secs(199)).is_some());
+        assert_eq!(t.get(idx(42), t0 + secs(200)), None);
+        t.touch(idx(42), t0 + secs(150));
+        assert!(t.get(idx(42), t0 + secs(300)).is_some());
+        assert_eq!(t.expire(t0 + secs(349)), 0);
+        assert_eq!(t.expire(t0 + secs(351)), 1);
+        assert_eq!(t.len(), 0);
+    }
+
+    #[test]
+    fn open_marks_session_open_and_records_client() {
+        let t0 = Instant::now();
+        let mut t = SessionTable::new(SESSION_TTL);
+        t.insert(idx(42), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        t.open(idx(42), t0 + secs(1), Some(key(7)));
+        let expected = Session {
+            state: SessionState::Open,
+            last_seen: t0 + secs(1),
+            client: Some(key(7)),
+            ..pending("192.0.2.1:1", "192.0.2.2:2", t0)
+        };
+        assert_eq!(t.get(idx(42), t0 + secs(1)), Some(expected));
+        assert_eq!(t.clients(), HashSet::from([key(7)]));
+    }
+
+    #[test]
+    fn session_collision_keeps_newest_and_ignores_same_pair_or_stale() {
+        let t0 = Instant::now();
+        let mut t = SessionTable::new(SESSION_TTL);
+        assert!(!t.insert(idx(7), pending("192.0.2.1:1", "192.0.2.2:2", t0)));
+        assert!(!t.insert(idx(7), pending("192.0.2.1:1", "192.0.2.2:2", t0 + secs(1))), "same pair");
+        assert!(t.insert(idx(7), pending("192.0.2.3:3", "192.0.2.4:4", t0 + secs(2))));
+        assert_eq!(t.get(idx(7), t0 + secs(2)).map(|s| s.dest), Some(addr("192.0.2.3:3")));
+        assert!(!t.insert(idx(7), pending("192.0.2.5:5", "192.0.2.6:6", t0 + secs(500))), "stale entry");
+        assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn session_migrate_rewrites_both_directions() {
+        let t0 = Instant::now();
+        let mut t = SessionTable::new(SESSION_TTL);
+        t.insert(idx(0x00ab_cd01), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        t.insert(idx(0x0011_2201), pending("192.0.2.2:2", "192.0.2.1:1", t0));
+        t.migrate(addr("192.0.2.1:1"), addr("192.0.2.9:9"));
+        assert_eq!(t.get(idx(0x00ab_cd01), t0).map(|s| s.dest), Some(addr("192.0.2.9:9")));
+        assert_eq!(t.get(idx(0x0011_2201), t0).map(|s| s.expected_src), Some(addr("192.0.2.9:9")));
+        assert_eq!(t.retain(|s| s.dest.port() == 9), 1);
+    }
+
+    #[test]
+    fn has_prefix_matches_upper_24_bits_only() {
+        let mut t = SessionTable::new(SESSION_TTL);
+        t.insert(idx(0x00ab_cd01), pending("192.0.2.1:1", "192.0.2.2:2", Instant::now()));
+        assert!(t.has_prefix(idx(0x00ab_cdff).prefix()));
+        assert!(!t.has_prefix(idx(0x00ab_ce01).prefix()));
+    }
+
+    #[test]
+    fn registry_tracks_roaming_conflicts_and_expiry() {
+        let t0 = Instant::now();
+        let (a1, a2) = (addr("192.0.2.10:1000"), addr("192.0.2.10:1001"));
+        let mut r = Registry::new(REGISTRY_TTL);
+        assert_eq!(r.update(key(0), a1, t0), Some(None));
+        assert_eq!(r.update(key(0), a1, t0), None, "unchanged address");
+        assert_eq!(r.key_at(a1, t0), Some(key(0)));
+        assert_eq!(r.update(key(0), a2, t0), Some(Some(a1)), "roamed");
+        assert_eq!(r.key_at(a1, t0), None);
+        assert_eq!(r.update(key(1), a2, t0), Some(None));
+        assert_eq!(
+            (r.addr(&key(0), t0), r.key_at(a2, t0)),
+            (None, Some(key(1))),
+            "newest claimant owns address"
+        );
+        assert_eq!(r.addr(&key(1), t0 + secs(179)), Some(a2));
+        assert_eq!(r.key_at(a2, t0 + secs(180)), None);
+        assert_eq!(r.expire(t0 + secs(181)), vec![key(1)]);
+        r.update(key(3), a1, t0);
+        assert!(r.remove(&key(3)));
+        assert!(!r.remove(&key(3)));
+        assert_eq!(r.key_at(a1, t0), None);
+    }
+
+    #[test]
+    fn rate_limiter_has_two_second_burst_per_source() {
+        let t0 = Instant::now();
+        let ip = "192.0.2.1".parse().unwrap();
+        let mut l = RateLimiter::new(1.5);
+        assert!((0..3).all(|_| l.allow(ip, t0)), "burst of 3");
+        assert!(!l.allow(ip, t0));
+        assert!(l.allow("192.0.2.2".parse().unwrap(), t0), "per-source buckets");
+        assert!(l.allow(ip, t0 + secs(1)));
+        assert!(!l.allow(ip, t0 + secs(1)));
     }
 }
