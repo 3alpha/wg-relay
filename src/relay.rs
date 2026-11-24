@@ -1,7 +1,7 @@
 //! The relay state machine: registration tunnels plus opaque forwarding.
 //!
-//! `Relay::handle` does no I/O: it returns where to forward the datagram
-//! (unchanged) and queues the relay's own tunnel output in `outbox`.
+//! `Relay::handle` does no I/O: it returns a `Verdict` for the datagram and
+//! queues the relay's own tunnel output in `outbox`.
 
 use crate::config::{Config, Gate, Role};
 use crate::key::PeerKey;
@@ -27,7 +27,11 @@ macro_rules! reasons {
         impl Reason {
             pub const ALL: &'static [Reason] = &[$(Reason::$v),*];
             pub const COUNT: usize = Self::ALL.len();
-            pub fn name(self) -> &'static str { match self { $(Reason::$v => $s),* } }
+        }
+        impl fmt::Display for Reason {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(match self { $(Reason::$v => $s),* })
+            }
         }
     };
 }
@@ -52,6 +56,25 @@ reasons! {
     UnknownKey => "registration_unknown_key",
     ClientRegistrationOff => "client_registration_disabled",
     TunnelAuth => "tunnel_auth_failed",
+}
+
+/// What happened to one datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// Send the datagram, unchanged, to this address.
+    Forward(SocketAddr),
+    /// Handled by the relay's own registration tunnel.
+    Consumed,
+    Drop(Reason),
+}
+
+impl From<Result<SocketAddr, Reason>> for Verdict {
+    fn from(r: Result<SocketAddr, Reason>) -> Self {
+        match r {
+            Ok(dst) => Verdict::Forward(dst),
+            Err(reason) => Verdict::Drop(reason),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -79,7 +102,7 @@ impl fmt::Display for Metrics {
             self.rx, self.forwarded, self.tunnel_rx, self.tunnel_tx, self.send_errors, self.idx_collisions
         )?;
         for r in Reason::ALL.iter().filter(|r| self.rejected(**r) > 0) {
-            write!(f, " reject.{}={}", r.name(), self.rejected(*r))?;
+            write!(f, " reject.{r}={}", self.rejected(*r))?;
         }
         Ok(())
     }
@@ -202,26 +225,20 @@ impl Relay {
         Tunn::new(self.secret.clone(), PublicKey::from(peer), None, None, base, None)
     }
 
-    fn reject(&mut self, r: Reason, src: SocketAddr) -> Option<SocketAddr> {
-        self.metrics.rejects[r as usize] += 1;
-        debug!(reason = %r.name(), %src, "reject");
-        None
-    }
-
-    fn forward(&mut self, dst: SocketAddr) -> Option<SocketAddr> {
-        self.metrics.forwarded += 1;
-        Some(dst)
-    }
-
     fn reserved(&self, idx: u32) -> bool {
         self.tunn_by_base.contains_key(&(idx >> 8))
+    }
+
+    /// The registration tunnel that owns this receiver index, if any.
+    fn relay_tunnel(&self, idx: u32) -> Option<PeerKey> {
+        self.tunn_by_base.get(&(idx >> 8)).copied()
     }
 
     fn role_of(&self, k: &PeerKey) -> Option<Role> {
         self.peers.get(k).map(|p| p.role)
     }
 
-    /// The peer with this role whose key the packet's mac1 was made for.
+    /// Find the peer with this role whose key the packet's mac1 was made for.
     fn mac1_peer(&self, pkt: &[u8], role: Role) -> Option<PeerKey> {
         self.peers.iter().find(|(_, p)| p.role == role && packet::mac1_matches(&p.mac1, pkt)).map(|(k, _)| *k)
     }
@@ -237,45 +254,49 @@ impl Relay {
     fn client_addr(&self, c: &PeerKey, now: Instant) -> Option<SocketAddr> {
         match self.gate {
             Gate::Register => self.registry.addr(c, now),
-            _ => self.learned.get(c).copied(),
+            Gate::None | Gate::Response => self.learned.get(c).copied(),
         }
     }
 
-    /// Process one datagram. Returns the address to forward it to, unchanged.
-    pub fn handle(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) -> Option<SocketAddr> {
+    /// Process one datagram, counting and logging the outcome.
+    pub fn handle(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
         self.metrics.rx += 1;
-        let Ok(p) = packet::parse(pkt) else { return self.reject(Reason::Malformed, src) };
+        let verdict = self.route(src, pkt, now);
+        match verdict {
+            Verdict::Forward(_) => self.metrics.forwarded += 1,
+            Verdict::Consumed => self.metrics.tunnel_rx += 1,
+            Verdict::Drop(r) => {
+                self.metrics.rejects[r as usize] += 1;
+                debug!(reason = %r, %src, "reject");
+            }
+        }
+        verdict
+    }
+
+    fn route(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
+        let Ok(p) = packet::parse(pkt) else { return Verdict::Drop(Reason::Malformed) };
         match p {
-            Packet::Init { sender } => {
-                if !self.limiter.allow(src.ip(), now) {
-                    return self.reject(Reason::RateLimited, src);
-                }
-                if packet::mac1_matches(&self.relay_mac1, pkt) {
-                    self.register_init(src, pkt, now);
-                    return None;
-                }
-                self.forward_init(src, pkt, sender, now)
+            Packet::Init { .. } if !self.limiter.allow(src.ip(), now) => Verdict::Drop(Reason::RateLimited),
+            Packet::Init { .. } if packet::mac1_matches(&self.relay_mac1, pkt) => {
+                self.register_init(src, pkt, now)
+            }
+            Packet::Init { sender } => self.forward_init(src, pkt, sender, now).into(),
+            Packet::Response { receiver, .. } | Packet::Cookie { receiver } | Packet::Data { receiver }
+                if let Some(k) = self.relay_tunnel(receiver) =>
+            {
+                self.tunnel_rx(k, src, pkt, now)
             }
             Packet::Response { sender, receiver } => {
-                if let Some(&k) = self.tunn_by_base.get(&(receiver >> 8)) {
-                    self.tunnel_rx(k, src, pkt, now);
-                    return None;
-                }
-                self.forward_response(src, pkt, sender, receiver, now)
+                self.forward_response(src, pkt, sender, receiver, now).into()
             }
-            Packet::Cookie { receiver } | Packet::Data { receiver } => {
-                if let Some(&k) = self.tunn_by_base.get(&(receiver >> 8)) {
-                    self.tunnel_rx(k, src, pkt, now);
-                    return None;
-                }
-                self.forward_indexed(src, matches!(p, Packet::Data { .. }), receiver, now)
-            }
+            Packet::Cookie { receiver } => self.forward_indexed(src, false, receiver, now).into(),
+            Packet::Data { receiver } => self.forward_indexed(src, true, receiver, now).into(),
         }
     }
 
-    /// An initiation addressed to the relay: identify the sender, then let its
+    /// Identify the sender of a relay-bound initiation, then let its
     /// registration tunnel fully authenticate it.
-    fn register_init(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) {
+    fn register_init(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
         let half = match Tunn::parse_incoming_packet(pkt) {
             Ok(boringtun::noise::Packet::HandshakeInit(h)) => {
                 parse_handshake_anon(&self.secret, &self.public, &h).ok()
@@ -283,30 +304,28 @@ impl Relay {
             _ => None,
         };
         let Some(key) = half.map(|h| PeerKey::from(h.peer_static_public)) else {
-            self.reject(Reason::TunnelAuth, src);
-            return;
+            return Verdict::Drop(Reason::TunnelAuth);
         };
         match self.peers.get(&key) {
             None => {
                 debug!(%src, %key, "registration from key not in allowlist");
-                self.reject(Reason::UnknownKey, src);
+                Verdict::Drop(Reason::UnknownKey)
             }
-            Some(p) if p.tunn.is_none() => {
-                self.reject(Reason::ClientRegistrationOff, src);
-            }
-            Some(_) => self.tunnel_rx(key, src, pkt, now),
+            Some(PeerState { tunn: None, .. }) => Verdict::Drop(Reason::ClientRegistrationOff),
+            Some(PeerState { tunn: Some(_), .. }) => self.tunnel_rx(key, src, pkt, now),
         }
     }
 
     /// Feed a datagram to `key`'s registration tunnel; on authentication,
     /// (re-)register the source address.
-    fn tunnel_rx(&mut self, key: PeerKey, src: SocketAddr, pkt: &[u8], now: Instant) {
-        let Some(PeerState { name, tunn: Some(tunn), .. }) = self.peers.get_mut(&key) else { return };
+    fn tunnel_rx(&mut self, key: PeerKey, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
+        let Some(PeerState { name, tunn: Some(tunn), .. }) = self.peers.get_mut(&key) else {
+            return Verdict::Drop(Reason::TunnelAuth);
+        };
         let (authenticated, reply) = match tunn.decapsulate(Some(src.ip()), pkt, &mut self.scratch) {
             TunnResult::Err(e) => {
                 debug!(%src, peer = %name, ?e, "registration tunnel rejected packet");
-                self.metrics.rejects[Reason::TunnelAuth as usize] += 1;
-                return;
+                return Verdict::Drop(Reason::TunnelAuth);
             }
             TunnResult::WriteToNetwork(out) => {
                 // A cookie reply we emit under load proves nothing about the sender.
@@ -327,55 +346,55 @@ impl Relay {
         {
             self.outbox.push((src, out.to_vec()));
         }
-        self.metrics.tunnel_rx += 1;
         if authenticated && let Some(old) = self.registry.update(key, src, now) {
             info!(peer = %name, addr = %src, old = ?old, "registered");
             if let Some(old) = old {
                 self.sessions.migrate(old, src);
             }
         }
+        Verdict::Consumed
     }
 
-    fn forward_init(&mut self, src: SocketAddr, pkt: &[u8], sender: u32, now: Instant) -> Option<SocketAddr> {
+    fn forward_init(
+        &mut self,
+        src: SocketAddr,
+        pkt: &[u8],
+        sender: u32,
+        now: Instant,
+    ) -> Result<SocketAddr, Reason> {
         if self.reserved(sender) {
-            return self.reject(Reason::ReservedIndex, src);
+            return Err(Reason::ReservedIndex);
         }
         if let Some(server) = self.mac1_peer(pkt, Role::Server) {
             // A client (or, without `register`, anyone) initiating to a server.
-            let Some(dst) = self.registry.addr(&server, now) else {
-                return self.reject(Reason::ServerNotRegistered, src);
-            };
+            let dst = self.registry.addr(&server, now).ok_or(Reason::ServerNotRegistered)?;
             if dst == src {
-                return self.reject(Reason::Loop, src);
+                return Err(Reason::Loop);
             }
             let client = match self.gate {
                 Gate::Register => {
-                    let Some(c) =
-                        self.registry.key_at(src, now).filter(|c| self.role_of(c) == Some(Role::Client))
-                    else {
-                        return self.reject(Reason::SrcNotRegisteredClient, src);
-                    };
+                    let c = self
+                        .registry
+                        .key_at(src, now)
+                        .filter(|c| self.role_of(c) == Some(Role::Client))
+                        .ok_or(Reason::SrcNotRegisteredClient)?;
                     if !self.may_reach(&c, &server) {
-                        return self.reject(Reason::Acl, src);
+                        return Err(Reason::Acl);
                     }
                     Some(c)
                 }
                 Gate::None | Gate::Response => None,
             };
             let s = Session { dest: src, expected_src: dst, open: false, last: now, server, client };
-            return self.open_pending(sender, s, dst);
+            return Ok(self.insert_session(sender, s));
         }
         if let Some(client) = self.mac1_peer(pkt, Role::Client) {
             // A server re-keying towards a client.
-            let Some(server) = self.server_at(src, now) else {
-                return self.reject(Reason::RekeyNotFromServer, src);
-            };
+            let server = self.server_at(src, now).ok_or(Reason::RekeyNotFromServer)?;
             if !self.may_reach(&client, &server) {
-                return self.reject(Reason::Acl, src);
+                return Err(Reason::Acl);
             }
-            let Some(dst) = self.client_addr(&client, now) else {
-                return self.reject(Reason::ClientAddrUnknown, src);
-            };
+            let dst = self.client_addr(&client, now).ok_or(Reason::ClientAddrUnknown)?;
             let s = Session {
                 dest: src,
                 expected_src: dst,
@@ -384,16 +403,18 @@ impl Relay {
                 server,
                 client: Some(client),
             };
-            return self.open_pending(sender, s, dst);
+            return Ok(self.insert_session(sender, s));
         }
-        self.reject(Reason::NoMac1Match, src)
+        Err(Reason::NoMac1Match)
     }
 
-    fn open_pending(&mut self, idx: u32, s: Session, dst: SocketAddr) -> Option<SocketAddr> {
+    /// Store a session and return its counterpart's address, where the
+    /// handshake message that created it goes.
+    fn insert_session(&mut self, idx: u32, s: Session) -> SocketAddr {
         if self.sessions.insert(idx, s) {
             self.metrics.idx_collisions += 1;
         }
-        self.forward(dst)
+        s.expected_src
     }
 
     fn forward_response(
@@ -403,47 +424,39 @@ impl Relay {
         sender: u32,
         receiver: u32,
         now: Instant,
-    ) -> Option<SocketAddr> {
-        let Some(init) = self.sessions.get(receiver, now) else {
-            return self.reject(Reason::UnknownIndex, src);
-        };
+    ) -> Result<SocketAddr, Reason> {
+        let init = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
         if src != init.expected_src {
-            return self.reject(Reason::WrongSource, src);
+            return Err(Reason::WrongSource);
         }
         if self.reserved(sender) {
-            return self.reject(Reason::ReservedIndex, src);
+            return Err(Reason::ReservedIndex);
         }
-        let client = if let Some(server) = self.server_at(src, now) {
+        let client = match self.server_at(src, now) {
             // Server answering a client: mac1 names the client the server authenticated.
-            if server != init.server {
-                return self.reject(Reason::WrongSource, src);
-            }
-            match self.mac1_peer(pkt, Role::Client) {
-                Some(c) => {
-                    if !self.may_reach(&c, &server) {
-                        return self.reject(Reason::Acl, src);
-                    }
-                    match self.gate {
-                        Gate::Register if self.registry.addr(&c, now) != Some(init.dest) => {
-                            return self.reject(Reason::ClientAddrMismatch, src);
-                        }
-                        Gate::Register => {}
-                        Gate::None | Gate::Response => {
-                            self.learned.insert(c, init.dest);
-                        }
-                    }
+            Some(server) if server != init.server => return Err(Reason::WrongSource),
+            Some(server) => match (self.mac1_peer(pkt, Role::Client), self.gate) {
+                (Some(c), _) if !self.may_reach(&c, &server) => return Err(Reason::Acl),
+                (Some(c), Gate::Register) if self.registry.addr(&c, now) != Some(init.dest) => {
+                    return Err(Reason::ClientAddrMismatch);
+                }
+                (Some(c), Gate::Register) => Some(c),
+                (Some(c), Gate::None | Gate::Response) => {
+                    self.learned.insert(c, init.dest);
                     Some(c)
                 }
-                None if self.gate == Gate::None => None,
-                None => return self.reject(Reason::ResponseUnknownClient, src),
-            }
-        } else {
+                (None, Gate::None) => None,
+                (None, Gate::Response | Gate::Register) => return Err(Reason::ResponseUnknownClient),
+            },
             // Client answering a server-initiated handshake.
-            let ok = self.peers.get(&init.server).is_some_and(|p| packet::mac1_matches(&p.mac1, pkt));
-            if !ok {
-                return self.reject(Reason::ResponseNotForServer, src);
+            None => {
+                let for_server =
+                    self.peers.get(&init.server).is_some_and(|p| packet::mac1_matches(&p.mac1, pkt));
+                if !for_server {
+                    return Err(Reason::ResponseNotForServer);
+                }
+                init.client
             }
-            init.client
         };
         self.sessions.touch(receiver, now, true, client);
         let s = Session {
@@ -454,10 +467,8 @@ impl Relay {
             server: init.server,
             client,
         };
-        if self.sessions.insert(sender, s) {
-            self.metrics.idx_collisions += 1;
-        }
-        self.forward(init.dest)
+        self.insert_session(sender, s);
+        Ok(init.dest)
     }
 
     /// Cookie replies and data: only from the expected source; data only on open sessions.
@@ -467,18 +478,16 @@ impl Relay {
         data: bool,
         receiver: u32,
         now: Instant,
-    ) -> Option<SocketAddr> {
-        let Some(s) = self.sessions.get(receiver, now) else {
-            return self.reject(Reason::UnknownIndex, src);
-        };
+    ) -> Result<SocketAddr, Reason> {
+        let s = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
         if src != s.expected_src {
-            return self.reject(Reason::WrongSource, src);
+            return Err(Reason::WrongSource);
         }
         if data && !s.open {
-            return self.reject(Reason::SessionNotOpen, src);
+            return Err(Reason::SessionNotOpen);
         }
         self.sessions.touch(receiver, now, false, None);
-        self.forward(s.dest)
+        Ok(s.dest)
     }
 
     /// Run relay tunnel timers and expire soft state. Call a few times a second.

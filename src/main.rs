@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 use wg_relay::config::{Config, Role};
 use wg_relay::error::{AppError, Report};
 use wg_relay::key::PeerKey;
-use wg_relay::relay::Relay;
+use wg_relay::relay::{Relay, Verdict};
 
 const USAGE: &str = "usage: wg-relay [-c|--config PATH] [--check-config]\n\
                      PATH defaults to relay.toml; SIGHUP reloads it; log level via RUST_LOG (default info)";
@@ -97,7 +97,7 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
         tokio::select! {
             r = sock.recv_from(&mut buf) => match r {
                 Ok((n, src)) => {
-                    if let Some(dst) = relay.handle(src, &buf[..n], Instant::now())
+                    if let Verdict::Forward(dst) = relay.handle(src, &buf[..n], Instant::now())
                         && let Err(e) = sock.send_to(&buf[..n], dst).await
                     {
                         relay.metrics.send_errors += 1;

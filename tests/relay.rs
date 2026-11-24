@@ -11,7 +11,7 @@ use common::*;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use wg_relay::config::Config;
-use wg_relay::relay::{Reason, Relay};
+use wg_relay::relay::{Reason, Relay, Verdict};
 
 const SRV: &str = "198.51.100.1:51820";
 const SRV2: &str = "198.51.100.2:51820";
@@ -93,8 +93,12 @@ impl W {
         t
     }
 
+    /// Where the relay forwarded the datagram, if anywhere.
     fn fwd(&mut self, src: &str, pkt: &[u8]) -> Option<SocketAddr> {
-        self.relay.handle(addr(src), pkt, Instant::now())
+        match self.relay.handle(addr(src), pkt, Instant::now()) {
+            Verdict::Forward(dst) => Some(dst),
+            Verdict::Consumed | Verdict::Drop(_) => None,
+        }
     }
 
     fn n(&self, r: Reason) -> u64 {
