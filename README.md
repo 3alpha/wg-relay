@@ -24,6 +24,7 @@ cargo build --release
 ./target/release/wg-relay --check-config -c relay.toml   # validate, print roles and warnings
 RUST_LOG=info ./target/release/wg-relay -c relay.toml    # RUST_LOG=wg_relay=debug logs every reject
 kill -HUP $(pidof wg-relay)                              # reload relay.toml
+WG_RELAY_CONFIG=/etc/wg-relay.toml ./target/release/wg-relay   # every flag also reads an env var (see --help)
 
 cargo test                                               # unit and in-process end-to-end tests
 cargo build --bins --examples && sudo tests/netns.sh     # namespace integration test, all gate modes
@@ -332,8 +333,11 @@ the relay's own `/32`.
 
 | File | Purpose |
 |---|---|
-| `src/packet.rs` | wire-format parsing, size checks, mac1 |
+| `src/packet/` | wire-format parsing, size checks, mac1, `SessionIdx` |
 | `src/tables.rs` | registry, session table, per-IP token bucket |
-| `src/relay.rs` | `Relay::handle` (no I/O): gate logic, registration tunnels, reload, reject reasons |
-| `src/config.rs` | `relay.toml` parsing and validation |
-| `src/main.rs` | CLI, tokio socket loop, timers, SIGHUP/SIGTERM |
+| `src/relay/` | `Relay::handle` (no I/O); `forward.rs` gate rules, `registration.rs` relay tunnels, `reload.rs`, `reason.rs`, `metrics.rs` |
+| `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
+| `src/main.rs` | parse the CLI, set up logging, report errors |
+| `src/app.rs` | clap `Cli`, tokio socket loop, timers, SIGHUP/SIGTERM |
+| `src/key/` | `PeerKey` / `PrivateKey` base64 newtypes |
+| `src/error.rs` | `AppError` and the `Report` error-chain printer |

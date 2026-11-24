@@ -7,8 +7,6 @@ use crate::config::ConfigError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
-    #[error("unknown or incomplete argument {arg:?}")]
-    Usage { arg: String },
     #[error("invalid config {path}")]
     Config {
         path: PathBuf,

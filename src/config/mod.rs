@@ -10,8 +10,10 @@ use crate::key::{PeerKey, PrivateKey};
 
 pub mod error;
 mod rate;
+mod summary;
 pub use error::{ConfigError, ConfigWarning, RateError};
 pub use rate::Rate;
+pub use summary::Summary;
 
 /// How strictly clients are admitted before their traffic reaches a server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -164,6 +166,11 @@ impl Config {
             handshake_rate: raw.handshake_rate_per_ip,
             peers,
         })
+    }
+
+    /// Summarise the effective config for humans.
+    pub fn summary(&self) -> Summary<'_> {
+        Summary(self)
     }
 
     /// List valid but probably unintended settings.
