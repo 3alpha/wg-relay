@@ -19,8 +19,10 @@ fn client(name: &str, k: &Key, servers: &str) -> String {
 #[test]
 fn roles_defaults_and_acl() {
     let (r, s1, s2, c) = (key(), key(), key(), key());
-    let text =
-        head(&r, "") + &server("main", &s1) + &server("backup", &s2) + &client("laptop", &c, "\"backup\"");
+    let text = head(&r, "")
+        + &server("main", &s1)
+        + &server("backup", &s2)
+        + &client("laptop", &c, "\"backup\"");
     let cfg = Config::parse(&text).unwrap();
     assert_eq!(cfg.listen.to_string(), "0.0.0.0:51820");
     assert_eq!(cfg.gate, Gate::Register, "safest gate is the default");
@@ -31,12 +33,14 @@ fn roles_defaults_and_acl() {
     assert!(cfg.warnings().is_empty());
 
     let cfg = Config::parse(
-        &(head(&r, "client_gate = \"none\"\nhandshake_rate_per_ip = \"60/m\"\n") + &server("main", &s1)),
+        &(head(&r, "client_gate = \"none\"\nhandshake_rate_per_ip = \"60/m\"\n")
+            + &server("main", &s1)),
     )
     .unwrap();
     assert_eq!((cfg.gate, cfg.handshake_rate.per_sec()), (Gate::None, 1.0));
     assert_eq!(cfg.warnings(), vec![], "clients are optional with gate none");
-    let cfg = Config::parse(&(head(&r, "client_gate = \"response\"\n") + &server("main", &s1))).unwrap();
+    let cfg =
+        Config::parse(&(head(&r, "client_gate = \"response\"\n") + &server("main", &s1))).unwrap();
     assert_eq!(cfg.warnings(), vec![ConfigWarning::NoClients { gate: Gate::Response }]);
     let lonely = client("lonely", &key(), "");
     let cfg = Config::parse(&(head(&r, "") + &server("main", &s1) + &lonely)).unwrap();
@@ -78,7 +82,9 @@ fn rejects_bad_configs_with_exact_errors() {
         ),
         (
             "client without servers",
-            head(&r, "") + &server("a", &a) + &client("b", &b, "\"a\"").replace("servers = [\"a\"]\n", ""),
+            head(&r, "")
+                + &server("a", &a)
+                + &client("b", &b, "\"a\"").replace("servers = [\"a\"]\n", ""),
             |e| toml_error(e, "missing field `servers`"),
         ),
         ("bad gate", head(&r, "client_gate = \"strict\"\n") + &server("a", &a), |e| {
@@ -108,11 +114,19 @@ fn check_config_flag() {
     std::fs::create_dir_all(&dir).unwrap();
     let (good, bad) = (dir.join("good.toml"), dir.join("bad.toml"));
     let (s, c) = (key(), key());
-    std::fs::write(&good, head(&key(), "") + &server("main", &s) + &client("laptop", &c, "\"main\""))
-        .unwrap();
+    std::fs::write(
+        &good,
+        head(&key(), "") + &server("main", &s) + &client("laptop", &c, "\"main\""),
+    )
+    .unwrap();
     std::fs::write(&bad, "listen = 5").unwrap();
     let run = |p: &std::path::Path| {
-        Command::new(env!("CARGO_BIN_EXE_wg-relay")).arg("--check-config").arg("-c").arg(p).output().unwrap()
+        Command::new(env!("CARGO_BIN_EXE_wg-relay"))
+            .arg("--check-config")
+            .arg("-c")
+            .arg(p)
+            .output()
+            .unwrap()
     };
     let ok = run(&good);
     let out = String::from_utf8_lossy(&ok.stdout);

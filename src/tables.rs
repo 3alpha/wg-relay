@@ -28,7 +28,12 @@ impl Registry {
 
     /// Record that `k` authenticated from `addr`. Returns `Some(previous)` if
     /// the address changed (new registration or roaming).
-    pub fn update(&mut self, k: PeerKey, addr: SocketAddr, now: Instant) -> Option<Option<SocketAddr>> {
+    pub fn update(
+        &mut self,
+        k: PeerKey,
+        addr: SocketAddr,
+        now: Instant,
+    ) -> Option<Option<SocketAddr>> {
         let old = self.by_key.insert(k, (addr, now)).map(|(a, _)| a);
         if old == Some(addr) {
             return None;
@@ -67,8 +72,12 @@ impl Registry {
 
     /// Drop stale entries, returning the expired keys.
     pub fn expire(&mut self, now: Instant) -> Vec<PeerKey> {
-        let gone: Vec<PeerKey> =
-            self.by_key.iter().filter(|(_, (_, t))| !live(*t, now, self.ttl)).map(|(k, _)| *k).collect();
+        let gone: Vec<PeerKey> = self
+            .by_key
+            .iter()
+            .filter(|(_, (_, t))| !live(*t, now, self.ttl))
+            .map(|(k, _)| *k)
+            .collect();
         for k in &gone {
             self.remove(k);
         }
@@ -118,7 +127,10 @@ impl Session {
         client: Option<PeerKey>,
         now: Instant,
     ) -> Self {
-        Session { state: SessionState::Open, ..Self::pending(dest, expected_src, server, client, now) }
+        Session {
+            state: SessionState::Open,
+            ..Self::pending(dest, expected_src, server, client, now)
+        }
     }
 }
 
@@ -234,7 +246,8 @@ impl RateLimiter {
     /// Forget sources whose bucket would be full again by now.
     pub fn prune(&mut self, now: Instant) {
         let full_after = self.burst / self.per_sec;
-        self.buckets.retain(|_, (_, last)| now.saturating_duration_since(*last).as_secs_f64() < full_after);
+        self.buckets
+            .retain(|_, (_, last)| now.saturating_duration_since(*last).as_secs_f64() < full_after);
     }
 }
 
@@ -297,10 +310,16 @@ mod tests {
         let t0 = Instant::now();
         let mut t = SessionTable::new(SESSION_TTL);
         assert!(!t.insert(idx(7), pending("192.0.2.1:1", "192.0.2.2:2", t0)));
-        assert!(!t.insert(idx(7), pending("192.0.2.1:1", "192.0.2.2:2", t0 + secs(1))), "same pair");
+        assert!(
+            !t.insert(idx(7), pending("192.0.2.1:1", "192.0.2.2:2", t0 + secs(1))),
+            "same pair"
+        );
         assert!(t.insert(idx(7), pending("192.0.2.3:3", "192.0.2.4:4", t0 + secs(2))));
         assert_eq!(t.get(idx(7), t0 + secs(2)).map(|s| s.dest), Some(addr("192.0.2.3:3")));
-        assert!(!t.insert(idx(7), pending("192.0.2.5:5", "192.0.2.6:6", t0 + secs(500))), "stale entry");
+        assert!(
+            !t.insert(idx(7), pending("192.0.2.5:5", "192.0.2.6:6", t0 + secs(500))),
+            "stale entry"
+        );
         assert_eq!(t.len(), 1);
     }
 

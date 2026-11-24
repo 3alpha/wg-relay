@@ -14,7 +14,9 @@ impl fmt::Display for Summary<'_> {
         writeln!(f, "tunnel ip    {}", cfg.tunnel_ip)?;
         writeln!(f, "client gate  {:?}", cfg.gate)?;
         writeln!(f, "init rate    {} per source IP", cfg.handshake_rate)?;
-        let name = |k: &PeerKey| cfg.peers.iter().find(|p| &p.pubkey == k).map_or("?", |p| p.name.as_str());
+        let name = |k: &PeerKey| {
+            cfg.peers.iter().find(|p| &p.pubkey == k).map_or("?", |p| p.name.as_str())
+        };
         for p in &cfg.peers {
             let (role, reach): (_, Vec<&str>) = match &p.role {
                 Role::Server => ("server", Vec::new()),

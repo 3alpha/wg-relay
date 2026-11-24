@@ -44,7 +44,10 @@ fn config(w: &W, gate: &str, clients: &[(&str, &Key, &str)]) -> Config {
         b64(&w.srv2.pk)
     );
     for (name, k, servers) in clients {
-        s += &format!("[[client]]\nname = \"{name}\"\npubkey = \"{}\"\nservers = [{servers}]\n", b64(&k.pk));
+        s += &format!(
+            "[[client]]\nname = \"{name}\"\npubkey = \"{}\"\nservers = [{servers}]\n",
+            b64(&k.pk)
+        );
     }
     Config::parse(&s).unwrap()
 }
@@ -62,7 +65,11 @@ fn world(gate: &str) -> W {
         st: key(),
     };
     let (c1, c2, c3) = (w.c1.clone(), w.c2.clone(), w.c3.clone());
-    let cfg = config(&w, gate, &[("c1", &c1, "\"main\""), ("c2", &c2, "\"other\""), ("c3", &c3, "\"main\"")]);
+    let cfg = config(
+        &w,
+        gate,
+        &[("c1", &c1, "\"main\""), ("c2", &c2, "\"other\""), ("c3", &c3, "\"main\"")],
+    );
     w.relay = Relay::new(&cfg);
     let (srv, srv2) = (w.srv.clone(), w.srv2.clone());
     w.register(&srv, SRV);
@@ -317,7 +324,9 @@ fn relay_key_cannot_open_forwarded_initiation_and_ping_works() {
     let mut c1s = tunn(&w.c1, &w.srv);
     let init = initiation(&mut c1s);
     assert_eq!(w.fwd(C1, &init), Some(addr(SRV)));
-    let Ok(boringtun::noise::Packet::HandshakeInit(h)) = Tunn::parse_incoming_packet(&init) else { panic!() };
+    let Ok(boringtun::noise::Packet::HandshakeInit(h)) = Tunn::parse_incoming_packet(&init) else {
+        panic!()
+    };
     assert!(parse_handshake_anon(&w.r.sk, &w.r.pk, &h).is_err(), "relay must not decrypt");
     assert!(parse_handshake_anon(&w.srv.sk, &w.srv.pk, &h).is_ok());
 
@@ -337,7 +346,10 @@ fn expiry_and_rate_limit() {
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     w.relay.tick(Instant::now() + Duration::from_secs(181));
-    assert_eq!(w.relay.registered_addr(&w.srv.id(), Instant::now() + Duration::from_secs(181)), None);
+    assert_eq!(
+        w.relay.registered_addr(&w.srv.id(), Instant::now() + Duration::from_secs(181)),
+        None
+    );
     w.relay.tick(Instant::now() + Duration::from_secs(201));
     assert!(w.relay.session_count() == 0);
 
@@ -358,8 +370,12 @@ fn garbage_never_panics() {
         let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
         let init = initiation(&mut c1s);
         let resp = reply(&mut sc1, &init).unwrap();
-        let seeds =
-            [init, resp, encrypt(&mut sr, &ping([10, 99, 0, 1], [10, 99, 0, 254])), initiation(&mut sr)];
+        let seeds = [
+            init,
+            resp,
+            encrypt(&mut sr, &ping([10, 99, 0, 1], [10, 99, 0, 254])),
+            initiation(&mut sr),
+        ];
         let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut rnd = move || {
             x ^= x << 13;

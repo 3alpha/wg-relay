@@ -127,12 +127,16 @@ impl Relay {
     fn route(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
         let Ok(p) = packet::parse(pkt) else { return Verdict::Drop(Reason::Malformed) };
         match p {
-            Packet::Init { .. } if !self.limiter.allow(src.ip(), now) => Verdict::Drop(Reason::RateLimited),
+            Packet::Init { .. } if !self.limiter.allow(src.ip(), now) => {
+                Verdict::Drop(Reason::RateLimited)
+            }
             Packet::Init { .. } if packet::mac1_matches(&self.relay_mac1, pkt) => {
                 self.register_init(src, pkt, now)
             }
             Packet::Init { sender } => self.forward_init(src, pkt, sender, now).into(),
-            Packet::Response { receiver, .. } | Packet::Cookie { receiver } | Packet::Data { receiver }
+            Packet::Response { receiver, .. }
+            | Packet::Cookie { receiver }
+            | Packet::Data { receiver }
                 if let Some(k) = self.relay_tunnel(receiver) =>
             {
                 self.tunnel_rx(k, src, pkt, now)
@@ -140,8 +144,12 @@ impl Relay {
             Packet::Response { sender, receiver } => {
                 self.forward_response(src, pkt, sender, receiver, now).into()
             }
-            Packet::Cookie { receiver } => self.forward_indexed(src, Indexed::Cookie, receiver, now).into(),
-            Packet::Data { receiver } => self.forward_indexed(src, Indexed::Data, receiver, now).into(),
+            Packet::Cookie { receiver } => {
+                self.forward_indexed(src, Indexed::Cookie, receiver, now).into()
+            }
+            Packet::Data { receiver } => {
+                self.forward_indexed(src, Indexed::Data, receiver, now).into()
+            }
         }
     }
 
@@ -149,7 +157,9 @@ impl Relay {
     pub fn tick(&mut self, now: Instant) {
         for (key, peer) in &mut self.peers {
             let Some(tunn) = &mut peer.tunn else { continue };
-            let TunnResult::WriteToNetwork(out) = tunn.update_timers(&mut self.scratch) else { continue };
+            let TunnResult::WriteToNetwork(out) = tunn.update_timers(&mut self.scratch) else {
+                continue;
+            };
             if let Some(addr) = self.registry.addr(key, now) {
                 self.outbox.push((addr, out.to_vec()));
             }
@@ -181,7 +191,10 @@ impl Relay {
 
     /// Find the peer of the wanted role whose key the packet's mac1 was made for.
     fn mac1_peer(&self, pkt: &[u8], want: fn(&Role) -> bool) -> Option<PeerKey> {
-        self.peers.iter().find(|(_, p)| want(&p.role) && packet::mac1_matches(&p.mac1, pkt)).map(|(k, _)| *k)
+        self.peers
+            .iter()
+            .find(|(_, p)| want(&p.role) && packet::mac1_matches(&p.mac1, pkt))
+            .map(|(k, _)| *k)
     }
 
     fn may_reach(&self, client: &PeerKey, server: &PeerKey) -> bool {

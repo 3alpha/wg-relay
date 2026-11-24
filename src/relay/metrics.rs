@@ -35,7 +35,12 @@ impl fmt::Display for Metrics {
         write!(
             f,
             "rx={} forwarded={} tunnel_rx={} tunnel_tx={} send_errors={} idx_collisions={}",
-            self.rx, self.forwarded, self.tunnel_rx, self.tunnel_tx, self.send_errors, self.idx_collisions
+            self.rx,
+            self.forwarded,
+            self.tunnel_rx,
+            self.tunnel_tx,
+            self.send_errors,
+            self.idx_collisions
         )?;
         for r in Reason::ALL.iter().filter(|r| self.rejected(**r) > 0) {
             write!(f, " reject.{r}={}", self.rejected(*r))?;

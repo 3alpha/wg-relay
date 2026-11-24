@@ -36,12 +36,16 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
         print!("{}", cfg.summary());
         return Ok(());
     }
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(AppError::Runtime)?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(AppError::Runtime)?;
     rt.block_on(serve(cfg, cli.config))
 }
 
 fn load(path: &Path) -> Result<Config, AppError> {
-    let cfg = Config::load(path).map_err(|source| AppError::Config { path: path.to_owned(), source })?;
+    let cfg =
+        Config::load(path).map_err(|source| AppError::Config { path: path.to_owned(), source })?;
     for w in cfg.warnings() {
         warn!(warning = %w, "config warning");
     }
@@ -49,8 +53,9 @@ fn load(path: &Path) -> Result<Config, AppError> {
 }
 
 async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
-    let sock =
-        UdpSocket::bind(cfg.listen).await.map_err(|source| AppError::Bind { addr: cfg.listen, source })?;
+    let sock = UdpSocket::bind(cfg.listen)
+        .await
+        .map_err(|source| AppError::Bind { addr: cfg.listen, source })?;
     let on = |kind, name| signal(kind).map_err(|source| AppError::Signal { signal: name, source });
     let mut term = on(SignalKind::terminate(), "SIGTERM")?;
     let mut hup = on(SignalKind::hangup(), "SIGHUP")?;

@@ -16,7 +16,9 @@ fn parses_real_handshake_and_data() {
     assert_eq!((init.len(), resp.len(), ka.len()), (148, 92, 32));
 
     let Packet::Init { sender: i_idx } = packet::parse(&init).unwrap() else { panic!() };
-    let Packet::Response { sender: r_idx, receiver } = packet::parse(&resp).unwrap() else { panic!() };
+    let Packet::Response { sender: r_idx, receiver } = packet::parse(&resp).unwrap() else {
+        panic!()
+    };
     assert_eq!(receiver, i_idx);
     assert_eq!(packet::parse(&ka).unwrap(), Packet::Data { receiver: r_idx });
 
@@ -35,7 +37,8 @@ fn parses_real_cookie_reply() {
     let init = initiation(&mut ta);
     let Packet::Init { sender } = packet::parse(&init).unwrap() else { panic!() };
     let mut buf = vec![0u8; 256];
-    let TunnResult::WriteToNetwork(cookie) = tb.decapsulate(Some([1, 2, 3, 4].into()), &init, &mut buf)
+    let TunnResult::WriteToNetwork(cookie) =
+        tb.decapsulate(Some([1, 2, 3, 4].into()), &init, &mut buf)
     else {
         panic!("expected cookie reply")
     };

@@ -59,7 +59,8 @@ struct Udp {
 }
 
 fn read_pcap(path: &str) -> Result<Vec<Udp>, CheckError> {
-    let bytes = std::fs::read(path).map_err(|source| CheckError::Read { path: path.into(), source })?;
+    let bytes =
+        std::fs::read(path).map_err(|source| CheckError::Read { path: path.into(), source })?;
     parse_pcap(&bytes)
 }
 
@@ -99,12 +100,15 @@ fn parse_pcap(b: &[u8]) -> Result<Vec<Udp>, CheckError> {
 }
 
 fn secret(arg: &'static str, b64: &str) -> Result<StaticSecret, CheckError> {
-    b64.parse::<PrivateKey>().map(|k| k.secret().clone()).map_err(|source| CheckError::Key { arg, source })
+    b64.parse::<PrivateKey>()
+        .map(|k| k.secret().clone())
+        .map_err(|source| CheckError::Key { arg, source })
 }
 
 fn parse_marker(hex: &str) -> Result<Vec<u8>, CheckError> {
     let byte = |c: &[u8]| std::str::from_utf8(c).ok().and_then(|s| u8::from_str_radix(s, 16).ok());
-    let bytes: Option<Vec<u8>> = hex.as_bytes().chunks(2).map(|c| byte(c).filter(|_| c.len() == 2)).collect();
+    let bytes: Option<Vec<u8>> =
+        hex.as_bytes().chunks(2).map(|c| byte(c).filter(|_| c.len() == 2)).collect();
     bytes.ok_or_else(|| CheckError::Marker(hex.to_owned()))
 }
 
@@ -148,9 +152,12 @@ fn verify(args: &[String]) -> Result<bool, CheckError> {
         if p.dst == relay {
             inbound.entry(&p.payload).or_default().push(p.src);
         }
-        let is_fwd_init =
-            p.dst == relay && p.payload.first() == Some(&1) && !packet::mac1_matches(&relay_mac1, &p.payload);
-        if let (true, Ok(Packet::HandshakeInit(h))) = (is_fwd_init, Tunn::parse_incoming_packet(&p.payload)) {
+        let is_fwd_init = p.dst == relay
+            && p.payload.first() == Some(&1)
+            && !packet::mac1_matches(&relay_mac1, &p.payload);
+        if let (true, Ok(Packet::HandshakeInit(h))) =
+            (is_fwd_init, Tunn::parse_incoming_packet(&p.payload))
+        {
             fwd_inits += 1;
             opened_relay += parse_handshake_anon(&relay_sk, &relay_pk, &h).is_ok() as u32;
             opened_dest += parse_handshake_anon(&dest_sk, &dest_pk, &h).is_ok() as u32;
@@ -170,7 +177,11 @@ fn verify(args: &[String]) -> Result<bool, CheckError> {
     println!("  opened with destination key:       {opened_dest}");
     println!("forwarded byte-identical (init/resp/cookie/data): {:?}", &identical[1..]);
     println!("plaintext marker occurrences:        {marker_hits}");
-    let ok = fwd_inits > 0 && opened_relay == 0 && opened_dest > 0 && identical[4] > 0 && marker_hits == 0;
+    let ok = fwd_inits > 0
+        && opened_relay == 0
+        && opened_dest > 0
+        && identical[4] > 0
+        && marker_hits == 0;
     println!("{}", if ok { "PCAP CHECK PASSED" } else { "PCAP CHECK FAILED" });
     Ok(ok)
 }

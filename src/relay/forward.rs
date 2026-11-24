@@ -100,12 +100,16 @@ impl Relay {
                     Some(c)
                 }
                 (None, Gate::None) => None,
-                (None, Gate::Response | Gate::Register) => return Err(Reason::ResponseUnknownClient),
+                (None, Gate::Response | Gate::Register) => {
+                    return Err(Reason::ResponseUnknownClient);
+                }
             },
             // Client answering a server-initiated handshake.
             None => {
-                let for_server =
-                    self.peers.get(&init.server).is_some_and(|p| packet::mac1_matches(&p.mac1, pkt));
+                let for_server = self
+                    .peers
+                    .get(&init.server)
+                    .is_some_and(|p| packet::mac1_matches(&p.mac1, pkt));
                 if !for_server {
                     return Err(Reason::ResponseNotForServer);
                 }

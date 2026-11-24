@@ -33,11 +33,18 @@ impl Relay {
 
     /// Feed a datagram to `key`'s registration tunnel; on authentication,
     /// (re-)register the source address.
-    pub(super) fn tunnel_rx(&mut self, key: PeerKey, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
+    pub(super) fn tunnel_rx(
+        &mut self,
+        key: PeerKey,
+        src: SocketAddr,
+        pkt: &[u8],
+        now: Instant,
+    ) -> Verdict {
         let Some(PeerState { name, tunn: Some(tunn), .. }) = self.peers.get_mut(&key) else {
             return Verdict::Drop(Reason::TunnelAuth);
         };
-        let (authenticated, reply) = match tunn.decapsulate(Some(src.ip()), pkt, &mut self.scratch) {
+        let (authenticated, reply) = match tunn.decapsulate(Some(src.ip()), pkt, &mut self.scratch)
+        {
             TunnResult::Err(e) => {
                 debug!(%src, peer = %name, ?e, "registration tunnel rejected packet");
                 return Verdict::Drop(Reason::TunnelAuth);
@@ -46,7 +53,9 @@ impl Relay {
                 // A cookie reply we emit under load proves nothing about the sender.
                 let auth = out.first() != Some(&3);
                 self.outbox.push((src, out.to_vec()));
-                while let TunnResult::WriteToNetwork(q) = tunn.decapsulate(None, &[], &mut self.scratch) {
+                while let TunnResult::WriteToNetwork(q) =
+                    tunn.decapsulate(None, &[], &mut self.scratch)
+                {
                     self.outbox.push((src, q.to_vec()));
                 }
                 (auth, None)

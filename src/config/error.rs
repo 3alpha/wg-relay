@@ -43,7 +43,10 @@ impl fmt::Display for ConfigWarning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConfigWarning::NoClients { gate } => {
-                write!(f, "client_gate = {gate:?} but no [[client]] entries, so no client can connect")
+                write!(
+                    f,
+                    "client_gate = {gate:?} but no [[client]] entries, so no client can connect"
+                )
             }
             ConfigWarning::ClientWithoutServers { name } => {
                 write!(f, "client {name} may not reach any server")

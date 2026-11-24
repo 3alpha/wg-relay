@@ -25,7 +25,14 @@ pub fn key() -> Key {
 }
 
 pub fn tunn(me: &Key, peer: &Key) -> Tunn {
-    Tunn::new(me.sk.clone(), peer.pk, None, None, rand_core::RngCore::next_u32(&mut OsRng) >> 8, None)
+    Tunn::new(
+        me.sk.clone(),
+        peer.pk,
+        None,
+        None,
+        rand_core::RngCore::next_u32(&mut OsRng) >> 8,
+        None,
+    )
 }
 
 pub fn b64(k: &PublicKey) -> String {
