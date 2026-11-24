@@ -25,10 +25,31 @@ pub enum Gate {
     Register,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
     Server,
-    Client,
+    Client {
+        /// The servers this client may reach.
+        servers: Vec<PeerKey>,
+    },
+}
+
+impl Role {
+    pub fn is_server(&self) -> bool {
+        matches!(self, Role::Server)
+    }
+
+    pub fn is_client(&self) -> bool {
+        matches!(self, Role::Client { .. })
+    }
+
+    /// Is this a client allowed to reach `server`?
+    pub fn may_reach(&self, server: &PeerKey) -> bool {
+        match self {
+            Role::Server => false,
+            Role::Client { servers } => servers.contains(server),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -75,8 +96,6 @@ pub struct Peer {
     pub name: String,
     pub pubkey: PeerKey,
     pub role: Role,
-    /// For clients: the servers it may reach.
-    pub servers: Vec<PeerKey>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,9 +123,9 @@ impl Config {
         let relay_pub = raw.private_key.public_key();
         let mut peers: Vec<Peer> = Vec::new();
         let (mut names, mut keys) = (HashSet::new(), HashSet::new());
-        let servers = raw.server.iter().map(|s| (&s.name, s.pubkey, Role::Server, None));
-        let clients = raw.client.iter().map(|c| (&c.name, c.pubkey, Role::Client, Some(&c.servers)));
-        for (name, pubkey, role, allowed) in servers.chain(clients) {
+        let servers = raw.server.iter().map(|s| (&s.name, s.pubkey, None));
+        let clients = raw.client.iter().map(|c| (&c.name, c.pubkey, Some(&c.servers)));
+        for (name, pubkey, allowed) in servers.chain(clients) {
             if pubkey == relay_pub {
                 return Err(ConfigError::RelayKeyReused { name: name.clone() });
             }
@@ -116,18 +135,26 @@ impl Config {
             if !names.insert(name.clone()) {
                 return Err(ConfigError::DuplicateName { name: name.clone() });
             }
-            let servers = allowed
-                .into_iter()
-                .flatten()
-                .map(|s| {
-                    peers
+            let role = match allowed {
+                None => Role::Server,
+                Some(allowed) => {
+                    let servers = allowed
                         .iter()
-                        .find(|p| p.role == Role::Server && &p.name == s)
-                        .map(|p| p.pubkey)
-                        .ok_or_else(|| ConfigError::UnknownServer { client: name.clone(), server: s.clone() })
-                })
-                .collect::<Result<_, _>>()?;
-            peers.push(Peer { name: name.clone(), pubkey, role, servers });
+                        .map(|s| {
+                            peers
+                                .iter()
+                                .find(|p| p.role.is_server() && &p.name == s)
+                                .map(|p| p.pubkey)
+                                .ok_or_else(|| ConfigError::UnknownServer {
+                                    client: name.clone(),
+                                    server: s.clone(),
+                                })
+                        })
+                        .collect::<Result<_, _>>()?;
+                    Role::Client { servers }
+                }
+            };
+            peers.push(Peer { name: name.clone(), pubkey, role });
         }
         Ok(Config {
             listen: raw.listen,
@@ -141,16 +168,17 @@ impl Config {
 
     /// List valid but probably unintended settings.
     pub fn warnings(&self) -> Vec<ConfigWarning> {
-        let clients = self.peers.iter().filter(|p| p.role == Role::Client);
         let mut w = Vec::new();
-        if self.gate != Gate::None && clients.clone().next().is_none() {
+        if self.gate != Gate::None && !self.peers.iter().any(|p| p.role.is_client()) {
             w.push(ConfigWarning::NoClients { gate: self.gate });
         }
-        w.extend(
-            clients
-                .filter(|c| c.servers.is_empty())
-                .map(|c| ConfigWarning::ClientWithoutServers { name: c.name.clone() }),
-        );
+        for p in &self.peers {
+            if let Role::Client { servers } = &p.role
+                && servers.is_empty()
+            {
+                w.push(ConfigWarning::ClientWithoutServers { name: p.name.clone() });
+            }
+        }
         w
     }
 }

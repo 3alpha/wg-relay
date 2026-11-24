@@ -1,6 +1,7 @@
 //! Soft-state tables: registry, session table, per-IP rate limiter.
 
 use crate::key::PeerKey;
+use crate::packet::{IdxPrefix, SessionIdx};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::net::{IpAddr, SocketAddr};
@@ -76,6 +77,14 @@ impl<K: Copy + Eq + Hash> Registry<K> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionState {
+    /// Initiation forwarded, response not yet accepted: only cookie replies pass.
+    Pending,
+    /// Handshake complete: data passes.
+    Open,
+}
+
 /// Forwarding state for one session index (the receiver_idx of later packets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Session {
@@ -83,17 +92,40 @@ pub struct Session {
     pub dest: SocketAddr,
     /// The only address allowed to send packets carrying this index.
     pub expected_src: SocketAddr,
-    /// Set once the handshake response has been accepted.
-    pub open: bool,
-    pub last: Instant,
+    pub state: SessionState,
+    pub last_seen: Instant,
     /// The server end, and the client end once known; used to revoke on reload.
     pub server: PeerKey,
     pub client: Option<PeerKey>,
 }
 
+impl Session {
+    /// The initiator's index after its initiation was forwarded.
+    pub fn pending(
+        dest: SocketAddr,
+        expected_src: SocketAddr,
+        server: PeerKey,
+        client: Option<PeerKey>,
+        now: Instant,
+    ) -> Self {
+        Session { dest, expected_src, state: SessionState::Pending, last_seen: now, server, client }
+    }
+
+    /// The responder's index after its response was accepted.
+    pub fn open(
+        dest: SocketAddr,
+        expected_src: SocketAddr,
+        server: PeerKey,
+        client: Option<PeerKey>,
+        now: Instant,
+    ) -> Self {
+        Session { state: SessionState::Open, ..Self::pending(dest, expected_src, server, client, now) }
+    }
+}
+
 pub struct SessionTable {
     ttl: Duration,
-    map: HashMap<u32, Session>,
+    map: HashMap<SessionIdx, Session>,
 }
 
 impl SessionTable {
@@ -103,24 +135,32 @@ impl SessionTable {
 
     /// Insert, overwriting any existing entry (newest wins). Returns true on a
     /// collision with a live entry for a different address pair.
-    pub fn insert(&mut self, idx: u32, s: Session) -> bool {
+    pub fn insert(&mut self, idx: SessionIdx, s: Session) -> bool {
         let collided = matches!(self.map.insert(idx, s), Some(old)
-            if (old.dest, old.expected_src) != (s.dest, s.expected_src) && live(old.last, s.last, self.ttl));
+            if (old.dest, old.expected_src) != (s.dest, s.expected_src) && live(old.last_seen, s.last_seen, self.ttl));
         if collided {
-            tracing::warn!(idx, dest = %s.dest, "session index collision, keeping newest");
+            tracing::warn!(%idx, dest = %s.dest, "session index collision, keeping newest");
         }
         collided
     }
 
-    pub fn get(&self, idx: u32, now: Instant) -> Option<Session> {
-        self.map.get(&idx).filter(|s| live(s.last, now, self.ttl)).copied()
+    pub fn get(&self, idx: SessionIdx, now: Instant) -> Option<Session> {
+        self.map.get(&idx).filter(|s| live(s.last_seen, now, self.ttl)).copied()
     }
 
-    /// Refresh `last`; optionally mark open and record the client.
-    pub fn touch(&mut self, idx: u32, now: Instant, open: bool, client: Option<PeerKey>) {
+    /// Refresh `last_seen` after forwarding a packet on this index.
+    pub fn touch(&mut self, idx: SessionIdx, now: Instant) {
         if let Some(s) = self.map.get_mut(&idx) {
-            s.last = now;
-            s.open |= open;
+            s.last_seen = now;
+        }
+    }
+
+    /// Mark a pending index open once the response is accepted, recording the
+    /// client if the response identified it.
+    pub fn open(&mut self, idx: SessionIdx, now: Instant, client: Option<PeerKey>) {
+        if let Some(s) = self.map.get_mut(&idx) {
+            s.last_seen = now;
+            s.state = SessionState::Open;
             s.client = s.client.or(client);
         }
     }
@@ -146,12 +186,12 @@ impl SessionTable {
 
     pub fn expire(&mut self, now: Instant) -> usize {
         let ttl = self.ttl;
-        self.retain(|s| live(s.last, now, ttl))
+        self.retain(|s| live(s.last_seen, now, ttl))
     }
 
     /// Is any index with these upper 24 bits in use?
-    pub fn has_prefix(&self, prefix: u32) -> bool {
-        self.map.keys().any(|i| i >> 8 == prefix)
+    pub fn has_prefix(&self, prefix: IdxPrefix) -> bool {
+        self.map.keys().any(|i| i.prefix() == prefix)
     }
 
     pub fn clients(&self) -> HashSet<PeerKey> {

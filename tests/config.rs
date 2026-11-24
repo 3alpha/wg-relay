@@ -27,7 +27,7 @@ fn roles_defaults_and_acl() {
     assert_eq!(cfg.handshake_rate.per_sec(), 10.0);
     assert_eq!(cfg.private_key.public_key(), r.id());
     let laptop = cfg.peers.iter().find(|p| p.name == "laptop").unwrap();
-    assert_eq!((laptop.role, laptop.servers.clone()), (Role::Client, vec![s2.id()]));
+    assert_eq!(laptop.role, Role::Client { servers: vec![s2.id()] });
     assert!(cfg.warnings().is_empty());
 
     let cfg = Config::parse(

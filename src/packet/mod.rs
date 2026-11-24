@@ -1,5 +1,7 @@
 //! WireGuard wire format: header parsing and mac1 checks. Payloads stay opaque.
 
+use std::fmt;
+
 use blake2::digest::{KeyInit, Mac, consts::U16};
 use blake2::{Blake2s256, Blake2sMac, Digest};
 
@@ -14,31 +16,59 @@ pub const DATA_MIN_LEN: usize = 32;
 const INIT_MAC1_OFF: usize = 116;
 const RESP_MAC1_OFF: usize = 60;
 
-/// The routing-relevant header fields of a WireGuard message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Packet {
-    Init { sender: u32 },
-    Response { sender: u32, receiver: u32 },
-    Cookie { receiver: u32 },
-    Data { receiver: u32 },
-}
+/// A WireGuard session index (`sender_idx` / `receiver_idx`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionIdx(u32);
 
-impl Packet {
-    /// The index chosen by the *recipient* of this message, if any.
-    pub fn receiver(&self) -> Option<u32> {
-        match *self {
-            Packet::Init { .. } => None,
-            Packet::Response { receiver, .. } | Packet::Cookie { receiver } | Packet::Data { receiver } => {
-                Some(receiver)
-            }
-        }
+impl SessionIdx {
+    /// The upper 24 bits, which identify the relay tunnel that owns an index.
+    pub fn prefix(self) -> IdxPrefix {
+        IdxPrefix(self.0 >> 8)
     }
 }
 
-fn le32(b: &[u8], off: usize) -> Result<u32, ParseError> {
+impl fmt::Display for SessionIdx {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:#010x}", self.0)
+    }
+}
+
+impl From<u32> for SessionIdx {
+    fn from(idx: u32) -> Self {
+        SessionIdx(idx)
+    }
+}
+
+/// The upper 24 bits of a session index. boringtun numbers a tunnel's
+/// sessions `prefix << 8 | counter`, so each prefix covers 256 indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IdxPrefix(u32);
+
+impl IdxPrefix {
+    /// Build a prefix from any 32-bit value, keeping its low 24 bits.
+    pub fn from_bits(bits: u32) -> Self {
+        IdxPrefix(bits & 0x00ff_ffff)
+    }
+
+    /// The value boringtun's `Tunn::new` takes as its index.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// The routing-relevant header fields of a WireGuard message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Packet {
+    Init { sender: SessionIdx },
+    Response { sender: SessionIdx, receiver: SessionIdx },
+    Cookie { receiver: SessionIdx },
+    Data { receiver: SessionIdx },
+}
+
+fn idx(b: &[u8], off: usize) -> Result<SessionIdx, ParseError> {
     b.get(off..off + 4)
         .and_then(|s| <[u8; 4]>::try_from(s).ok())
-        .map(u32::from_le_bytes)
+        .map(|b| SessionIdx(u32::from_le_bytes(b)))
         .ok_or(ParseError::TooShort)
 }
 
@@ -55,18 +85,18 @@ pub fn parse(b: &[u8]) -> Result<Packet, ParseError> {
     match b[0] {
         1 => {
             exact(INIT_LEN)?;
-            Ok(Packet::Init { sender: le32(b, 4)? })
+            Ok(Packet::Init { sender: idx(b, 4)? })
         }
         2 => {
             exact(RESP_LEN)?;
-            Ok(Packet::Response { sender: le32(b, 4)?, receiver: le32(b, 8)? })
+            Ok(Packet::Response { sender: idx(b, 4)?, receiver: idx(b, 8)? })
         }
         3 => {
             exact(COOKIE_LEN)?;
-            Ok(Packet::Cookie { receiver: le32(b, 4)? })
+            Ok(Packet::Cookie { receiver: idx(b, 4)? })
         }
         4 if b.len() < DATA_MIN_LEN => Err(bad_length),
-        4 => Ok(Packet::Data { receiver: le32(b, 4)? }),
+        4 => Ok(Packet::Data { receiver: idx(b, 4)? }),
         t => Err(ParseError::BadType(t)),
     }
 }

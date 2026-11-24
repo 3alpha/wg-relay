@@ -8,8 +8,9 @@ use common::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use wg_relay::packet::SessionIdx;
 use wg_relay::packet::{self, Packet, ParseError};
-use wg_relay::tables::{RateLimiter as InitLimiter, Registry, Session, SessionTable};
+use wg_relay::tables::{RateLimiter as InitLimiter, Registry, Session, SessionState, SessionTable};
 
 #[test]
 fn parses_real_handshake_and_data() {
@@ -25,7 +26,7 @@ fn parses_real_handshake_and_data() {
 
     let data = encrypt(&mut ta, &ping([10, 0, 0, 1], [10, 0, 0, 2]));
     assert_eq!(packet::parse(&data).unwrap(), Packet::Data { receiver: r_idx });
-    assert_eq!(&init[4..8], &i_idx.to_le_bytes());
+    assert_eq!(i_idx, u32::from_le_bytes(init[4..8].try_into().unwrap()).into());
 }
 
 #[test]
@@ -109,26 +110,23 @@ fn mac1_matches_intended_recipient_only() {
 }
 
 fn sess(dest: &str, src: &str, t: Instant) -> Session {
-    Session {
-        dest: dest.parse().unwrap(),
-        expected_src: src.parse().unwrap(),
-        open: false,
-        last: t,
-        server: [1; 32].into(),
-        client: None,
-    }
+    Session::pending(dest.parse().unwrap(), src.parse().unwrap(), [1; 32].into(), None, t)
+}
+
+fn idx(i: u32) -> SessionIdx {
+    i.into()
 }
 
 #[test]
 fn session_table_expiry_and_touch() {
     let t0 = Instant::now();
     let mut t = SessionTable::new(Duration::from_secs(200));
-    t.insert(42, sess("192.0.2.1:1", "192.0.2.2:2", t0));
-    assert!(t.get(42, t0 + Duration::from_secs(199)).is_some());
-    assert!(t.get(42, t0 + Duration::from_secs(200)).is_none());
-    t.touch(42, t0 + Duration::from_secs(150), true, Some([7; 32].into()));
-    let s = t.get(42, t0 + Duration::from_secs(300)).unwrap();
-    assert!(s.open);
+    t.insert(idx(42), sess("192.0.2.1:1", "192.0.2.2:2", t0));
+    assert!(t.get(idx(42), t0 + Duration::from_secs(199)).is_some());
+    assert!(t.get(idx(42), t0 + Duration::from_secs(200)).is_none());
+    t.open(idx(42), t0 + Duration::from_secs(150), Some([7; 32].into()));
+    let s = t.get(idx(42), t0 + Duration::from_secs(300)).unwrap();
+    assert_eq!(s.state, SessionState::Open);
     assert_eq!(s.client, Some([7; 32].into()));
     assert_eq!(t.expire(t0 + Duration::from_secs(349)), 0);
     assert_eq!(t.expire(t0 + Duration::from_secs(351)), 1);
@@ -139,11 +137,14 @@ fn session_table_expiry_and_touch() {
 fn session_table_collisions_keep_newest() {
     let t0 = Instant::now();
     let mut t = SessionTable::new(Duration::from_secs(200));
-    assert!(!t.insert(7, sess("192.0.2.1:1", "192.0.2.2:2", t0)));
-    assert!(!t.insert(7, sess("192.0.2.1:1", "192.0.2.2:2", t0 + Duration::from_secs(1))), "same pair");
-    assert!(t.insert(7, sess("192.0.2.3:3", "192.0.2.4:4", t0 + Duration::from_secs(2))));
-    assert_eq!(t.get(7, t0 + Duration::from_secs(2)).unwrap().dest, "192.0.2.3:3".parse().unwrap());
-    assert!(!t.insert(7, sess("192.0.2.5:5", "192.0.2.6:6", t0 + Duration::from_secs(500))), "stale entry");
+    assert!(!t.insert(idx(7), sess("192.0.2.1:1", "192.0.2.2:2", t0)));
+    assert!(!t.insert(idx(7), sess("192.0.2.1:1", "192.0.2.2:2", t0 + Duration::from_secs(1))), "same pair");
+    assert!(t.insert(idx(7), sess("192.0.2.3:3", "192.0.2.4:4", t0 + Duration::from_secs(2))));
+    assert_eq!(t.get(idx(7), t0 + Duration::from_secs(2)).unwrap().dest, "192.0.2.3:3".parse().unwrap());
+    assert!(
+        !t.insert(idx(7), sess("192.0.2.5:5", "192.0.2.6:6", t0 + Duration::from_secs(500))),
+        "stale entry"
+    );
     assert_eq!(t.len(), 1);
 }
 
@@ -151,12 +152,12 @@ fn session_table_collisions_keep_newest() {
 fn session_table_migrate_retain_prefix() {
     let t0 = Instant::now();
     let mut t = SessionTable::new(Duration::from_secs(200));
-    t.insert(0x00ab_cd01, sess("192.0.2.1:1", "192.0.2.2:2", t0));
-    t.insert(0x0011_2201, sess("192.0.2.2:2", "192.0.2.1:1", t0));
-    assert!(t.has_prefix(0xabcd) && !t.has_prefix(0xabce));
+    t.insert(idx(0x00ab_cd01), sess("192.0.2.1:1", "192.0.2.2:2", t0));
+    t.insert(idx(0x0011_2201), sess("192.0.2.2:2", "192.0.2.1:1", t0));
+    assert!(t.has_prefix(idx(0x00ab_cd01).prefix()) && !t.has_prefix(idx(0x00ab_ce01).prefix()));
     t.migrate("192.0.2.1:1".parse().unwrap(), "192.0.2.9:9".parse().unwrap());
-    assert_eq!(t.get(0x00ab_cd01, t0).unwrap().dest, "192.0.2.9:9".parse().unwrap());
-    assert_eq!(t.get(0x0011_2201, t0).unwrap().expected_src, "192.0.2.9:9".parse().unwrap());
+    assert_eq!(t.get(idx(0x00ab_cd01), t0).unwrap().dest, "192.0.2.9:9".parse().unwrap());
+    assert_eq!(t.get(idx(0x0011_2201), t0).unwrap().expected_src, "192.0.2.9:9".parse().unwrap());
     assert_eq!(t.retain(|s| s.dest.port() == 9), 1);
 }
 

@@ -63,8 +63,10 @@ fn run() -> Result<(), AppError> {
         println!("init rate    {} per source IP", cfg.handshake_rate);
         let name = |k: &PeerKey| cfg.peers.iter().find(|p| &p.pubkey == k).map_or("?", |p| p.name.as_str());
         for p in &cfg.peers {
-            let reach: Vec<&str> = p.servers.iter().map(name).collect();
-            let role = if p.role == Role::Server { "server" } else { "client" };
+            let (role, reach): (_, Vec<&str>) = match &p.role {
+                Role::Server => ("server", Vec::new()),
+                Role::Client { servers } => ("client", servers.iter().map(name).collect()),
+            };
             println!("{role} {:<12} {}  {}", p.name, p.pubkey, reach.join(", "));
         }
         return Ok(());

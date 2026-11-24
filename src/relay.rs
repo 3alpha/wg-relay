@@ -5,8 +5,8 @@
 
 use crate::config::{Config, Gate, Role};
 use crate::key::PeerKey;
-use crate::packet::{self, Mac1Key, Packet};
-use crate::tables::{REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, Session, SessionTable};
+use crate::packet::{self, IdxPrefix, Mac1Key, Packet, SessionIdx};
+use crate::tables::{REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, Session, SessionState, SessionTable};
 use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::{Tunn, TunnResult};
 use rand_core::{OsRng, RngCore};
@@ -108,11 +108,17 @@ impl fmt::Display for Metrics {
     }
 }
 
+/// Cookie replies and data are both routed by receiver index alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Indexed {
+    Cookie,
+    Data,
+}
+
 struct PeerState {
     name: String,
     role: Role,
     mac1: Mac1Key,
-    servers: Vec<PeerKey>,
     /// Registration tunnel: servers always, clients only with `client_gate = "register"`.
     tunn: Option<Tunn>,
 }
@@ -126,7 +132,7 @@ pub struct Relay {
     peers: HashMap<PeerKey, PeerState>,
     /// Upper 24 bits of each relay tunnel's local indexes. Forwarded sessions
     /// may never use these (see `reserved`).
-    tunn_by_base: HashMap<u32, PeerKey>,
+    tunn_by_base: HashMap<IdxPrefix, PeerKey>,
     pub registry: Registry<PeerKey>,
     /// Client addresses learned from accepted server responses (gates none/response).
     learned: HashMap<PeerKey, SocketAddr>,
@@ -181,8 +187,14 @@ impl Relay {
         self.limiter.set_rate(cfg.handshake_rate.per_sec());
         let mut old = std::mem::take(&mut self.peers);
         for p in &cfg.peers {
-            let registrable = p.role == Role::Server || cfg.gate == Gate::Register;
-            let prev = old.remove(&p.pubkey).filter(|o| o.role == p.role).and_then(|o| o.tunn);
+            let registrable = match (&p.role, cfg.gate) {
+                (Role::Server, _) | (Role::Client { .. }, Gate::Register) => true,
+                (Role::Client { .. }, Gate::None | Gate::Response) => false,
+            };
+            let prev = old
+                .remove(&p.pubkey)
+                .filter(|o| o.role.is_server() == p.role.is_server())
+                .and_then(|o| o.tunn);
             let tunn = match (registrable, prev) {
                 (true, Some(t)) => Some(t),
                 (true, None) => Some(self.new_tunn(p.pubkey)),
@@ -190,9 +202,8 @@ impl Relay {
             };
             let state = PeerState {
                 name: p.name.clone(),
-                role: p.role,
+                role: p.role.clone(),
                 mac1: packet::mac1_key(p.pubkey.as_bytes()),
-                servers: p.servers.clone(),
                 tunn,
             };
             self.peers.insert(p.pubkey, state);
@@ -207,7 +218,7 @@ impl Relay {
                 self.registry.remove(&k);
             }
         }
-        self.learned.retain(|k, _| peers.get(k).is_some_and(|p| p.role == Role::Client));
+        self.learned.retain(|k, _| peers.get(k).is_some_and(|p| p.role.is_client()));
         let gate = self.gate;
         let dropped = self.sessions.retain(|s| session_allowed(peers, gate, s));
         info!(peers = peers.len(), gate = ?gate, dropped_sessions = dropped, "config applied");
@@ -215,40 +226,40 @@ impl Relay {
 
     /// A relay tunnel whose index range no live session uses.
     fn new_tunn(&mut self, peer: PeerKey) -> Tunn {
-        let base = loop {
-            let b = OsRng.next_u32() & 0x00ff_ffff;
-            if !self.tunn_by_base.contains_key(&b) && !self.sessions.has_prefix(b) {
-                break b;
+        let prefix = loop {
+            let p = IdxPrefix::from_bits(OsRng.next_u32());
+            if !self.tunn_by_base.contains_key(&p) && !self.sessions.has_prefix(p) {
+                break p;
             }
         };
-        self.tunn_by_base.insert(base, peer);
-        Tunn::new(self.secret.clone(), PublicKey::from(peer), None, None, base, None)
+        self.tunn_by_base.insert(prefix, peer);
+        Tunn::new(self.secret.clone(), PublicKey::from(peer), None, None, prefix.get(), None)
     }
 
-    fn reserved(&self, idx: u32) -> bool {
-        self.tunn_by_base.contains_key(&(idx >> 8))
+    fn reserved(&self, idx: SessionIdx) -> bool {
+        self.tunn_by_base.contains_key(&idx.prefix())
     }
 
     /// The registration tunnel that owns this receiver index, if any.
-    fn relay_tunnel(&self, idx: u32) -> Option<PeerKey> {
-        self.tunn_by_base.get(&(idx >> 8)).copied()
+    fn relay_tunnel(&self, idx: SessionIdx) -> Option<PeerKey> {
+        self.tunn_by_base.get(&idx.prefix()).copied()
     }
 
-    fn role_of(&self, k: &PeerKey) -> Option<Role> {
-        self.peers.get(k).map(|p| p.role)
+    fn has_role(&self, k: &PeerKey, want: fn(&Role) -> bool) -> bool {
+        self.peers.get(k).is_some_and(|p| want(&p.role))
     }
 
-    /// Find the peer with this role whose key the packet's mac1 was made for.
-    fn mac1_peer(&self, pkt: &[u8], role: Role) -> Option<PeerKey> {
-        self.peers.iter().find(|(_, p)| p.role == role && packet::mac1_matches(&p.mac1, pkt)).map(|(k, _)| *k)
+    /// Find the peer of the wanted role whose key the packet's mac1 was made for.
+    fn mac1_peer(&self, pkt: &[u8], want: fn(&Role) -> bool) -> Option<PeerKey> {
+        self.peers.iter().find(|(_, p)| want(&p.role) && packet::mac1_matches(&p.mac1, pkt)).map(|(k, _)| *k)
     }
 
     fn may_reach(&self, client: &PeerKey, server: &PeerKey) -> bool {
-        self.peers.get(client).is_some_and(|p| p.role == Role::Client && p.servers.contains(server))
+        self.peers.get(client).is_some_and(|p| p.role.may_reach(server))
     }
 
     fn server_at(&self, src: SocketAddr, now: Instant) -> Option<PeerKey> {
-        self.registry.key_at(src, now).filter(|k| self.role_of(k) == Some(Role::Server))
+        self.registry.key_at(src, now).filter(|k| self.has_role(k, Role::is_server))
     }
 
     fn client_addr(&self, c: &PeerKey, now: Instant) -> Option<SocketAddr> {
@@ -289,8 +300,8 @@ impl Relay {
             Packet::Response { sender, receiver } => {
                 self.forward_response(src, pkt, sender, receiver, now).into()
             }
-            Packet::Cookie { receiver } => self.forward_indexed(src, false, receiver, now).into(),
-            Packet::Data { receiver } => self.forward_indexed(src, true, receiver, now).into(),
+            Packet::Cookie { receiver } => self.forward_indexed(src, Indexed::Cookie, receiver, now).into(),
+            Packet::Data { receiver } => self.forward_indexed(src, Indexed::Data, receiver, now).into(),
         }
     }
 
@@ -359,13 +370,13 @@ impl Relay {
         &mut self,
         src: SocketAddr,
         pkt: &[u8],
-        sender: u32,
+        sender: SessionIdx,
         now: Instant,
     ) -> Result<SocketAddr, Reason> {
         if self.reserved(sender) {
             return Err(Reason::ReservedIndex);
         }
-        if let Some(server) = self.mac1_peer(pkt, Role::Server) {
+        if let Some(server) = self.mac1_peer(pkt, Role::is_server) {
             // A client (or, without `register`, anyone) initiating to a server.
             let dst = self.registry.addr(&server, now).ok_or(Reason::ServerNotRegistered)?;
             if dst == src {
@@ -376,7 +387,7 @@ impl Relay {
                     let c = self
                         .registry
                         .key_at(src, now)
-                        .filter(|c| self.role_of(c) == Some(Role::Client))
+                        .filter(|c| self.has_role(c, Role::is_client))
                         .ok_or(Reason::SrcNotRegisteredClient)?;
                     if !self.may_reach(&c, &server) {
                         return Err(Reason::Acl);
@@ -385,24 +396,17 @@ impl Relay {
                 }
                 Gate::None | Gate::Response => None,
             };
-            let s = Session { dest: src, expected_src: dst, open: false, last: now, server, client };
+            let s = Session::pending(src, dst, server, client, now);
             return Ok(self.insert_session(sender, s));
         }
-        if let Some(client) = self.mac1_peer(pkt, Role::Client) {
+        if let Some(client) = self.mac1_peer(pkt, Role::is_client) {
             // A server re-keying towards a client.
             let server = self.server_at(src, now).ok_or(Reason::RekeyNotFromServer)?;
             if !self.may_reach(&client, &server) {
                 return Err(Reason::Acl);
             }
             let dst = self.client_addr(&client, now).ok_or(Reason::ClientAddrUnknown)?;
-            let s = Session {
-                dest: src,
-                expected_src: dst,
-                open: false,
-                last: now,
-                server,
-                client: Some(client),
-            };
+            let s = Session::pending(src, dst, server, Some(client), now);
             return Ok(self.insert_session(sender, s));
         }
         Err(Reason::NoMac1Match)
@@ -410,7 +414,7 @@ impl Relay {
 
     /// Store a session and return its counterpart's address, where the
     /// handshake message that created it goes.
-    fn insert_session(&mut self, idx: u32, s: Session) -> SocketAddr {
+    fn insert_session(&mut self, idx: SessionIdx, s: Session) -> SocketAddr {
         if self.sessions.insert(idx, s) {
             self.metrics.idx_collisions += 1;
         }
@@ -421,8 +425,8 @@ impl Relay {
         &mut self,
         src: SocketAddr,
         pkt: &[u8],
-        sender: u32,
-        receiver: u32,
+        sender: SessionIdx,
+        receiver: SessionIdx,
         now: Instant,
     ) -> Result<SocketAddr, Reason> {
         let init = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
@@ -435,7 +439,7 @@ impl Relay {
         let client = match self.server_at(src, now) {
             // Server answering a client: mac1 names the client the server authenticated.
             Some(server) if server != init.server => return Err(Reason::WrongSource),
-            Some(server) => match (self.mac1_peer(pkt, Role::Client), self.gate) {
+            Some(server) => match (self.mac1_peer(pkt, Role::is_client), self.gate) {
                 (Some(c), _) if !self.may_reach(&c, &server) => return Err(Reason::Acl),
                 (Some(c), Gate::Register) if self.registry.addr(&c, now) != Some(init.dest) => {
                     return Err(Reason::ClientAddrMismatch);
@@ -458,36 +462,31 @@ impl Relay {
                 init.client
             }
         };
-        self.sessions.touch(receiver, now, true, client);
-        let s = Session {
-            dest: src,
-            expected_src: init.dest,
-            open: true,
-            last: now,
-            server: init.server,
-            client,
-        };
+        self.sessions.open(receiver, now, client);
+        let s = Session::open(src, init.dest, init.server, client, now);
         self.insert_session(sender, s);
         Ok(init.dest)
     }
 
-    /// Cookie replies and data: only from the expected source; data only on open sessions.
+    /// Route cookie replies and data: only from the expected source; data only on open sessions.
     fn forward_indexed(
         &mut self,
         src: SocketAddr,
-        data: bool,
-        receiver: u32,
+        kind: Indexed,
+        receiver: SessionIdx,
         now: Instant,
     ) -> Result<SocketAddr, Reason> {
         let s = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
         if src != s.expected_src {
             return Err(Reason::WrongSource);
         }
-        if data && !s.open {
-            return Err(Reason::SessionNotOpen);
+        match (kind, s.state) {
+            (Indexed::Data, SessionState::Pending) => Err(Reason::SessionNotOpen),
+            (Indexed::Data, SessionState::Open) | (Indexed::Cookie, _) => {
+                self.sessions.touch(receiver, now);
+                Ok(s.dest)
+            }
         }
-        self.sessions.touch(receiver, now, false, None);
-        Ok(s.dest)
     }
 
     /// Run relay tunnel timers and expire soft state. Call a few times a second.
@@ -515,12 +514,14 @@ impl Relay {
 
 /// May this session survive a config change?
 fn session_allowed(peers: &HashMap<PeerKey, PeerState>, gate: Gate, s: &Session) -> bool {
-    if !peers.get(&s.server).is_some_and(|p| p.role == Role::Server) {
+    if !peers.get(&s.server).is_some_and(|p| p.role.is_server()) {
         return false;
     }
-    match s.client {
-        Some(c) => peers.get(&c).is_some_and(|p| p.role == Role::Client && p.servers.contains(&s.server)),
-        None => gate == Gate::None || !s.open,
+    match (s.client, gate, s.state) {
+        (Some(c), _, _) => peers.get(&c).is_some_and(|p| p.role.may_reach(&s.server)),
+        // Only `none` lets a session open without identifying its client.
+        (None, Gate::None, _) | (None, _, SessionState::Pending) => true,
+        (None, Gate::Response | Gate::Register, SessionState::Open) => false,
     }
 }
 
