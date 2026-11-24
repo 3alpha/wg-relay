@@ -102,14 +102,14 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
                     if let Verdict::Forward(dst) = relay.handle(src, &buf[..n], Instant::now())
                         && let Err(e) = sock.send_to(&buf[..n], dst).await
                     {
-                        relay.metrics.send_errors += 1;
+                        relay.record_send_error();
                         warn!(%dst, error = %e, "send failed");
                     }
                 }
                 Err(e) => warn!(error = %e, "recv failed"),
             },
             _ = timers.tick() => relay.tick(Instant::now()),
-            _ = stats.tick() => info!(metrics = %relay.metrics, sessions = relay.sessions.len(), "stats"),
+            _ = stats.tick() => info!(metrics = %relay.metrics(), sessions = relay.session_count(), "stats"),
             _ = hup.recv() => match Config::load(&path) {
                 Ok(new) => {
                     if new.listen != cfg.listen {
@@ -123,14 +123,13 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
             _ = tokio::signal::ctrl_c() => break,
             _ = term.recv() => break,
         }
-        for (dst, pkt) in std::mem::take(&mut relay.outbox) {
-            relay.metrics.tunnel_tx += 1;
+        for (dst, pkt) in relay.take_outbox() {
             if let Err(e) = sock.send_to(&pkt, dst).await {
-                relay.metrics.send_errors += 1;
+                relay.record_send_error();
                 warn!(%dst, error = %e, "send failed");
             }
         }
     }
-    info!(metrics = %relay.metrics, "shutting down");
+    info!(metrics = %relay.metrics(), "shutting down");
     Ok(())
 }

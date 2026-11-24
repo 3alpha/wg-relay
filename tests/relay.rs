@@ -85,11 +85,11 @@ impl W {
         let mut t = tunn(k, &self.r);
         let init = initiation(&mut t);
         assert_eq!(self.fwd(src, &init), None);
-        let out = std::mem::take(&mut self.relay.outbox);
+        let out = self.relay.take_outbox();
         assert_eq!(out.len(), 1, "relay should answer the registration");
         let ka = reply(&mut t, &out[0].1).expect("keepalive to relay");
         assert_eq!(self.fwd(src, &ka), None);
-        assert_eq!(self.relay.registry.addr(&k.id(), Instant::now()), Some(addr(src)));
+        assert_eq!(self.relay.registered_addr(&k.id(), Instant::now()), Some(addr(src)));
         t
     }
 
@@ -102,7 +102,7 @@ impl W {
     }
 
     fn n(&self, r: Reason) -> u64 {
-        self.relay.metrics.rejected(r)
+        self.relay.metrics().rejected(r)
     }
 }
 
@@ -261,22 +261,22 @@ fn reload_revokes_immediately() {
     // Remove c1 entirely, and take `main` away from c3.
     let cfg = config(&w, "register", &[("c3", &c3k, "\"other\"")]);
     w.relay.reload(&cfg);
-    assert_eq!(w.relay.registry.addr(&c1k.id(), Instant::now()), None);
-    assert!(w.relay.sessions.is_empty(), "both sessions revoked");
+    assert_eq!(w.relay.registered_addr(&c1k.id(), Instant::now()), None);
+    assert!(w.relay.session_count() == 0, "both sessions revoked");
     assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), None);
     assert_eq!(data(&mut w, &mut sc3, SRV, &mut c3s), None);
     assert_eq!(w.n(Reason::UnknownIndex), 2);
     // c3 is still registered (it is still a client), but may not reach main.
-    assert!(w.relay.registry.addr(&c3k.id(), Instant::now()).is_some());
+    assert!(w.relay.registered_addr(&c3k.id(), Instant::now()).is_some());
     assert_eq!(w.fwd(C3, &initiation(&mut c3s)), None);
     assert_eq!(w.n(Reason::Acl), 1);
     // Servers keep their registrations.
-    assert!(w.relay.registry.addr(&w.srv.id(), Instant::now()).is_some());
+    assert!(w.relay.registered_addr(&w.srv.id(), Instant::now()).is_some());
 
     // Switching to `response` drops client registrations.
     let cfg = config(&w, "response", &[("c3", &c3k, "\"main\"")]);
     w.relay.reload(&cfg);
-    assert_eq!(w.relay.registry.addr(&c3k.id(), Instant::now()), None);
+    assert_eq!(w.relay.registered_addr(&c3k.id(), Instant::now()), None);
     assert_eq!(hs(&mut w, &mut c3s, C3, &mut sc3, SRV), ok3(SRV, C3));
 }
 
@@ -288,7 +288,7 @@ fn relay_indexes_are_reserved() {
     let mut t = tunn(&srv, &w.r);
     let init = initiation(&mut t);
     w.fwd(SRV, &init);
-    let resp = w.relay.outbox.pop().unwrap().1;
+    let resp = w.relay.take_outbox().pop().unwrap().1;
     let relay_idx = u32::from_le_bytes(resp[4..8].try_into().unwrap());
     // A forwarded handshake trying to use an index in the relay's range is refused.
     let mut c1s = tunn(&w.c1, &w.srv);
@@ -324,7 +324,7 @@ fn relay_key_cannot_open_forwarded_initiation_and_ping_works() {
     let srv = w.srv.clone();
     let mut sr = w.register(&srv, SRV);
     assert_eq!(w.fwd(SRV, &encrypt(&mut sr, &ping([10, 99, 0, 1], [10, 99, 0, 254]))), None);
-    let out = std::mem::take(&mut w.relay.outbox);
+    let out = w.relay.take_outbox();
     let mut buf = vec![0u8; 2048];
     assert!(
         matches!(sr.decapsulate(None, &out[0].1, &mut buf), TunnResult::WriteToTunnelV4(p, _) if p[20] == 0)
@@ -337,9 +337,9 @@ fn expiry_and_rate_limit() {
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     w.relay.tick(Instant::now() + Duration::from_secs(181));
-    assert_eq!(w.relay.registry.addr(&w.srv.id(), Instant::now() + Duration::from_secs(181)), None);
+    assert_eq!(w.relay.registered_addr(&w.srv.id(), Instant::now() + Duration::from_secs(181)), None);
     w.relay.tick(Instant::now() + Duration::from_secs(201));
-    assert!(w.relay.sessions.is_empty());
+    assert!(w.relay.session_count() == 0);
 
     let mut w = world("none");
     let mut c1s = tunn(&w.c1, &w.srv);
@@ -384,8 +384,8 @@ fn garbage_never_panics() {
             }
             let src = [SRV, C1, ST][(rnd() % 3) as usize];
             w.fwd(src, &p);
-            w.relay.outbox.clear();
+            w.relay.take_outbox();
         }
-        assert!(w.n(Reason::Malformed) > 500, "{}", w.relay.metrics);
+        assert!(w.n(Reason::Malformed) > 500, "{}", w.relay.metrics());
     }
 }
