@@ -11,7 +11,7 @@ use boringtun::noise::{Tunn, TunnResult};
 use tracing::{debug, info};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::config::{Config, Gate, Role};
+use crate::config::{Config, Gate};
 use crate::key::PeerKey;
 use crate::packet::{self, IdxPrefix, Mac1Key, Packet, SessionIdx};
 use crate::tables::{REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, SessionTable};
@@ -28,12 +28,39 @@ pub use reason::{Reason, Verdict};
 
 const SCRATCH_LEN: usize = 65536 + 256;
 
+/// What the relay holds for each allowlisted key.
+enum PeerKind {
+    /// Servers register with the relay through their own tunnel.
+    Server {
+        tunn: Box<Tunn>,
+    },
+    Client {
+        servers: Vec<PeerKey>,
+    },
+}
+
+impl PeerKind {
+    fn is_server(&self) -> bool {
+        matches!(self, PeerKind::Server { .. })
+    }
+
+    fn is_client(&self) -> bool {
+        matches!(self, PeerKind::Client { .. })
+    }
+
+    /// Is this a client allowed to reach `server`?
+    fn may_reach(&self, server: &PeerKey) -> bool {
+        match self {
+            PeerKind::Server { .. } => false,
+            PeerKind::Client { servers } => servers.contains(server),
+        }
+    }
+}
+
 struct PeerState {
     name: String,
-    role: Role,
     mac1: Mac1Key,
-    /// Registration tunnel: servers always, clients only with `client_gate = "register"`.
-    tunn: Option<Tunn>,
+    kind: PeerKind,
 }
 
 pub struct Relay {
@@ -46,8 +73,9 @@ pub struct Relay {
     /// Index prefix of each relay tunnel. Forwarded sessions may never use
     /// these (see `reserved`).
     tunn_by_prefix: HashMap<IdxPrefix, PeerKey>,
+    /// Server registrations; clients never register.
     registry: Registry,
-    /// Client addresses learned from accepted server responses (gates none/response).
+    /// Client addresses learned from accepted server responses.
     learned: HashMap<PeerKey, SocketAddr>,
     sessions: SessionTable,
     limiter: RateLimiter,
@@ -156,7 +184,7 @@ impl Relay {
     /// Run relay tunnel timers and expire soft state. Call a few times a second.
     pub fn tick(&mut self, now: Instant) {
         for (key, peer) in &mut self.peers {
-            let Some(tunn) = &mut peer.tunn else { continue };
+            let PeerKind::Server { tunn } = &mut peer.kind else { continue };
             let TunnResult::WriteToNetwork(out) = tunn.update_timers(&mut self.scratch) else {
                 continue;
             };
@@ -185,30 +213,20 @@ impl Relay {
         self.tunn_by_prefix.get(&idx.prefix()).copied()
     }
 
-    fn has_role(&self, k: &PeerKey, want: fn(&Role) -> bool) -> bool {
-        self.peers.get(k).is_some_and(|p| want(&p.role))
-    }
-
-    /// Find the peer of the wanted role whose key the packet's mac1 was made for.
-    fn mac1_peer(&self, pkt: &[u8], want: fn(&Role) -> bool) -> Option<PeerKey> {
+    /// Find the peer of the wanted kind whose key the packet's mac1 was made for.
+    fn mac1_peer(&self, pkt: &[u8], want: fn(&PeerKind) -> bool) -> Option<PeerKey> {
         self.peers
             .iter()
-            .find(|(_, p)| want(&p.role) && packet::mac1_matches(&p.mac1, pkt))
+            .find(|(_, p)| want(&p.kind) && packet::mac1_matches(&p.mac1, pkt))
             .map(|(k, _)| *k)
     }
 
     fn may_reach(&self, client: &PeerKey, server: &PeerKey) -> bool {
-        self.peers.get(client).is_some_and(|p| p.role.may_reach(server))
+        self.peers.get(client).is_some_and(|p| p.kind.may_reach(server))
     }
 
+    /// The server registered at `src`; only servers ever register.
     fn server_at(&self, src: SocketAddr, now: Instant) -> Option<PeerKey> {
-        self.registry.key_at(src, now).filter(|k| self.has_role(k, Role::is_server))
-    }
-
-    fn client_addr(&self, c: &PeerKey, now: Instant) -> Option<SocketAddr> {
-        match self.gate {
-            Gate::Register => self.registry.addr(c, now),
-            Gate::None | Gate::Response => self.learned.get(c).copied(),
-        }
+        self.registry.key_at(src, now)
     }
 }

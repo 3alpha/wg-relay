@@ -19,12 +19,10 @@ pub use summary::Summary;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Gate {
-    /// Anyone may send initiations to a registered server (rate-limited).
+    /// Only servers are allowlisted; the server's own peer list decides who gets in.
     None,
-    /// As `none`, but a server's response only passes if its mac1 names an allowlisted client.
+    /// A server's response only passes if its mac1 names an allowlisted client.
     Response,
-    /// Clients register with the relay; only their registered address may initiate.
-    Register,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +88,7 @@ fn default_listen() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 51820))
 }
 fn default_gate() -> Gate {
-    Gate::Register
+    Gate::Response
 }
 
 #[derive(Debug, Clone)]

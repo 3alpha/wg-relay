@@ -5,7 +5,7 @@ use rand_core::{OsRng, RngCore};
 use tracing::{info, warn};
 use x25519_dalek::PublicKey;
 
-use super::{PeerState, Relay};
+use super::{PeerKind, PeerState, Relay};
 use crate::config::{Config, Gate, Role};
 use crate::key::PeerKey;
 use crate::packet::{self, IdxPrefix};
@@ -13,7 +13,7 @@ use crate::tables::{Session, SessionState};
 
 impl Relay {
     /// Apply a (re)loaded config. Removed keys, and clients that lost access,
-    /// lose their registration and sessions immediately.
+    /// lose their registrations and sessions immediately.
     pub fn reload(&mut self, cfg: &Config) {
         if cfg.private_key.public_key() != self.public_key() {
             warn!("changing private_key requires a restart; keeping the current key");
@@ -23,24 +23,21 @@ impl Relay {
         self.limiter.set_rate(cfg.handshake_rate.per_sec());
         let mut old = std::mem::take(&mut self.peers);
         for p in &cfg.peers {
-            let registrable = match (&p.role, cfg.gate) {
-                (Role::Server, _) | (Role::Client { .. }, Gate::Register) => true,
-                (Role::Client { .. }, Gate::None | Gate::Response) => false,
+            let prev_tunn = match old.remove(&p.pubkey).map(|o| o.kind) {
+                Some(PeerKind::Server { tunn }) => Some(tunn),
+                Some(PeerKind::Client { .. }) | None => None,
             };
-            let prev = old
-                .remove(&p.pubkey)
-                .filter(|o| o.role.is_server() == p.role.is_server())
-                .and_then(|o| o.tunn);
-            let tunn = match (registrable, prev) {
-                (true, Some(t)) => Some(t),
-                (true, None) => Some(self.new_tunn(p.pubkey)),
-                (false, _) => None,
+            let kind = match (&p.role, prev_tunn) {
+                (Role::Server, Some(tunn)) => PeerKind::Server { tunn },
+                (Role::Server, None) => {
+                    PeerKind::Server { tunn: Box::new(self.new_tunn(p.pubkey)) }
+                }
+                (Role::Client { servers }, _) => PeerKind::Client { servers: servers.clone() },
             };
             let state = PeerState {
                 name: p.name.clone(),
-                role: p.role.clone(),
                 mac1: packet::mac1_key(p.pubkey.as_bytes()),
-                tunn,
+                kind,
             };
             self.peers.insert(p.pubkey, state);
         }
@@ -48,13 +45,13 @@ impl Relay {
             info!(peer = %o.name, "peer removed from config");
         }
         let peers = &self.peers;
-        self.tunn_by_prefix.retain(|_, k| peers.get(k).is_some_and(|p| p.tunn.is_some()));
+        self.tunn_by_prefix.retain(|_, k| peers.get(k).is_some_and(|p| p.kind.is_server()));
         for k in self.registry.keys() {
-            if !peers.get(&k).is_some_and(|p| p.tunn.is_some()) {
+            if !peers.get(&k).is_some_and(|p| p.kind.is_server()) {
                 self.registry.remove(&k);
             }
         }
-        self.learned.retain(|k, _| peers.get(k).is_some_and(|p| p.role.is_client()));
+        self.learned.retain(|k, _| peers.get(k).is_some_and(|p| p.kind.is_client()));
         let gate = self.gate;
         let dropped = self.sessions.retain(|s| session_allowed(peers, gate, s));
         info!(peers = peers.len(), gate = ?gate, dropped_sessions = dropped, "config applied");
@@ -75,13 +72,13 @@ impl Relay {
 
 /// May this session survive a config change?
 fn session_allowed(peers: &HashMap<PeerKey, PeerState>, gate: Gate, s: &Session) -> bool {
-    if !peers.get(&s.server).is_some_and(|p| p.role.is_server()) {
+    if !peers.get(&s.server).is_some_and(|p| p.kind.is_server()) {
         return false;
     }
     match (s.client, gate, s.state) {
-        (Some(c), _, _) => peers.get(&c).is_some_and(|p| p.role.may_reach(&s.server)),
+        (Some(c), _, _) => peers.get(&c).is_some_and(|p| p.kind.may_reach(&s.server)),
         // Only `none` lets a session open without identifying its client.
-        (None, Gate::None, _) | (None, _, SessionState::Pending) => true,
-        (None, Gate::Response | Gate::Register, SessionState::Open) => false,
+        (None, Gate::None, _) | (None, Gate::Response, SessionState::Pending) => true,
+        (None, Gate::Response, SessionState::Open) => false,
     }
 }

@@ -8,15 +8,18 @@
 #
 # Every host runs kernel WireGuard behind its own NAT (MASQUERADE, unsolicited
 # inbound dropped). Tunnel IPs: srv 10.99.0.1, c1 .11, c2 .12, st .13, relay .254.
-# c1 and c2 are allowlisted for server "main"; st (stranger) is not, although it
-# knows the server's public key. For each client_gate (none, response, register):
-#   1. the server (and in `register`, the clients) register with the relay
+# The server has c1 and c2 as peers; st (stranger) is not one of them, although
+# it knows the server's public key. Two runs:
+#   none      relay.toml lists only the server
+#   response  relay.toml also lists c1 and c2 as clients of "main"
+# Each run asserts:
+#   1. the server registers with the relay
 #   2. c1 and c2 ping the server
-#   3. the stranger gets nothing through; in `register` mode a capture on the
-#      server's LAN proves its handshakes never reach the server (in the other
-#      modes the same check finds them, as a positive control)
-#   4. pings still work after a server-initiated and a client-initiated rekey
-#   5. (response, register) SIGHUP after removing c2 cuts c2 off immediately
+#   3. the stranger gets nothing through; a capture on the server's LAN shows
+#      its handshakes reach the server, which drops them
+#   4. pings still work after rekeys: client-initiated for both clients, plus a
+#      server-initiated one in `response` (where the relay knows the client)
+#   5. (response) SIGHUP after removing c2 cuts c2 off immediately
 #   6. the relay capture: forwarded handshakes cannot be opened with the relay
 #      key, forwarding is byte-identical, the ping payload never appears
 #
@@ -31,7 +34,7 @@ CHECK=${PCAP_CHECK_BIN:-$ROOT/target/debug/examples/pcap_check}
 for t in ip wg iptables tcpdump ping "$BIN" "$CHECK"; do
     command -v "$t" >/dev/null || { echo "missing: $t" >&2; exit 1; }
 done
-MODES=${MODES:-none response register}
+MODES=${MODES:-none response}
 
 P="wrt$$"
 HOSTS=(srv c1 c2 st)
@@ -116,15 +119,11 @@ peer_args() { # peer -> wg set arguments for that peer (endpoint is always the r
     esac
 }
 
-setup_wg() { # gate
+setup_wg() {
     for h in "${HOSTS[@]}"; do
-        local peers
+        local peers="srv"
         if [[ $h == srv ]]; then
             peers="relay c1 c2" # the server does not know the stranger
-        elif [[ $1 == register ]]; then
-            peers="relay srv"
-        else
-            peers="srv"
         fi
         x "$h" ip link del wg0 2>/dev/null || true
         x "$h" ip link add wg0 type wireguard
@@ -149,7 +148,10 @@ run_mode() {
     mkdir -p "$d"
     LOG="$d/relay.log"
     step "[$gate] starting relay and captures"
-    write_config "$gate" c1 c2
+    case $gate in
+        none) write_config none ;; # servers only
+        response) write_config response c1 c2 ;;
+    esac
     "$BIN" --check-config -c "$WORK/relay.toml" >"$d/check.txt"
     ip netns exec "$P-relay" tcpdump -i br0 -U -n -w "$d/relay.pcap" udp port 51820 2>"$d/tcpdump-relay.log" &
     PIDS+=($!)
@@ -162,36 +164,35 @@ run_mode() {
     PIDS+=($!)
     local relay_pid=$!
     sleep 0.3
-    setup_wg "$gate"
+    setup_wg
 
-    step "[$gate] 1. registration"
+    step "[$gate] 1. server registration"
     retry_ping srv 10.99.0.254 15 || fail "server not registered"
-    if [[ $gate == register ]]; then
-        retry_ping c1 10.99.0.254 15 || fail "c1 not registered"
-        retry_ping c2 10.99.0.254 15 || fail "c2 not registered"
-    fi
 
-    step "[$gate] 2. allowlisted clients ping the server"
+    step "[$gate] 2. the clients ping the server"
     must_ping c1 10.99.0.1
     must_ping c2 10.99.0.1
 
     step "[$gate] 3. the stranger gets nothing through"
     no_ping st 10.99.0.1
-    if [[ $gate == register ]]; then no_ping st 10.99.0.254; fi
 
-    step "[$gate] 4. rekey: server-initiated (c1), then client-initiated (c2)"
-    x srv wg set wg0 peer "$(pub c1)" remove
-    # shellcheck disable=SC2046
-    x srv wg set wg0 $(peer_args c1)
-    retry_ping srv 10.99.0.11 20 || fail "server-initiated rekey to c1 failed"
-    must_ping c1 10.99.0.1
-    x c2 wg set wg0 peer "$(pub srv)" remove
-    # shellcheck disable=SC2046
-    x c2 wg set wg0 $(peer_args srv)
-    must_ping c2 10.99.0.1
-    must_ping c1 10.99.0.1
+    if [[ $gate == response ]]; then
+        step "[$gate] 4a. server-initiated rekey (c1)"
+        x srv wg set wg0 peer "$(pub c1)" remove
+        # shellcheck disable=SC2046
+        x srv wg set wg0 $(peer_args c1)
+        retry_ping srv 10.99.0.11 20 || fail "server-initiated rekey to c1 failed"
+        must_ping c1 10.99.0.1
+    fi
+    step "[$gate] 4b. client-initiated rekeys (c1, c2)"
+    for c in c1 c2; do
+        x "$c" wg set wg0 peer "$(pub srv)" remove
+        # shellcheck disable=SC2046
+        x "$c" wg set wg0 $(peer_args srv)
+        must_ping "$c" 10.99.0.1
+    done
 
-    if [[ $gate != none ]]; then
+    if [[ $gate == response ]]; then
         step "[$gate] 5. SIGHUP after removing c2 revokes it immediately"
         write_config "$gate" c1
         kill -HUP "$relay_pid"
@@ -207,15 +208,8 @@ run_mode() {
     "$CHECK" --initiators "$d/srv.pcap" "$(cat "$WORK/srv.key")" >"$d/initiators.txt"
     # Control: c2's rekey in step 4 is always client-initiated, so it must show up.
     grep -qxF "$(pub c2)" "$d/initiators.txt" || fail "capture at server shows no c2 handshake"
-    if [[ $gate == register ]]; then
-        if grep -qxF "$(pub st)" "$d/initiators.txt"; then fail "stranger's handshake reached the server"; fi
-        echo "    server LAN capture: no stranger handshakes"
-        grep -q 'reject reason=registration_unknown_key' "$LOG" || fail "no registration_unknown_key reject logged"
-        grep -q 'reject reason=src_not_registered_client' "$LOG" || fail "no src_not_registered_client reject logged"
-    else
-        grep -qxF "$(pub st)" "$d/initiators.txt" || fail "positive control: stranger handshake should reach server"
-        echo "    server LAN capture: stranger handshakes present (expected, server drops them)"
-    fi
+    grep -qxF "$(pub st)" "$d/initiators.txt" || fail "stranger's handshakes should reach the server"
+    echo "    server LAN capture: stranger handshakes reached the server, which dropped them"
     grep -E 'shutting down' "$LOG" | sed 's/^.*metrics=/    metrics: /'
     echo "[$gate] PASSED"
 }

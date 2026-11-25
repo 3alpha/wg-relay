@@ -87,7 +87,7 @@ fn dummy(r: &Key) -> Config {
 }
 
 impl W {
-    /// Register `k` from `src` via a real handshake with the relay.
+    /// Register server `k` from `src` via a real handshake with the relay.
     fn register(&mut self, k: &Key, src: &str) -> Tunn {
         let mut t = tunn(k, &self.r);
         let init = initiation(&mut t);
@@ -169,7 +169,7 @@ fn gate_none() {
     // Clients cannot register in this mode.
     let mut c1r = tunn(&w.c1, &w.r);
     assert_eq!(w.fwd(C1, &initiation(&mut c1r)), None);
-    assert_eq!(w.n(Reason::ClientRegistrationOff), 1);
+    assert_eq!(w.n(Reason::ClientRegistration), 1);
 }
 
 #[test]
@@ -213,78 +213,42 @@ fn gate_response() {
 }
 
 #[test]
-fn gate_register() {
-    let mut w = world("register");
-    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    // Not registered yet: dropped before reaching the server.
-    assert_eq!(w.fwd(C1, &initiation(&mut c1s)), None);
-    assert_eq!(w.n(Reason::SrcNotRegisteredClient), 1);
-    let c1 = w.c1.clone();
-    w.register(&c1, C1);
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
-    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), Some(addr(SRV)));
-    assert_eq!(hs(&mut w, &mut sc1, SRV, &mut c1s, C1), ok3(C1, SRV), "server rekey");
-    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(C1)));
-
-    // Stranger: cannot register, and its initiations never reach the server.
-    let mut str_ = tunn(&w.st, &w.r);
-    assert_eq!(w.fwd(ST, &initiation(&mut str_)), None);
-    assert_eq!(w.n(Reason::UnknownKey), 1);
-    let mut sts = tunn(&w.st, &w.srv);
-    assert_eq!(w.fwd(ST, &initiation(&mut sts)), None);
-    assert_eq!(w.n(Reason::SrcNotRegisteredClient), 2);
-
-    // Registered c2 may not reach main.
-    let c2 = w.c2.clone();
-    w.register(&c2, C2);
-    let mut c2s = tunn(&w.c2, &w.srv);
-    assert_eq!(w.fwd(C2, &initiation(&mut c2s)), None);
-    assert_eq!(w.n(Reason::Acl), 1);
-
-    // Key/address binding: c3's handshake sent from c1's registered address.
-    let c3 = w.c3.clone();
-    w.register(&c3, C3);
-    let (mut c3s, mut sc3) = (tunn(&w.c3, &w.srv), tunn(&w.srv, &w.c3));
-    assert_eq!(hs(&mut w, &mut c3s, C1, &mut sc3, SRV)[..2], [Some(addr(SRV)), None]);
-    assert_eq!(w.n(Reason::ClientAddrMismatch), 1);
-
-    // Only a registered server may initiate towards a client.
-    let mut fake = tunn(&w.c3, &w.c1);
-    assert_eq!(w.fwd(C3, &initiation(&mut fake)), None);
-    assert_eq!(w.n(Reason::RekeyNotFromServer), 1);
-}
-
-#[test]
 fn reload_revokes_immediately() {
-    let mut w = world("register");
-    let (c1k, c3k) = (w.c1.clone(), w.c3.clone());
-    w.register(&c1k, C1);
-    w.register(&c3k, C3);
+    let mut w = world("response");
+    let c3k = w.c3.clone();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     let (mut c3s, mut sc3) = (tunn(&w.c3, &w.srv), tunn(&w.srv, &w.c3));
     assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     assert_eq!(hs(&mut w, &mut c3s, C3, &mut sc3, SRV), ok3(SRV, C3));
 
     // Remove c1 entirely, and take `main` away from c3.
-    let cfg = config(&w, "register", &[("c3", &c3k, "\"other\"")]);
+    let cfg = config(&w, "response", &[("c3", &c3k, "\"other\"")]);
     w.relay.reload(&cfg);
-    assert_eq!(w.relay.registered_addr(&c1k.id(), Instant::now()), None);
-    assert!(w.relay.session_count() == 0, "both sessions revoked");
+    assert_eq!(w.relay.session_count(), 0, "both sessions revoked");
     assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), None);
     assert_eq!(data(&mut w, &mut sc3, SRV, &mut c3s), None);
     assert_eq!(w.n(Reason::UnknownIndex), 2);
-    // c3 is still registered (it is still a client), but may not reach main.
-    assert!(w.relay.registered_addr(&c3k.id(), Instant::now()).is_some());
-    assert_eq!(w.fwd(C3, &initiation(&mut c3s)), None);
+    // c3's next handshake still reaches the server, but the response is refused.
+    assert_eq!(hs(&mut w, &mut c3s, C3, &mut sc3, SRV)[..2], [Some(addr(SRV)), None]);
     assert_eq!(w.n(Reason::Acl), 1);
     // Servers keep their registrations.
     assert!(w.relay.registered_addr(&w.srv.id(), Instant::now()).is_some());
+}
 
-    // Switching to `response` drops client registrations.
-    let cfg = config(&w, "response", &[("c3", &c3k, "\"main\"")]);
+#[test]
+fn switching_to_response_drops_unidentified_sessions() {
+    let mut w = world("none");
+    let (mut sts, mut sst) = (tunn(&w.st, &w.srv), tunn(&w.srv, &w.st));
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    assert_eq!(hs(&mut w, &mut sts, ST, &mut sst, SRV), ok3(SRV, ST));
+    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+
+    let (c1, c2, c3) = (w.c1.clone(), w.c2.clone(), w.c3.clone());
+    let clients = [("c1", &c1, "\"main\""), ("c2", &c2, "\"other\""), ("c3", &c3, "\"main\"")];
+    let cfg = config(&w, "response", &clients);
     w.relay.reload(&cfg);
-    assert_eq!(w.relay.registered_addr(&c3k.id(), Instant::now()), None);
-    assert_eq!(hs(&mut w, &mut c3s, C3, &mut sc3, SRV), ok3(SRV, C3));
+    assert_eq!(data(&mut w, &mut sts, ST, &mut sst), None, "unlisted client's session dropped");
+    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), Some(addr(SRV)), "listed client kept");
 }
 
 #[test]
@@ -363,7 +327,7 @@ fn expiry_and_rate_limit() {
 
 #[test]
 fn garbage_never_panics() {
-    for gate in ["none", "response", "register"] {
+    for gate in ["none", "response"] {
         let mut w = world(gate);
         let srv = w.srv.clone();
         let mut sr = w.register(&srv, SRV);

@@ -25,7 +25,7 @@ fn roles_defaults_and_acl() {
         + &client("laptop", &c, "\"backup\"");
     let cfg = Config::parse(&text).unwrap();
     assert_eq!(cfg.listen.to_string(), "0.0.0.0:51820");
-    assert_eq!(cfg.gate, Gate::Register, "safest gate is the default");
+    assert_eq!(cfg.gate, Gate::Response, "the stricter gate is the default");
     assert_eq!(cfg.handshake_rate.per_sec(), 10.0);
     assert_eq!(cfg.private_key.public_key(), r.id());
     let laptop = cfg.peers.iter().find(|p| p.name == "laptop").unwrap();
@@ -87,6 +87,9 @@ fn rejects_bad_configs_with_exact_errors() {
                 + &client("b", &b, "\"a\"").replace("servers = [\"a\"]\n", ""),
             |e| toml_error(e, "missing field `servers`"),
         ),
+        ("removed gate", head(&r, "client_gate = \"register\"\n") + &server("a", &a), |e| {
+            toml_error(e, "unknown variant")
+        }),
         ("bad gate", head(&r, "client_gate = \"strict\"\n") + &server("a", &a), |e| {
             toml_error(e, "unknown variant")
         }),
@@ -130,7 +133,7 @@ fn check_config_flag() {
     };
     let ok = run(&good);
     let out = String::from_utf8_lossy(&ok.stdout);
-    assert!(ok.status.success() && out.contains("config OK") && out.contains("Register"), "{out}");
+    assert!(ok.status.success() && out.contains("config OK") && out.contains("Response"), "{out}");
     assert!(out.contains("client laptop"), "{out}");
     assert!(!run(&bad).status.success());
     std::fs::remove_dir_all(&dir).ok();

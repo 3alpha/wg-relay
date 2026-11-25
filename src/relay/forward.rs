@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use super::{Reason, Relay};
-use crate::config::{Gate, Role};
+use super::{PeerKind, Reason, Relay};
+use crate::config::Gate;
 use crate::packet::{self, SessionIdx};
 use crate::tables::{Session, SessionState};
 
@@ -25,36 +25,22 @@ impl Relay {
         if self.reserved(sender) {
             return Err(Reason::ReservedIndex);
         }
-        if let Some(server) = self.mac1_peer(pkt, Role::is_server) {
-            // A client (or, without `register`, anyone) initiating to a server.
+        if let Some(server) = self.mac1_peer(pkt, PeerKind::is_server) {
+            // Anyone may initiate to a registered server; the gate applies to its response.
             let dst = self.registry.addr(&server, now).ok_or(Reason::ServerNotRegistered)?;
             if dst == src {
                 return Err(Reason::Loop);
             }
-            let client = match self.gate {
-                Gate::Register => {
-                    let c = self
-                        .registry
-                        .key_at(src, now)
-                        .filter(|c| self.has_role(c, Role::is_client))
-                        .ok_or(Reason::SrcNotRegisteredClient)?;
-                    if !self.may_reach(&c, &server) {
-                        return Err(Reason::Acl);
-                    }
-                    Some(c)
-                }
-                Gate::None | Gate::Response => None,
-            };
-            let s = Session::pending(src, dst, server, client, now);
+            let s = Session::pending(src, dst, server, None, now);
             return Ok(self.insert_session(sender, s));
         }
-        if let Some(client) = self.mac1_peer(pkt, Role::is_client) {
+        if let Some(client) = self.mac1_peer(pkt, PeerKind::is_client) {
             // A server re-keying towards a client.
             let server = self.server_at(src, now).ok_or(Reason::RekeyNotFromServer)?;
             if !self.may_reach(&client, &server) {
                 return Err(Reason::Acl);
             }
-            let dst = self.client_addr(&client, now).ok_or(Reason::ClientAddrUnknown)?;
+            let dst = self.learned.get(&client).copied().ok_or(Reason::ClientAddrUnknown)?;
             let s = Session::pending(src, dst, server, Some(client), now);
             return Ok(self.insert_session(sender, s));
         }
@@ -89,20 +75,14 @@ impl Relay {
         let client = match self.server_at(src, now) {
             // Server answering a client: mac1 names the client the server authenticated.
             Some(server) if server != init.server => return Err(Reason::WrongSource),
-            Some(server) => match (self.mac1_peer(pkt, Role::is_client), self.gate) {
+            Some(server) => match (self.mac1_peer(pkt, PeerKind::is_client), self.gate) {
                 (Some(c), _) if !self.may_reach(&c, &server) => return Err(Reason::Acl),
-                (Some(c), Gate::Register) if self.registry.addr(&c, now) != Some(init.dest) => {
-                    return Err(Reason::ClientAddrMismatch);
-                }
-                (Some(c), Gate::Register) => Some(c),
-                (Some(c), Gate::None | Gate::Response) => {
+                (Some(c), _) => {
                     self.learned.insert(c, init.dest);
                     Some(c)
                 }
                 (None, Gate::None) => None,
-                (None, Gate::Response | Gate::Register) => {
-                    return Err(Reason::ResponseUnknownClient);
-                }
+                (None, Gate::Response) => return Err(Reason::ResponseUnknownClient),
             },
             // Client answering a server-initiated handshake.
             None => {
