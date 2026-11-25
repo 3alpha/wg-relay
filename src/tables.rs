@@ -2,7 +2,7 @@
 
 use crate::key::PeerKey;
 use crate::packet::{IdxPrefix, SessionIdx};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -57,11 +57,6 @@ impl Registry {
         self.by_key.get(k).filter(|(_, t)| live(*t, now, self.ttl)).map(|(a, _)| *a)
     }
 
-    pub fn key_at(&self, addr: SocketAddr, now: Instant) -> Option<PeerKey> {
-        let k = *self.by_addr.get(&addr)?;
-        self.addr(&k, now).map(|_| k)
-    }
-
     pub fn remove(&mut self, k: &PeerKey) -> bool {
         let Some((a, _)) = self.by_key.remove(k) else { return false };
         self.by_addr.remove(&a);
@@ -104,9 +99,8 @@ pub struct Session {
     pub expected_src: SocketAddr,
     pub state: SessionState,
     pub last_seen: Instant,
-    /// The server end, and the client end once known; used to revoke on reload.
-    pub server: PeerKey,
-    pub client: Option<PeerKey>,
+    /// The listed peer the session was routed to; removing it revokes the session.
+    pub peer: PeerKey,
 }
 
 impl Session {
@@ -114,25 +108,15 @@ impl Session {
     pub fn pending(
         dest: SocketAddr,
         expected_src: SocketAddr,
-        server: PeerKey,
-        client: Option<PeerKey>,
+        peer: PeerKey,
         now: Instant,
     ) -> Self {
-        Session { dest, expected_src, state: SessionState::Pending, last_seen: now, server, client }
+        Session { dest, expected_src, state: SessionState::Pending, last_seen: now, peer }
     }
 
     /// The responder's index after its response was accepted.
-    pub fn open(
-        dest: SocketAddr,
-        expected_src: SocketAddr,
-        server: PeerKey,
-        client: Option<PeerKey>,
-        now: Instant,
-    ) -> Self {
-        Session {
-            state: SessionState::Open,
-            ..Self::pending(dest, expected_src, server, client, now)
-        }
+    pub fn open(dest: SocketAddr, expected_src: SocketAddr, peer: PeerKey, now: Instant) -> Self {
+        Session { state: SessionState::Open, ..Self::pending(dest, expected_src, peer, now) }
     }
 }
 
@@ -187,13 +171,11 @@ impl SessionTable {
         self.map.get_mut(&idx).filter(|s| ttls.live(s, now))
     }
 
-    /// Mark a pending index open once the response is accepted, recording the
-    /// client if the response identified it.
-    pub fn open(&mut self, idx: SessionIdx, now: Instant, client: Option<PeerKey>) {
+    /// Mark a pending index open once the response is accepted.
+    pub fn open(&mut self, idx: SessionIdx, now: Instant) {
         if let Some(s) = self.map.get_mut(&idx) {
             s.last_seen = now;
             s.state = SessionState::Open;
-            s.client = s.client.or(client);
         }
     }
 
@@ -224,10 +206,6 @@ impl SessionTable {
     /// Is any index with these upper 24 bits in use?
     pub fn has_prefix(&self, prefix: IdxPrefix) -> bool {
         self.map.keys().any(|i| i.prefix() == prefix)
-    }
-
-    pub fn clients(&self) -> HashSet<PeerKey> {
-        self.map.values().filter_map(|s| s.client).collect()
     }
 
     pub fn len(&self) -> usize {
@@ -293,11 +271,11 @@ mod tests {
     }
 
     fn pending(dest: &str, src: &str, t: Instant) -> Session {
-        Session::pending(addr(dest), addr(src), key(1), None, t)
+        Session::pending(addr(dest), addr(src), key(1), t)
     }
 
     fn open(dest: &str, src: &str, t: Instant) -> Session {
-        Session::open(addr(dest), addr(src), key(1), None, t)
+        Session::open(addr(dest), addr(src), key(1), t)
     }
 
     fn table() -> SessionTable {
@@ -332,19 +310,15 @@ mod tests {
     }
 
     #[test]
-    fn open_marks_session_open_and_records_client() {
+    fn open_marks_session_open_and_refreshes_it() {
         let t0 = Instant::now();
         let mut t = table();
         t.insert(idx(42), pending("192.0.2.1:1", "192.0.2.2:2", t0));
-        t.open(idx(42), t0 + secs(1), Some(key(7)));
-        let expected = Session {
-            state: SessionState::Open,
-            last_seen: t0 + secs(1),
-            client: Some(key(7)),
-            ..pending("192.0.2.1:1", "192.0.2.2:2", t0)
-        };
-        assert_eq!(t.get(idx(42), t0 + secs(1)), Some(expected));
-        assert_eq!(t.clients(), HashSet::from([key(7)]));
+        t.open(idx(42), t0 + secs(1));
+        assert_eq!(
+            t.get(idx(42), t0 + secs(1)),
+            Some(open("192.0.2.1:1", "192.0.2.2:2", t0 + secs(1)))
+        );
     }
 
     #[test]
@@ -390,22 +364,21 @@ mod tests {
         let mut r = Registry::new(REGISTRY_TTL);
         assert_eq!(r.update(key(0), a1, t0), Some(None));
         assert_eq!(r.update(key(0), a1, t0), None, "unchanged address");
-        assert_eq!(r.key_at(a1, t0), Some(key(0)));
         assert_eq!(r.update(key(0), a2, t0), Some(Some(a1)), "roamed");
-        assert_eq!(r.key_at(a1, t0), None);
+        assert_eq!(r.addr(&key(0), t0), Some(a2));
         assert_eq!(r.update(key(1), a2, t0), Some(None));
         assert_eq!(
-            (r.addr(&key(0), t0), r.key_at(a2, t0)),
-            (None, Some(key(1))),
+            (r.addr(&key(0), t0), r.addr(&key(1), t0)),
+            (None, Some(a2)),
             "newest claimant owns address"
         );
         assert_eq!(r.addr(&key(1), t0 + secs(179)), Some(a2));
-        assert_eq!(r.key_at(a2, t0 + secs(180)), None);
+        assert_eq!(r.addr(&key(1), t0 + secs(180)), None);
         assert_eq!(r.expire(t0 + secs(181)), vec![key(1)]);
         r.update(key(3), a1, t0);
         assert!(r.remove(&key(3)));
         assert!(!r.remove(&key(3)));
-        assert_eq!(r.key_at(a1, t0), None);
+        assert_eq!(r.addr(&key(3), t0), None);
     }
 
     #[test]

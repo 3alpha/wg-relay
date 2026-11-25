@@ -6,11 +6,11 @@ This document walks through the relay from first principles: the problem, the sm
 - [2. The trick: routing ciphertext without keys](#2-the-trick-routing-ciphertext-without-keys)
 - [3. The WireGuard protocol](#3-the-wireguard-protocol)
 - [4. The relay's state](#4-the-relays-state)
-- [5. Server registration](#5-server-registration)
+- [5. Registration](#5-registration)
 - [6. A client connects](#6-a-client-connects)
 - [7. Sessions: the state machine](#7-sessions-the-state-machine)
-- [8. Server-initiated handshakes and rekeys](#8-server-initiated-handshakes-and-rekeys)
-- [9. Client gates: `none` vs `response`](#9-client-gates-none-vs-response)
+- [8. Who can start a handshake](#8-who-can-start-a-handshake)
+- [9. Access control](#9-access-control)
 - [10. The dispatcher, step by step](#10-the-dispatcher-step-by-step)
 - [11. Index space: relay indexes vs forwarded indexes](#11-index-space-relay-indexes-vs-forwarded-indexes)
 - [12. Timers and expiry](#12-timers-and-expiry)
@@ -25,6 +25,8 @@ This document walks through the relay from first principles: the problem, the sm
 A WireGuard server sits on a home or office network behind NAT, with no public address and no port forward. Its clients (laptops, phones) are behind NATs too. Neither side can receive an unsolicited packet, so neither can start a connection to the other.
 
 Both sides *can* send packets out to a host on the internet, and NATs let the replies back in. wg-relay is that host: everyone points their WireGuard `Endpoint` at it, and it passes packets between them.
+
+The relay's config lists the peers that must be **reachable**, by public key: usually the servers. A listed peer keeps a small WireGuard tunnel open to the relay, so the relay always knows where it is. Everyone else (laptops, phones) is unlisted and needs no relay config at all; they only have to be in the listed peer's own WireGuard config.
 
 ```mermaid
 flowchart LR
@@ -50,25 +52,25 @@ The constraints that shape the design:
 |---|---|
 | Clients and server run **stock WireGuard** (kernel, wireguard-go, mobile apps) | No custom protocol or agent; the relay must work with packets WireGuard already sends |
 | The relay must **never be able to read traffic** | It holds no client↔server keys and forwards datagrams byte-for-byte |
-| The relay is on the public internet | It must not become an open reflector, and must refuse strangers |
+| The relay is on the public internet | It must not become an open reflector, and must not let strangers in |
 
 ## 2. The trick: routing ciphertext without keys
 
 If the relay can't decrypt anything, how does it know where a packet goes? It uses two fields that WireGuard leaves readable on purpose:
 
-1. **mac1** on handshake messages. Every initiation and response ends with a 16-byte MAC keyed with `BLAKE2s-256("mac1----" ‖ recipient_public_key)`. It exists so a recipient can cheaply discard junk before doing any cryptography. A side effect: **anyone who knows a candidate public key can test whether a handshake was addressed to it.** The relay knows the public keys of its servers (and listed clients), so it tries each one.
+1. **mac1** on handshake messages. Every initiation and response ends with a 16-byte MAC keyed with `BLAKE2s-256("mac1----" ‖ recipient_public_key)`. It exists so a recipient can cheaply discard junk before doing any cryptography. A side effect: **anyone who knows a candidate public key can test whether a handshake was addressed to it.** The relay knows the public keys of its listed peers, so it tries each one.
 2. **Session indexes.** Every handshake carries a random 32-bit `sender_idx` chosen by its sender. Afterwards, every packet *to* that side carries it as `receiver_idx`. The relay watches handshakes go by, notes which index belongs to which address, and routes everything after that by index.
 
 ```mermaid
 flowchart TD
-    A["Handshake initiation arrives"] --> B{"mac1 valid for<br/>server key K?"}
-    B -- "try each allowlisted key" --> C["It is for server K:<br/>forward to K's registered address"]
+    A["Handshake initiation arrives"] --> B{"mac1 valid for<br/>listed key K?"}
+    B -- "try each listed key" --> C["It is for peer K:<br/>forward to K's registered address"]
     B -- "no key matches" --> D["Drop: no_mac1_match"]
     C --> E["Remember: sender_idx belongs<br/>to the address it came from"]
     E --> F["Later data with receiver_idx = that index<br/>goes back to that address"]
 ```
 
-A MAC can only be checked against a key you already have; it can't be reversed to reveal the key. This one fact explains several behaviours later on (for example, why the relay can't route a server's handshake to a client it has never heard of, see [section 8](#8-server-initiated-handshakes-and-rekeys)).
+A MAC can only be checked against a key you already have; it can't be reversed to reveal the key. This one fact explains several behaviours later on (for example, why the relay can't route a handshake to an unlisted peer, see [section 8](#8-who-can-start-a-handshake)).
 
 ## 3. The WireGuard protocol
 
@@ -170,9 +172,9 @@ And the response:
 
 A few consequences matter for the relay:
 
-- **The initiation hides who is calling; the response reveals who was accepted.** The relay cannot read `enc_static`, so it cannot tell which client sent an initiation. The response's mac1, however, is keyed to the initiator's public key. A relay that knows candidate client keys can test which one the server just accepted. That is the whole basis of the `response` gate.
-- **Replays are refused by the responder.** It keeps the newest timestamp seen from each peer and rejects anything not newer, so a captured initiation can't be replayed to start a session. The relay's server registration leans on this: only a fresh handshake from the server can (re)register it.
-- **The responder speaks second in data, too.** The initiator can send data as soon as the response arrives. The responder has to wait for the initiator's first data packet, which confirms both sides derived the same keys. That is why an initiator with nothing to send immediately sends an empty keepalive. You can see it in every handshake through the relay ([section 6](#6-a-client-connects)).
+- **The initiation hides who is calling.** The relay cannot read `enc_static`, so it cannot tell who sent an initiation, only which listed peer it is for. The response's mac1 is keyed to the initiator's public key, so anyone who knows a candidate key could test it; wg-relay does not need to, because the listed peer's own peer list already decides who gets in.
+- **Replays are refused by the responder.** It keeps the newest timestamp seen from each peer and rejects anything not newer, so a captured initiation can't be replayed to start a session. The relay's registration leans on this: only a fresh handshake from a listed peer can (re)register it.
+- **The responder speaks second in data, too.** The initiator can send data as soon as the response arrives. The responder has to wait for the initiator's first data packet, which confirms both sides derived the same keys. That is why an initiator with nothing to send immediately sends an empty keepalive. You can see it in every handshake through the relay ([section 6](#6-a-client-connects)), and the relay's registration relies on it ([section 5](#5-registration)).
 
 ### 3.3 Transport: data packets
 
@@ -221,7 +223,7 @@ How these numbers show up in the relay:
 - The **2-minute rekey** is why the relay keeps learning new indexes, and why old session entries simply age out.
 - The relay's **200 s session TTL** sits just above `REJECT_AFTER_TIME`, so the relay never forgets an index that WireGuard might still use.
 - The **15 s no-reply rule** is why a client that changes network recovers in about 5 to 15 s ([section 14](#14-when-things-move-roaming-and-restarts)).
-- **`PersistentKeepalive = 25`** keeps every NAT mapping open, refreshes the server's registration well inside its 180 s TTL, and, because a keepalive counts as sending, keeps sessions rekeying while idle.
+- **`PersistentKeepalive = 25`** keeps every NAT mapping open, refreshes each listed peer's registration well inside its 180 s TTL, and, because a keepalive counts as sending, keeps sessions rekeying while idle.
 
 ### 3.5 Under load: cookies and mac2
 
@@ -242,7 +244,7 @@ sequenceDiagram
 
 The cookie reply is encrypted with a key derived from the responder's public key, and its associated data is the mac1 of the message it answers. Only someone who sent that initiation can use it, and a spoofed source address never receives it. That is why the relay lets cookie replies through on *pending* sessions ([section 7](#7-sessions-the-state-machine)): without that, a server under load could never complete a handshake through the relay.
 
-**What the relay changes here.** The server sees every packet arriving from the relay's address, so it computes the same cookie for every client. The cookie no longer proves anything about the real sender. Someone who obtains one cookie through the relay could attach a valid mac2 to initiations sent from spoofed addresses, and the server would do the expensive work for each. The relay's per-source-IP rate limit is then the only brake, and each spoofed address gets its own budget. This is listed under the README's limitations. Possible hardening, not implemented: a global initiation cap per server, or the relay running the cookie exchange itself (it knows each server's public key, which is all the protocol needs).
+**What the relay changes here.** The server sees every packet arriving from the relay's address, so it computes the same cookie for every client. The cookie no longer proves anything about the real sender. Someone who obtains one cookie through the relay could attach a valid mac2 to initiations sent from spoofed addresses, and the server would do the expensive work for each. The relay's per-source-IP rate limit is then the only brake, and each spoofed address gets its own budget. This is listed under the README's limitations. Possible hardening, not implemented: a global initiation cap per server, or the relay running the cookie exchange itself (it knows each listed peer's public key, which is all the protocol needs).
 
 ### 3.6 Cryptokey routing and roaming
 
@@ -273,18 +275,18 @@ flowchart TB
 What this means behind the relay:
 
 - Every peer's endpoint is the relay, so from WireGuard's point of view nothing ever roams. The relay absorbs all address changes (section 14).
-- The server's `[Peer]` for the relay has `AllowedIPs = 10.99.0.254/32`. Even an attacker holding the relay's private key can only inject packets whose inner source is `10.99.0.254`, and only the relay's pings are routed there. The relay's key opens a door into one `/32` and nothing else.
+- A listed peer's `[Peer]` for the relay has `AllowedIPs = 10.99.0.254/32`. Even an attacker holding the relay's private key can only inject packets whose inner source is `10.99.0.254`, and only the relay's pings are routed there. The relay's key opens a door into one `/32` and nothing else.
 
 ### 3.7 What survives the relay
 
 | Property | How WireGuard provides it | Through wg-relay |
 |---|---|---|
 | Confidentiality and integrity | ChaCha20-Poly1305 on every field and packet | unchanged: the relay cannot read or alter anything |
-| Mutual authentication | static keys inside Noise IK | unchanged: the relay never holds client or server keys |
+| Mutual authentication | static keys inside Noise IK | unchanged: the relay never holds any peer's private key |
 | Forward secrecy | ephemeral Diffie-Hellman, keys replaced every 2 min | unchanged |
 | Replay protection | handshake timestamps, data counters | unchanged |
 | Silence towards strangers | no reply without a valid mac1 and handshake | kept: the relay never answers forwarded traffic |
-| Identity hiding | initiator's static key encrypted to the responder | partly lost: mac1 tells the relay which server is called, and the response's mac1 which *listed* client was accepted |
+| Identity hiding | initiator's static key encrypted to the responder | partly lost: mac1 tells the relay which listed peer is called; the caller stays hidden, though the response's mac1 can be tested against a guessed key |
 | Flood resistance | mac1, plus cookies bound to the sender's address | weakened: the server sees one address, so cookies stop distinguishing clients (section 3.5) |
 | Hidden packet sizes | padding to 16 bytes | unchanged; the relay sees padded sizes and timing |
 
@@ -295,32 +297,29 @@ The relay is a single-threaded state machine (`Relay` in `src/relay/mod.rs`). `R
 ```mermaid
 flowchart LR
     subgraph cfg["From relay.toml"]
-        P["peers<br/>key → Server(tunnel) | Client(servers)"]
-        G["gate: none | response"]
+        P["peers<br/>key → name, mac1 key"]
     end
     subgraph learned_state["Learned at runtime"]
-        REG["registry<br/>server key ↔ address<br/>(authenticated, 180 s TTL)"]
-        SES["session table<br/>receiver_idx → {dest, expected_src,<br/>state, server, client}<br/>(200 s idle TTL)"]
-        LRN["learned<br/>client key → address<br/>(from accepted responses)"]
+        REG["registry<br/>listed key ↔ address<br/>(authenticated, 180 s TTL)"]
+        SES["session table<br/>receiver_idx → {dest, expected_src,<br/>state, peer}<br/>(200 s idle TTL)"]
         RL["rate limiter<br/>source IP → token bucket"]
     end
     subgraph tunnels["Relay's own WireGuard"]
-        T["one boringtun Tunn per server<br/>indexes in a reserved prefix"]
+        T["one boringtun Tunn per listed peer<br/>indexes in a reserved prefix"]
     end
 ```
 
 | Table | Written when | Read when | Expires |
 |---|---|---|---|
-| `registry` | a packet **authenticates** on a server's relay tunnel | finding a server's address; checking a packet came from a server | 180 s without authenticated traffic |
+| `registry` | a packet **authenticates** on a listed peer's relay tunnel | finding a listed peer's address | 180 s without authenticated traffic |
 | `sessions` | a handshake is forwarded (pending) or accepted (open) | every type 2, 3 and 4 packet | 200 s without traffic on that index |
-| `learned` | a server's response is accepted for a listed client | a server starts a handshake to that client | when no live session involves that client |
 | `rate limiter` | every initiation | every initiation | when the bucket would be full again |
 
-The relay never trusts an address it hasn't either authenticated (servers) or seen in a handshake it forwarded (clients).
+The relay never trusts an address it hasn't either authenticated (listed peers) or seen in a handshake it forwarded (everyone else). Each session also records the listed peer it was routed to, so removing that peer from the config revokes the session ([section 13](#13-reload-sighup)).
 
-## 5. Server registration
+## 5. Registration
 
-The relay is an ordinary WireGuard peer of each server, with its own key pair and a `/32` tunnel address (`10.99.0.254`). This tunnel carries no user traffic; it exists so the relay learns, **with cryptographic proof**, where each server is right now.
+The relay is an ordinary WireGuard peer of each listed peer, with its own key pair and a `/32` tunnel address (`10.99.0.254`). This tunnel carries no user traffic; it exists so the relay learns, **with cryptographic proof**, where each listed peer is right now. The example below is a server called "main", the usual thing to list, but any peer can be listed: a laptop that other peers should be able to reach registers the same way.
 
 ```mermaid
 sequenceDiagram
@@ -330,7 +329,7 @@ sequenceDiagram
     Note over S: [Peer] relay, PersistentKeepalive = 25
     S->>N: Initiation, mac1 keyed to relay's key
     N->>R: same packet, from 198.51.100.7:40001
-    Note over R: mac1 matches the relay's own key<br/>parse_handshake_anon reveals sender = server "main"<br/>"main" is allowlisted, so its Tunn takes the packet
+    Note over R: mac1 matches the relay's own key<br/>parse_handshake_anon reveals sender = server "main"<br/>"main" is listed, so its Tunn takes the packet
     R->>N: Response (from the relay's Tunn for "main")
     N->>S: Response
     S->>R: keepalive (confirms the handshake)
@@ -341,15 +340,15 @@ sequenceDiagram
     end
 ```
 
-What counts as authenticated: a data packet or a keepalive that decrypts on that server's tunnel. An initiation alone does not count, because a captured one could be replayed from another address (for instance after a relay restart, when the replay timestamp is forgotten); the server's first keepalive right after the handshake does. A cookie reply never counts either, because producing one proves nothing about who you are. If an authenticated packet arrives from a **new** address (the server's NAT rebound), the registry moves the server there and every session using the old address is rewritten.
+What counts as authenticated: a data packet or a keepalive that decrypts on that peer's tunnel. An initiation alone does not count, because a captured one could be replayed from another address (for instance after a relay restart, when the replay timestamp is forgotten); the peer's first keepalive right after the handshake does. A cookie reply never counts either, because producing one proves nothing about who you are. If an authenticated packet arrives from a **new** address (the peer's NAT rebound), the registry moves the peer there and every session using the old address is rewritten.
 
-Registration is refused for keys that aren't allowlisted (`registration_unknown_key`) and for client keys (`client_registration_refused`): clients never talk to the relay directly.
+Registration is refused for keys that aren't listed (`registration_unknown_key`): unlisted peers never talk to the relay directly.
 
-The relay also answers pings to its tunnel IP, so `ping 10.99.0.254` from the server is a one-line registration check.
+The relay also answers pings to its tunnel IP, so `ping 10.99.0.254` from a listed peer is a one-line registration check.
 
 ## 6. A client connects
 
-The client's config just lists the server with `Endpoint = relay:51820`. Here is a full connection in `response` mode, with what the relay records at each step. The client's NAT gives it the public address `C`; the server is registered at `S`.
+The client is unlisted: its config just lists the server with `Endpoint = relay:51820`. Here is a full connection, with what the relay records at each step. The client's NAT gives it the public address `C`; the server is listed and registered at `S`.
 
 ```mermaid
 sequenceDiagram
@@ -357,11 +356,11 @@ sequenceDiagram
     participant R as wg-relay
     participant S as Server (registered at S)
     C->>R: Initiation, sender_idx = i, mac1 for server
-    Note over R: rate limit OK, mac1 matches server "main", "main" is registered<br/>sessions[i] = {dest: C, expected_src: S, Pending}
+    Note over R: rate limit OK, mac1 matches listed peer "main", registered at S<br/>sessions[i] = {dest: C, expected_src: S, Pending}
     R->>S: Initiation (unchanged bytes)
     Note over S: decrypts client's static key, it is a known peer
     S->>R: Response, sender_idx = r, receiver_idx = i, mac1 for client
-    Note over R: sessions[i] exists and the packet came from S<br/>mac1 matches listed client "laptop", allowed to reach "main"<br/>sessions[i] becomes Open, learned["laptop"] = C<br/>sessions[r] = {dest: S, expected_src: C, Open}
+    Note over R: sessions[i] is Pending and the packet came from S<br/>sessions[i] becomes Open<br/>sessions[r] = {dest: S, expected_src: C, Open}
     R->>C: Response (unchanged bytes)
     C->>R: Data, receiver_idx = r
     Note over R: sessions[r]: came from C, Open, so send to S
@@ -371,7 +370,7 @@ sequenceDiagram
     R->>C: Data
 ```
 
-After the handshake there are two session entries, one per direction. Each one says where packets with that index go **and the only address allowed to send them**. That second field is what stops anyone else from injecting packets into the session, even if they guess the index.
+After the handshake there are two session entries, one per direction. Each one says where packets with that index go **and the only address allowed to send them**. That second field is what stops anyone else from injecting packets into the session, even if they guess the index. And because `sessions[i]` expects the response from `S`, only the listed peer itself can open the session.
 
 ## 7. Sessions: the state machine
 
@@ -390,34 +389,43 @@ What each state lets through, always only from `expected_src`:
 
 | Packet | `Pending` | `Open` |
 |---|---|---|
-| Type 2, response | yes, subject to the gate (section 9) | **no** (`session_not_pending`): one response per initiation |
-| Type 3, cookie reply | **yes**, so a server under load can still answer | yes |
+| Type 2, response | yes (section 9) | **no** (`session_not_pending`): one response per initiation |
+| Type 3, cookie reply | **yes**, so a peer under load can still answer | yes |
 | Type 4, data | **no** (`session_not_open`) | yes |
 
 A WireGuard session rekeys every 2 minutes, which creates new indexes; the old entries simply age out after 200 s of silence. A pending entry whose handshake is never answered goes after 10 s. If a handshake picks an index that a live entry of a different address pair already holds (probability 2⁻³² per pair by accident), it is dropped (`index_in_use`) and the peer retries with a new index, so an index in use can never be taken over.
 
-## 8. Server-initiated handshakes and rekeys
+## 8. Who can start a handshake
 
-Sometimes the server starts the handshake: when its session with a client has expired and it has data to send, or right after it restarts. Its initiation's mac1 is keyed to the **client's** public key, so the relay can only route it if that client is listed in `relay.toml` and the relay has seen where it lives.
+An initiation's mac1 is keyed to the **responder's** public key, so the relay can route an initiation only to a peer whose key it has: a listed, registered peer. Who initiated doesn't matter.
+
+| Initiator → responder | Through the relay |
+|---|---|
+| unlisted → listed (a laptop calls the server) | works: the normal case |
+| listed → listed (two servers, or a server and a listed laptop) | works, in both directions |
+| listed → unlisted (the server calls a laptop) | dropped (`no_mac1_match`): no key matches |
+| unlisted → unlisted | dropped (`no_mac1_match`) |
+
+Listed peers therefore form a full mesh: each can start a handshake with any other. Here the server starts one towards a laptop that is listed too, and registered at `L`:
 
 ```mermaid
 sequenceDiagram
     participant S as Server (registered at S)
     participant R as wg-relay
-    participant C as Client (learned at C)
+    participant L as Laptop (listed, registered at L)
     S->>R: Initiation, sender_idx = j, mac1 for "laptop"
-    Note over R: mac1 matches listed client "laptop"<br/>source S is a registered server, "laptop" may reach it<br/>learned["laptop"] = C<br/>sessions[j] = {dest: S, expected_src: C, Pending}
-    R->>C: Initiation
-    C->>R: Response, receiver_idx = j, mac1 for server
-    Note over R: came from C (not a server), so mac1 must match<br/>the session's server: it does<br/>sessions[j] Open, new entry for the client's index
+    Note over R: mac1 matches listed peer "laptop", registered at L<br/>sessions[j] = {dest: S, expected_src: L, Pending}
+    R->>L: Initiation
+    L->>R: Response, receiver_idx = j, from L
+    Note over R: sessions[j] Open, new entry for the laptop's index
     R->>S: Response
 ```
 
-If the client isn't listed, no key matches the mac1 and the packet is dropped (`no_mac1_match`); if it is listed but has never completed a handshake through this relay, its address is unknown (`client_addr_unknown`). In practice this is rare: clients normally initiate, and `PersistentKeepalive` keeps their sessions fresh. It mostly shows up for a few seconds after the server restarts.
+The gap is the server calling an unlisted laptop. In practice it rarely matters: the laptop starts the first handshake, and in WireGuard the side that started a session also does its timed rekeys ([section 3.4](#34-timers-when-handshakes-happen)), so with `PersistentKeepalive` the laptop keeps re-handshaking on its own. It mostly shows up after the server restarts, until the laptop next sends something. A peer that must always be reachable can simply be listed.
 
-## 9. Client gates: `none` vs `response`
+## 9. Access control
 
-Both modes treat initiations the same way: anyone may send one to a registered server, subject to the per-IP rate limit. The server's own WireGuard then decides whether it knows that client. The modes differ in what the relay does with the server's **response**:
+There is one rule: **a session opens only when a listed peer answers from its registered address.** Anyone may send an initiation to a registered listed peer, subject to the per-IP rate limit, and the listed peer's own WireGuard decides whether it knows the sender. Strangers' initiations reach it and are dropped there, silently. The relay's checks on the response only make sure it really is the listed peer answering, exactly once:
 
 ```mermaid
 flowchart TD
@@ -426,29 +434,20 @@ flowchart TD
     B -- yes --> C{"from the session's<br/>expected_src?"}
     C -- no --> X2["Drop: wrong_source"]
     C -- yes --> P{"session still<br/>Pending?"}
-    P -- no --> X6["Drop: session_not_pending"]
-    P -- yes --> D{"source is a<br/>registered server?"}
-    D -- "no: a client answering<br/>a server's handshake" --> E{"mac1 matches the<br/>session's server?"}
-    E -- no --> X3["Drop: response_not_for_server"]
-    E -- yes --> OK["Open session, forward"]
-    D -- yes --> F{"mac1 matches a<br/>listed client?"}
-    F -- "yes" --> G{"client may reach<br/>this server?"}
-    G -- no --> X4["Drop: acl"]
-    G -- yes --> H["learned[client] = its address"] --> OK
-    F -- "no" --> I{"gate"}
-    I -- none --> OK
-    I -- response --> X5["Drop: response_unknown_client"]
+    P -- no --> X3["Drop: session_not_pending"]
+    P -- yes --> I{"responder's sender_idx<br/>free and not reserved?"}
+    I -- no --> X4["Drop: index_in_use<br/>or reserved_index"]
+    I -- yes --> OK["Open both entries, forward"]
 ```
 
-| | `none` | `response` |
-|---|---|---|
-| `relay.toml` lists | servers (clients optional) | servers **and** clients |
-| Who decides access | the server's peer list only | the server's peer list **and** the relay's client list |
-| Revoking a client | remove it from the server | remove it from `relay.toml` + SIGHUP (instant), or from the server |
-| Server-initiated handshakes | only to listed clients | to every listed client |
-| Strangers' initiations | reach the server, which drops them | reach the server, which drops them; the relay would also refuse the session |
+What each list decides:
 
-In `response` mode the relay is a second, independent gate: a client the server still accepts can be cut off from the relay alone, without touching the server.
+| List | Decides |
+|---|---|
+| `relay.toml` | which peers can register, and so be reached through the relay |
+| each listed peer's WireGuard config | who may talk to that peer: the only authentication there is |
+
+To revoke a listed peer, remove it from `relay.toml` and send SIGHUP: its registration and every session routed to it go at once. To revoke an unlisted peer, remove it from the listed peers' WireGuard configs. The relay does not limit how many unlisted peers a listed peer accepts, so it cannot cap who uses its bandwidth beyond the per-IP handshake rate.
 
 ## 10. The dispatcher, step by step
 
@@ -462,9 +461,9 @@ flowchart TD
     RL -- empty --> D1["Drop: rate_limited"]
     RL -- ok --> RM{"mac1 keyed to<br/>relay's own key?"}
     RM -- yes --> REG["register_init:<br/>identify sender, hand to its Tunn"]
-    RM -- no --> FI["forward_init<br/>(sections 6 and 8)"]
+    RM -- no --> FI["forward_init<br/>(section 8)"]
     P -- "type 2/3/4" --> PX{"receiver_idx in a<br/>relay tunnel's prefix?"}
-    PX -- yes --> TR["tunnel_rx:<br/>that server's Tunn"]
+    PX -- yes --> TR["tunnel_rx:<br/>that peer's Tunn"]
     PX -- no --> T2{"type"}
     T2 -- 2 --> FR["forward_response<br/>(section 9)"]
     T2 -- "3 or 4" --> FX["forward_indexed<br/>(section 7)"]
@@ -484,21 +483,15 @@ The initiation rule in full:
 flowchart TD
     A["Type 1, not for the relay"] --> R{"sender_idx in a<br/>relay prefix?"}
     R -- yes --> X0["Drop: reserved_index"]
-    R -- no --> B{"mac1 matches<br/>a server?"}
-    B -- yes --> C{"server<br/>registered?"}
-    C -- no --> X1["Drop: server_not_registered"]
-    C -- yes --> L{"src is the server<br/>itself?"}
-    L -- yes --> X2["Drop: loop"]
-    L -- no --> OK1["Pending session for sender_idx,<br/>forward to server"]
-    B -- no --> F{"src is a<br/>registered server?"}
-    F -- no --> X3["Drop: no_mac1_match"]
-    F -- yes --> E{"mac1 matches a<br/>listed client?"}
-    E -- no --> X4["Drop: no_mac1_match"]
-    E -- yes --> G{"client may reach<br/>that server?"}
-    G -- no --> X5["Drop: acl"]
-    G -- yes --> H{"client's address<br/>learned?"}
-    H -- no --> X6["Drop: client_addr_unknown"]
-    H -- yes --> OK2["Pending session for sender_idx,<br/>forward to client"]
+    R -- no --> B{"mac1 matches<br/>a listed peer?"}
+    B -- no --> X1["Drop: no_mac1_match"]
+    B -- yes --> C{"peer<br/>registered?"}
+    C -- no --> X2["Drop: peer_not_registered"]
+    C -- yes --> L{"src is the peer<br/>itself?"}
+    L -- yes --> X3["Drop: loop"]
+    L -- no --> U{"sender_idx held by<br/>another live session?"}
+    U -- yes --> X4["Drop: index_in_use"]
+    U -- no --> OK["Pending session for sender_idx,<br/>forward to the peer"]
 ```
 
 ## 11. Index space: relay indexes vs forwarded indexes
@@ -512,14 +505,14 @@ flowchart LR
         PFX["upper 24 bits: prefix"] --- CNT["lower 8 bits: counter"]
     end
     subgraph owners["Who owns a prefix"]
-        T1["prefix 0x3f19a2: relay tunnel for server 'main'"]
-        T2["prefix 0x08c4e7: relay tunnel for server 'backup'"]
+        T1["prefix 0x3f19a2: relay tunnel for peer 'main'"]
+        T2["prefix 0x08c4e7: relay tunnel for peer 'backup'"]
         F["every other prefix: forwarded sessions"]
     end
 ```
 
 - boringtun numbers a tunnel's sessions `prefix << 8 | counter`, so each relay tunnel uses at most 256 indexes, all under one prefix.
-- Each server's tunnel gets a **random** prefix that no live forwarded session is using at the time it is created.
+- Each listed peer's tunnel gets a **random** prefix that no live forwarded session is using at the time it is created.
 - A forwarded handshake whose `sender_idx` falls inside a relay prefix is dropped (`reserved_index`). WireGuard simply retries with a new random index.
 
 Together these guarantee the two kinds of index never collide, and a packet whose `receiver_idx` is in a relay prefix can go straight to that relay tunnel.
@@ -528,9 +521,9 @@ Together these guarantee the two kinds of index never collide, and a packet whos
 
 | Timer | Value | Where | Purpose |
 |---|---|---|---|
-| Peer keepalive | 25 s | node configs (`PersistentKeepalive`) | keeps NAT mappings open, refreshes the server's registration |
+| Peer keepalive | 25 s | node configs (`PersistentKeepalive`) | keeps NAT mappings open, refreshes registrations |
 | WireGuard rekey | about 2 min | WireGuard itself | new keys and new indexes |
-| Registration TTL | 180 s | `REGISTRY_TTL` | a server silent for 3 min is forgotten |
+| Registration TTL | 180 s | `REGISTRY_TTL` | a listed peer silent for 3 min is forgotten |
 | Session TTL | 200 s idle | `SESSION_TTL` | indexes from old handshakes age out |
 | Pending TTL | 10 s idle | `PENDING_TTL` | unanswered initiations do not pile up |
 | Relay tick | 250 ms | `app.rs` | runs relay tunnel timers |
@@ -538,7 +531,7 @@ Together these guarantee the two kinds of index never collide, and a packet whos
 | Stats log | 60 s | `app.rs` | logs all counters, including per-reason rejects |
 | Rate limit | `handshake_rate_per_ip`, burst 2 s worth | `relay.toml` | caps initiations per source IP |
 
-The values nest deliberately: a healthy server refreshes its registration about seven times per TTL, and a session that is still in use is refreshed on every packet, long before 200 s, while one replaced by a rekey disappears soon after.
+The values nest deliberately: a healthy listed peer refreshes its registration about seven times per TTL, and a session that is still in use is refreshed on every packet, long before 200 s, while one replaced by a rekey disappears soon after.
 
 ```mermaid
 gantt
@@ -565,22 +558,20 @@ gantt
 flowchart TD
     A["SIGHUP"] --> B{"relay.toml valid?"}
     B -- no --> K["Log error, keep running config"]
-    B -- yes --> C["Rebuild peers:<br/>servers keep their relay tunnel,<br/>new servers get a fresh prefix"]
-    C --> D["Removed servers lose their<br/>registration and tunnel"]
-    D --> E["Forget learned addresses<br/>of removed clients"]
-    E --> F["Re-check every session against<br/>the new config"]
-    F --> G{"server still a server?<br/>client still listed and allowed?<br/>gate still allows it?"}
+    B -- yes --> C["Rebuild peers:<br/>kept peers keep their relay tunnel,<br/>new peers get a fresh prefix"]
+    C --> D["Removed peers lose their<br/>registration and tunnel"]
+    D --> G{"session routed to<br/>a peer still listed?"}
     G -- no --> H["Session dropped now:<br/>next packet gets unknown_index"]
     G -- yes --> I["Session kept"]
 ```
 
-Revocation is immediate, not "at the next rekey": a removed client's very next packet is rejected. Switching from `none` to `response` drops open sessions whose client was never identified, i.e. unlisted clients.
+Revocation is immediate, not "at the next rekey": the very next packet of any session with a removed peer is rejected, in both directions. Sessions with peers that are still listed are untouched.
 
 ## 14. When things move: roaming and restarts
 
-**A server's NAT rebinds.** Its next keepalive to the relay authenticates from the new address; the registry moves it and every session entry is rewritten. Until then (at most one keepalive interval, 25 s) traffic in both directions is lost: client packets go to the old address, and the server's packets arrive from an address no session expects.
+**A listed peer's NAT rebinds.** Its next keepalive to the relay authenticates from the new address; the registry moves it and every session entry is rewritten. Until then (at most one keepalive interval, 25 s) traffic in both directions is lost: packets for it go to the old address, and its own packets arrive from an address no session expects. A listed peer that changes network (Wi-Fi to cellular) recovers the same way.
 
-**A client changes network** (Wi-Fi to cellular). Its packets now come from a new address that no session expects, so they are dropped. WireGuard notices it is getting no replies and starts a fresh handshake, which then works normally:
+**An unlisted peer changes network** (Wi-Fi to cellular). Its packets now come from a new address that no session expects, so they are dropped. WireGuard notices it is getting no replies and starts a fresh handshake, which then works normally:
 
 ```mermaid
 sequenceDiagram
@@ -600,24 +591,23 @@ sequenceDiagram
     Note over C,S: traffic flows again over the new path
 ```
 
-The relay can't follow the client sooner because the client never authenticates to the relay; accepting its new address on its word would let anyone hijack sessions.
+The relay can't follow the client sooner because an unlisted peer never authenticates to the relay; accepting its new address on its word would let anyone hijack sessions.
 
-**The server restarts.** It re-registers within seconds (its first packet to the relay is a handshake). Client sessions are gone on the server side; clients' next data gets no reply and they re-handshake as above. Server-initiated handshakes reach only listed clients ([section 8](#8-server-initiated-handshakes-and-rekeys)).
+**The server restarts.** It re-registers within seconds (its first packet to the relay is a handshake). Client sessions are gone on the server side; clients' next data gets no reply and they re-handshake as above. Handshakes the server starts reach only listed peers ([section 8](#8-who-can-start-a-handshake)).
 
 ## 15. Security model
 
 ```mermaid
 flowchart LR
     subgraph visible["The relay can see"]
-        V1["who talks to which server<br/>(mac1 + addresses)"]
-        V2["which listed client a server accepted<br/>(response mac1)"]
+        V1["who talks to which listed peer<br/>(mac1 + addresses)"]
         V3["packet timing, sizes, volume"]
         V4["every host's public IP and port"]
     end
     subgraph hidden["The relay cannot see or do"]
         H1["payloads: no session keys"]
         H2["forge or modify packets:<br/>receivers would reject them"]
-        H3["impersonate a client to the server:<br/>it never has client keys"]
+        H3["impersonate any peer:<br/>it never has their keys"]
     end
 ```
 
@@ -625,14 +615,15 @@ flowchart LR
 
 | Threat | Defence |
 |---|---|
-| Using the relay as a reflector or amplifier | It only sends to authenticated server addresses or addresses from a handshake it forwarded; replies are never larger than requests; forwarded traffic never triggers relay-generated replies |
-| Strangers reaching a server | The server's peer list drops them; in `response` mode the relay also refuses to open their sessions |
+| Using the relay as a reflector or amplifier | It only sends to authenticated listed-peer addresses or addresses from a handshake it forwarded; replies are never larger than requests; forwarded traffic never triggers relay-generated replies |
+| Strangers reaching a listed peer | The listed peer's own WireGuard peer list drops them |
 | Injecting packets into someone's session | Every non-handshake packet must come from the session's `expected_src` |
-| Redirecting a server's traffic | Registration requires a full WireGuard handshake with the server's key; replays fail WireGuard's timestamp and counter checks |
+| Redirecting a listed peer's traffic | Registration requires a full WireGuard handshake with that peer's key; replays fail WireGuard's timestamp and counter checks |
 | Handshake floods | Per-IP token bucket before any mac1 work or key exchange |
-| A revoked client lingering | SIGHUP drops its sessions immediately |
+| A removed listed peer lingering | SIGHUP drops its registration and sessions immediately |
+| Unapproved peers using the relay's bandwidth | Not prevented: a listed peer can accept any number of unlisted peers; only handshakes are rate-limited |
 
-**What the relay's private key is worth to an attacker:** it opens only the registration tunnels, which carry nothing but keepalives and pings to `10.99.0.254/32`. With it, an attacker could pose as the relay to servers, which gains them the same position as an on-path attacker: they can drop traffic, but not read it.
+**What the relay's private key is worth to an attacker:** it opens only the registration tunnels, which carry nothing but keepalives and pings to `10.99.0.254/32`. With it, an attacker could pose as the relay to listed peers, which gains them the same position as an on-path attacker: they can drop traffic, but not read it.
 
 ## 16. Code map
 
@@ -643,7 +634,7 @@ flowchart TD
     app --> relay["relay/mod.rs<br/>Relay, handle, route, tick"]
     relay --> fwd["relay/forward.rs<br/>forward_init, forward_response,<br/>forward_indexed"]
     relay --> regm["relay/registration.rs<br/>register_init, tunnel_rx, ICMP"]
-    relay --> rel["relay/reload.rs<br/>reload, session_allowed"]
+    relay --> rel["relay/reload.rs<br/>reload"]
     relay --> rsn["relay/reason.rs + metrics.rs<br/>Reason, Verdict, counters"]
     relay --> tbl["tables.rs<br/>Registry, SessionTable, RateLimiter"]
     fwd --> pkt["packet/<br/>parse, mac1, SessionIdx"]
@@ -665,8 +656,8 @@ Following one data packet through the code:
 |---|---|---|
 | Unit | session table, registry, rate limiter, `Rate` parsing, ICMP reply | `#[cfg(test)]` modules in `src/` |
 | Packet | parsing, size checks, mac1 matching on real packets made by boringtun | `tests/packet.rs` |
-| Config | defaults, exact `ConfigError` for each bad input, warnings, `--check-config` | `tests/config.rs` |
-| Relay, in-process | full handshakes between boringtun peers through `Relay::handle` for both gates, reload, roaming, reserved indexes, rate limits, 20 000 mutated packets | `tests/relay.rs` |
+| Config | defaults, exact `ConfigError` for each bad input, `--check-config` | `tests/config.rs` |
+| Relay, in-process | full handshakes between boringtun peers through `Relay::handle` (unlisted to listed, listed to listed, listed to unlisted refused), reload, roaming, reserved indexes, index takeover, rate limits, 10 000 mutated packets | `tests/relay.rs` |
 | End-to-end | real kernel WireGuard in network namespaces behind real NATs | `tests/netns.sh` |
 
 The end-to-end topology:
@@ -676,13 +667,13 @@ flowchart LR
     subgraph relayns["relay namespace"]
         BR["br0 192.0.2.1<br/>wg-relay :51820<br/>tcpdump"]
     end
-    subgraph s["server side"]
+    subgraph s["server (listed)"]
         SRV["srv<br/>wg0 10.99.0.1"] --- NS["natsrv<br/>MASQUERADE"]
     end
-    subgraph c1s["client 1"]
+    subgraph c1s["client 1 (unlisted)"]
         C1["c1<br/>wg0 10.99.0.11"] --- N1["natc1"]
     end
-    subgraph c2s["client 2"]
+    subgraph c2s["client 2 (listed)"]
         C2["c2<br/>wg0 10.99.0.12"] --- N2["natc2"]
     end
     subgraph sts["stranger"]
@@ -694,4 +685,4 @@ flowchart LR
     N3 --- BR
 ```
 
-It runs once per gate and checks that clients reach the server, the stranger doesn't, rekeys in both directions work, SIGHUP revokes instantly, and, from a packet capture at the relay, that forwarded handshakes cannot be opened with the relay's key, every forwarded packet is byte-identical, and the ping payload never appears on the wire.
+`srv` and `c2` are listed and register; `c1` and the stranger `st` are not, and the server doesn't know `st`. The test checks that both clients reach the server and the stranger doesn't; that rekeys work, including one the server starts towards the listed `c2`; that SIGHUP after removing `srv` cuts its sessions off at once; and, from a packet capture at the relay, that forwarded handshakes cannot be opened with the relay's key, every forwarded packet is byte-identical, and the ping payload never appears on the wire.

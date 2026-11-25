@@ -5,7 +5,7 @@ use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::{Tunn, TunnResult};
 use tracing::{debug, info};
 
-use super::{PeerKind, PeerState, Reason, Relay, Verdict};
+use super::{PeerState, Reason, Relay, Verdict};
 use crate::key::PeerKey;
 
 impl Relay {
@@ -21,17 +21,14 @@ impl Relay {
         let Some(key) = half.map(|h| PeerKey::from(h.peer_static_public)) else {
             return Verdict::Drop(Reason::TunnelAuth);
         };
-        match self.peers.get(&key).map(|p| &p.kind) {
-            None => {
-                debug!(%src, %key, "registration from key not in allowlist");
-                Verdict::Drop(Reason::UnknownKey)
-            }
-            Some(PeerKind::Client { .. }) => Verdict::Drop(Reason::ClientRegistration),
-            Some(PeerKind::Server { .. }) => self.tunnel_rx(key, src, pkt, now),
+        if !self.peers.contains_key(&key) {
+            debug!(%src, %key, "registration from unlisted key");
+            return Verdict::Drop(Reason::UnknownKey);
         }
+        self.tunnel_rx(key, src, pkt, now)
     }
 
-    /// Feed a datagram to server `key`'s registration tunnel; on
+    /// Feed a datagram to peer `key`'s registration tunnel; on
     /// authentication, (re-)register the source address.
     pub(super) fn tunnel_rx(
         &mut self,
@@ -40,9 +37,7 @@ impl Relay {
         pkt: &[u8],
         now: Instant,
     ) -> Verdict {
-        let Some(PeerState { name, kind: PeerKind::Server { tunn }, .. }) =
-            self.peers.get_mut(&key)
-        else {
+        let Some(PeerState { name, tunn, .. }) = self.peers.get_mut(&key) else {
             return Verdict::Drop(Reason::TunnelAuth);
         };
         let (authenticated, reply) = match tunn.decapsulate(Some(src.ip()), pkt, &mut self.scratch)

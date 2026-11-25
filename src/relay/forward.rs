@@ -1,9 +1,8 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use super::{PeerKind, Reason, Relay};
-use crate::config::Gate;
-use crate::packet::{self, SessionIdx};
+use super::{Reason, Relay};
+use crate::packet::SessionIdx;
 use crate::tables::{Session, SessionState};
 
 /// Cookie replies and data are both routed by receiver index alone.
@@ -14,7 +13,7 @@ pub(super) enum Indexed {
 }
 
 impl Relay {
-    /// Route a handshake initiation to the server or client its mac1 names.
+    /// Route a handshake initiation to the registered peer its mac1 names.
     pub(super) fn forward_init(
         &mut self,
         src: SocketAddr,
@@ -25,25 +24,13 @@ impl Relay {
         if self.reserved(sender) {
             return Err(Reason::ReservedIndex);
         }
-        if let Some(server) = self.mac1_peer(pkt, PeerKind::is_server) {
-            // Anyone may initiate to a registered server; the gate applies to its response.
-            let dst = self.registry.addr(&server, now).ok_or(Reason::ServerNotRegistered)?;
-            if dst == src {
-                return Err(Reason::Loop);
-            }
-            let s = Session::pending(src, dst, server, None, now);
-            return self.insert_session(sender, s);
+        // Anyone may initiate to a listed peer; its own WireGuard peer list decides.
+        let peer = self.mac1_peer(pkt).ok_or(Reason::NoMac1Match)?;
+        let dst = self.registry.addr(&peer, now).ok_or(Reason::PeerNotRegistered)?;
+        if dst == src {
+            return Err(Reason::Loop);
         }
-        // Only a registered server re-keys towards a client. Checking the source
-        // first spares junk from anyone else the mac1 scan over every client.
-        let server = self.server_at(src, now).ok_or(Reason::NoMac1Match)?;
-        let client = self.mac1_peer(pkt, PeerKind::is_client).ok_or(Reason::NoMac1Match)?;
-        if !self.may_reach(&client, &server) {
-            return Err(Reason::Acl);
-        }
-        let dst = self.learned.get(&client).copied().ok_or(Reason::ClientAddrUnknown)?;
-        let s = Session::pending(src, dst, server, Some(client), now);
-        self.insert_session(sender, s)
+        self.insert_session(sender, Session::pending(src, dst, peer, now))
     }
 
     /// Store a session and return its counterpart's address, where the
@@ -52,16 +39,16 @@ impl Relay {
         if self.sessions.insert(idx, s) { Ok(s.expected_src) } else { Err(Reason::IndexInUse) }
     }
 
-    /// Route a handshake response back to its initiator, applying the client gate.
+    /// Route a handshake response from the listed peer back to its initiator.
     pub(super) fn forward_response(
         &mut self,
         src: SocketAddr,
-        pkt: &[u8],
         sender: SessionIdx,
         receiver: SessionIdx,
         now: Instant,
     ) -> Result<SocketAddr, Reason> {
         let init = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
+        // The listed peer's registered address, so only it can open the session.
         if src != init.expected_src {
             return Err(Reason::WrongSource);
         }
@@ -72,33 +59,8 @@ impl Relay {
         if self.reserved(sender) {
             return Err(Reason::ReservedIndex);
         }
-        let client = match self.server_at(src, now) {
-            // Server answering a client: mac1 names the client the server authenticated.
-            Some(server) if server != init.server => return Err(Reason::WrongSource),
-            Some(server) => match (self.mac1_peer(pkt, PeerKind::is_client), self.gate) {
-                (Some(c), _) if !self.may_reach(&c, &server) => return Err(Reason::Acl),
-                (Some(c), _) => {
-                    self.learned.insert(c, init.dest);
-                    Some(c)
-                }
-                (None, Gate::None) => None,
-                (None, Gate::Response) => return Err(Reason::ResponseUnknownClient),
-            },
-            // Client answering a server-initiated handshake.
-            None => {
-                let for_server = self
-                    .peers
-                    .get(&init.server)
-                    .is_some_and(|p| packet::mac1_matches(&p.mac1, pkt));
-                if !for_server {
-                    return Err(Reason::ResponseNotForServer);
-                }
-                init.client
-            }
-        };
-        let s = Session::open(src, init.dest, init.server, client, now);
-        self.insert_session(sender, s)?;
-        self.sessions.open(receiver, now, client);
+        self.insert_session(sender, Session::open(src, init.dest, init.peer, now))?;
+        self.sessions.open(receiver, now);
         Ok(init.dest)
     }
 

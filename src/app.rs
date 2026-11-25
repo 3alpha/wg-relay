@@ -44,12 +44,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
 }
 
 fn load(path: &Path) -> Result<Config, AppError> {
-    let cfg =
-        Config::load(path).map_err(|source| AppError::Config { path: path.to_owned(), source })?;
-    for w in cfg.warnings() {
-        warn!(warning = %w, "config warning");
-    }
-    Ok(cfg)
+    Config::load(path).map_err(|source| AppError::Config { path: path.to_owned(), source })
 }
 
 async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
@@ -65,7 +60,6 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
         listen = %cfg.listen,
         pubkey = %relay.public_key(),
         tunnel_ip = %cfg.tunnel_ip,
-        gate = ?cfg.gate,
         handshake_rate = %cfg.handshake_rate,
         peers = relay.peer_count(),
         "wg-relay started"

@@ -1,7 +1,7 @@
-//! In-process tests of every gate mode: boringtun peers talking through `Relay::handle`.
+//! In-process tests: boringtun peers talking through `Relay::handle`.
 //!
-//! Config used throughout: servers `main` and `other`; clients `c1` -> main,
-//! `c2` -> other, `c3` -> main; `st` (stranger) is not listed anywhere.
+//! Config used throughout: `main` and `other` are listed peers, registered at
+//! SRV and SRV2; `c1` and `c2` are unlisted peers.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test setup panics on failure")]
 
 mod common;
@@ -17,8 +17,6 @@ const SRV: &str = "198.51.100.1:51820";
 const SRV2: &str = "198.51.100.2:51820";
 const C1: &str = "198.51.100.11:40001";
 const C2: &str = "198.51.100.12:40002";
-const C3: &str = "198.51.100.13:40003";
-const ST: &str = "198.51.100.66:40066";
 
 fn addr(s: &str) -> SocketAddr {
     s.parse().unwrap()
@@ -31,63 +29,29 @@ struct W {
     srv2: Key,
     c1: Key,
     c2: Key,
-    c3: Key,
-    st: Key,
 }
 
-fn config(w: &W, gate: &str, clients: &[(&str, &Key, &str)]) -> Config {
-    let mut s = format!(
-        "private_key = \"{}\"\ntunnel_ip = \"10.99.0.254\"\nclient_gate = \"{gate}\"\n\
-         [[server]]\nname = \"main\"\npubkey = \"{}\"\n[[server]]\nname = \"other\"\npubkey = \"{}\"\n",
-        b64_sk(&w.r),
-        b64(&w.srv.pk),
-        b64(&w.srv2.pk)
-    );
-    for (name, k, servers) in clients {
-        s += &format!(
-            "[[client]]\nname = \"{name}\"\npubkey = \"{}\"\nservers = [{servers}]\n",
-            b64(&k.pk)
-        );
+/// A config listing these peers.
+fn config(r: &Key, peers: &[(&str, &Key)]) -> Config {
+    let mut s = format!("private_key = \"{}\"\n", b64_sk(r));
+    for (name, k) in peers {
+        s += &format!("[[peer]]\nname = \"{name}\"\npubkey = \"{}\"\n", b64(&k.pk));
     }
     Config::parse(&s).unwrap()
 }
 
-fn world(gate: &str) -> W {
-    let r = key();
-    let mut w = W {
-        relay: Relay::new(&dummy(&r)),
-        r,
-        srv: key(),
-        srv2: key(),
-        c1: key(),
-        c2: key(),
-        c3: key(),
-        st: key(),
-    };
-    let (c1, c2, c3) = (w.c1.clone(), w.c2.clone(), w.c3.clone());
-    let cfg = config(
-        &w,
-        gate,
-        &[("c1", &c1, "\"main\""), ("c2", &c2, "\"other\""), ("c3", &c3, "\"main\"")],
-    );
-    w.relay = Relay::new(&cfg);
+fn world() -> W {
+    let (r, srv, srv2) = (key(), key(), key());
+    let relay = Relay::new(&config(&r, &[("main", &srv), ("other", &srv2)]));
+    let mut w = W { relay, r, srv, srv2, c1: key(), c2: key() };
     let (srv, srv2) = (w.srv.clone(), w.srv2.clone());
     w.register(&srv, SRV);
     w.register(&srv2, SRV2);
     w
 }
 
-fn dummy(r: &Key) -> Config {
-    let s = format!(
-        "private_key = \"{}\"\ntunnel_ip = \"10.99.0.254\"\n[[server]]\nname = \"x\"\npubkey = \"{}\"\n",
-        b64_sk(r),
-        b64(&key().pk)
-    );
-    Config::parse(&s).unwrap()
-}
-
 impl W {
-    /// Register server `k` from `src` via a real handshake with the relay.
+    /// Register listed peer `k` from `src` via a real handshake with the relay.
     fn register(&mut self, k: &Key, src: &str) -> Tunn {
         let mut t = tunn(k, &self.r);
         let init = initiation(&mut t);
@@ -146,48 +110,69 @@ fn ok3(a: &str, b: &str) -> [Option<SocketAddr>; 3] {
     [Some(addr(a)), Some(addr(b)), Some(addr(a))]
 }
 
-#[test]
-fn gate_none() {
-    let mut w = world("none");
-    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    // Listed client, never registered: works.
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
-    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), Some(addr(SRV)));
-    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(C1)));
-    // Server-initiated rekey to the learned client address.
-    assert_eq!(hs(&mut w, &mut sc1, SRV, &mut c1s, C1), ok3(C1, SRV));
-    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), Some(addr(SRV)));
-
-    // Unlisted client the *server* accepts: the relay does not gate it.
-    let (mut sts, mut sst) = (tunn(&w.st, &w.srv), tunn(&w.srv, &w.st));
-    assert_eq!(hs(&mut w, &mut sts, ST, &mut sst, SRV), ok3(SRV, ST));
-    assert_eq!(data(&mut w, &mut sts, ST, &mut sst), Some(addr(SRV)));
-    // ...but the server cannot initiate to it (no key to match).
-    assert_eq!(w.fwd(SRV, &initiation(&mut sst)), None);
-    assert_eq!(w.n(Reason::NoMac1Match), 1);
-
-    // Clients cannot register in this mode.
-    let mut c1r = tunn(&w.c1, &w.r);
-    assert_eq!(w.fwd(C1, &initiation(&mut c1r)), None);
-    assert_eq!(w.n(Reason::ClientRegistration), 1);
+/// The index a handshake message announces as its sender.
+fn sender_idx(pkt: &[u8]) -> u32 {
+    u32::from_le_bytes(pkt[4..8].try_into().unwrap())
 }
 
 #[test]
-fn gate_response() {
-    let mut w = world("response");
+fn unlisted_peer_reaches_listed_peer() {
+    let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), Some(addr(SRV)));
     assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(C1)));
-    assert_eq!(hs(&mut w, &mut sc1, SRV, &mut c1s, C1), ok3(C1, SRV), "server rekey");
+    // Client-initiated rekey.
+    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(C1)));
 
-    // Stranger: its initiation reaches the server (any source), but even a
-    // server that answers it gets its response dropped.
-    let (mut sts, mut sst) = (tunn(&w.st, &w.srv), tunn(&w.srv, &w.st));
-    let init = initiation(&mut sts);
-    assert_eq!(w.fwd(ST, &init), Some(addr(SRV)));
-    assert_eq!(w.fwd(SRV, &reply(&mut sst, &init).unwrap()), None);
-    assert_eq!(w.n(Reason::ResponseUnknownClient), 1);
-    // The stranger's index stays pending: data towards it is refused, a cookie may pass.
+    // A peer that moves network loses data until it re-handshakes.
+    let moved = "198.51.100.11:49999";
+    assert_eq!(data(&mut w, &mut c1s, moved, &mut sc1), None);
+    assert_eq!(w.n(Reason::WrongSource), 1);
+    assert_eq!(hs(&mut w, &mut c1s, moved, &mut sc1, SRV), ok3(SRV, moved));
+}
+
+#[test]
+fn listed_peer_cannot_initiate_to_unlisted_peer() {
+    let mut w = world();
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    // The relay has no key to match the initiation's mac1 against.
+    assert_eq!(w.fwd(SRV, &initiation(&mut sc1)), None);
+    assert_eq!(w.n(Reason::NoMac1Match), 1);
+}
+
+#[test]
+fn listed_peers_reach_each_other_both_ways() {
+    let mut w = world();
+    let (mut ab, mut ba) = (tunn(&w.srv, &w.srv2), tunn(&w.srv2, &w.srv));
+    assert_eq!(hs(&mut w, &mut ab, SRV, &mut ba, SRV2), ok3(SRV2, SRV));
+    assert_eq!(data(&mut w, &mut ab, SRV, &mut ba), Some(addr(SRV2)));
+    assert_eq!(hs(&mut w, &mut ba, SRV2, &mut ab, SRV), ok3(SRV, SRV2));
+    assert_eq!(data(&mut w, &mut ba, SRV2, &mut ab), Some(addr(SRV)));
+}
+
+#[test]
+fn unlisted_peer_cannot_register() {
+    let mut w = world();
+    let mut c1r = tunn(&w.c1, &w.r);
+    assert_eq!(w.fwd(C1, &initiation(&mut c1r)), None);
+    assert_eq!(w.n(Reason::UnknownKey), 1);
+    assert!(w.relay.take_outbox().is_empty());
+}
+
+#[test]
+fn only_the_listed_peer_answers_and_pending_carries_no_data() {
+    let mut w = world();
+    let mut c1s = tunn(&w.c1, &w.srv);
+    let init = initiation(&mut c1s);
+    assert_eq!(w.fwd(C1, &init), Some(addr(SRV)));
+    // A response for c1's pending index from anywhere but the server is refused.
+    let forged = forged_response(0x7000_0001, sender_idx(&init), &w.c1.pk);
+    assert_eq!(w.fwd(C2, &forged), None);
+    assert_eq!(w.n(Reason::WrongSource), 1);
+    // Until the server answers, data towards c1 is refused; a cookie reply may pass.
     let mut fake = vec![4, 0, 0, 0];
     fake.extend_from_slice(&init[4..8]);
     fake.resize(48, 0);
@@ -195,65 +180,46 @@ fn gate_response() {
     assert_eq!(w.n(Reason::SessionNotOpen), 1);
     fake[0] = 3;
     fake.resize(64, 0);
-    assert_eq!(w.fwd(SRV, &fake), Some(addr(ST)));
-    assert_eq!(w.fwd(C1, &fake), None, "only from the expected source");
+    assert_eq!(w.fwd(SRV, &fake), Some(addr(C1)));
+    assert_eq!(w.fwd(C2, &fake), None, "only from the expected source");
+}
 
-    // c2 is listed but may only reach `other`.
-    let (mut c2s, mut sc2) = (tunn(&w.c2, &w.srv), tunn(&w.srv, &w.c2));
-    assert_eq!(hs(&mut w, &mut c2s, C2, &mut sc2, SRV)[1], None);
-    assert_eq!(w.n(Reason::Acl), 1);
+#[test]
+fn unregistered_listed_peer_is_unreachable() {
+    let (r, srv) = (key(), key());
+    let mut relay = Relay::new(&config(&r, &[("main", &srv)]));
+    let init = initiation(&mut tunn(&key(), &srv));
+    assert_eq!(
+        relay.handle(addr(C1), &init, Instant::now()),
+        Verdict::Drop(Reason::PeerNotRegistered)
+    );
+}
+
+#[test]
+fn reload_revokes_removed_peer_immediately() {
+    let mut w = world();
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     let (mut c2o, mut oc2) = (tunn(&w.c2, &w.srv2), tunn(&w.srv2, &w.c2));
+    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     assert_eq!(hs(&mut w, &mut c2o, C2, &mut oc2, SRV2), ok3(SRV2, C2));
 
-    // A client that moves network loses data until it re-handshakes.
-    let moved = "198.51.100.11:49999";
-    assert_eq!(data(&mut w, &mut c1s, moved, &mut sc1), None);
-    assert_eq!(w.n(Reason::WrongSource), 2);
-    assert_eq!(hs(&mut w, &mut c1s, moved, &mut sc1, SRV), ok3(SRV, moved));
-}
-
-#[test]
-fn reload_revokes_immediately() {
-    let mut w = world("response");
-    let c3k = w.c3.clone();
-    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    let (mut c3s, mut sc3) = (tunn(&w.c3, &w.srv), tunn(&w.srv, &w.c3));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
-    assert_eq!(hs(&mut w, &mut c3s, C3, &mut sc3, SRV), ok3(SRV, C3));
-
-    // Remove c1 entirely, and take `main` away from c3.
-    let cfg = config(&w, "response", &[("c3", &c3k, "\"other\"")]);
+    // Remove `main`: its registration and every session routed to it go.
+    let cfg = config(&w.r, &[("other", &w.srv2)]);
     w.relay.reload(&cfg);
-    assert_eq!(w.relay.session_count(), 0, "both sessions revoked");
+    assert_eq!(w.relay.registered_addr(&w.srv.id(), Instant::now()), None);
     assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), None);
-    assert_eq!(data(&mut w, &mut sc3, SRV, &mut c3s), None);
+    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), None);
     assert_eq!(w.n(Reason::UnknownIndex), 2);
-    // c3's next handshake still reaches the server, but the response is refused.
-    assert_eq!(hs(&mut w, &mut c3s, C3, &mut sc3, SRV)[..2], [Some(addr(SRV)), None]);
-    assert_eq!(w.n(Reason::Acl), 1);
-    // Servers keep their registrations.
-    assert!(w.relay.registered_addr(&w.srv.id(), Instant::now()).is_some());
-}
-
-#[test]
-fn switching_to_response_drops_unidentified_sessions() {
-    let mut w = world("none");
-    let (mut sts, mut sst) = (tunn(&w.st, &w.srv), tunn(&w.srv, &w.st));
-    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    assert_eq!(hs(&mut w, &mut sts, ST, &mut sst, SRV), ok3(SRV, ST));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
-
-    let (c1, c2, c3) = (w.c1.clone(), w.c2.clone(), w.c3.clone());
-    let clients = [("c1", &c1, "\"main\""), ("c2", &c2, "\"other\""), ("c3", &c3, "\"main\"")];
-    let cfg = config(&w, "response", &clients);
-    w.relay.reload(&cfg);
-    assert_eq!(data(&mut w, &mut sts, ST, &mut sst), None, "unlisted client's session dropped");
-    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), Some(addr(SRV)), "listed client kept");
+    assert_eq!(w.fwd(C1, &initiation(&mut c1s)), None);
+    assert_eq!(w.n(Reason::NoMac1Match), 1);
+    // Sessions with `other` are untouched.
+    assert_eq!(data(&mut w, &mut c2o, C2, &mut oc2), Some(addr(SRV2)));
+    assert_eq!(data(&mut w, &mut oc2, SRV2, &mut c2o), Some(addr(C2)));
 }
 
 #[test]
 fn relay_indexes_are_reserved() {
-    let mut w = world("none");
+    let mut w = world();
     // The relay's own session index, as seen in its handshake response.
     let srv = w.srv.clone();
     let mut t = tunn(&srv, &w.r);
@@ -270,25 +236,20 @@ fn relay_indexes_are_reserved() {
     assert_eq!(w.fwd(C1, &fine), Some(addr(SRV)));
 }
 
-/// The index a handshake message announces as its sender.
-fn sender_idx(pkt: &[u8]) -> u32 {
-    u32::from_le_bytes(pkt[4..8].try_into().unwrap())
-}
-
 #[test]
 fn open_session_cannot_mint_or_take_over_indexes() {
-    let mut w = world("response");
+    let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    let (mut c3s, mut sc3) = (tunn(&w.c3, &w.srv), tunn(&w.srv, &w.c3));
+    let (mut c2s, mut sc2) = (tunn(&w.c2, &w.srv), tunn(&w.srv, &w.c2));
     let c1_init = initiation(&mut c1s);
     w.fwd(C1, &c1_init);
     let c1_resp = reply(&mut sc1, &c1_init).unwrap();
     assert_eq!(w.fwd(SRV, &c1_resp), Some(addr(C1)));
-    let c3_init = initiation(&mut c3s);
-    w.fwd(C3, &c3_init);
-    let c3_resp = reply(&mut sc3, &c3_init).unwrap();
-    assert_eq!(w.fwd(SRV, &c3_resp), Some(addr(C3)));
-    reply(&mut c3s, &c3_resp);
+    let c2_init = initiation(&mut c2s);
+    w.fwd(C2, &c2_init);
+    let c2_resp = reply(&mut sc2, &c2_init).unwrap();
+    assert_eq!(w.fwd(SRV, &c2_resp), Some(addr(C2)));
+    reply(&mut c2s, &c2_resp);
     let sessions = w.relay.session_count();
 
     // c1 forges a response on its own, already open, session.
@@ -299,20 +260,20 @@ fn open_session_cannot_mint_or_take_over_indexes() {
     assert_eq!(w.fwd(SRV, &c1_resp), None);
     assert_eq!(w.n(Reason::SessionNotPending), 2);
 
-    // c1 starts handshakes that claim c3's two live indexes.
-    for idx in [sender_idx(&c3_init), sender_idx(&c3_resp)] {
+    // c1 starts handshakes that claim c2's two live indexes.
+    for idx in [sender_idx(&c2_init), sender_idx(&c2_resp)] {
         let init = with_sender(&initiation(&mut c1s), idx, &w.srv.pk);
         assert_eq!(w.fwd(C1, &init), None);
     }
     assert_eq!(w.n(Reason::IndexInUse), 2);
     assert_eq!(w.relay.session_count(), sessions);
-    assert_eq!(data(&mut w, &mut c3s, C3, &mut sc3), Some(addr(SRV)));
-    assert_eq!(data(&mut w, &mut sc3, SRV, &mut c3s), Some(addr(C3)));
+    assert_eq!(data(&mut w, &mut c2s, C2, &mut sc2), Some(addr(SRV)));
+    assert_eq!(data(&mut w, &mut sc2, SRV, &mut c2s), Some(addr(C2)));
 }
 
 #[test]
 fn registration_needs_key_confirmation() {
-    let mut w = world("response");
+    let mut w = world();
     let srv = w.srv.clone();
     let moved = "203.0.113.9:1234";
     let mut t = tunn(&srv, &w.r);
@@ -327,7 +288,7 @@ fn registration_needs_key_confirmation() {
 
 #[test]
 fn pending_session_expires_quickly() {
-    let mut w = world("none");
+    let mut w = world();
     let mut c1s = tunn(&w.c1, &w.srv);
     assert_eq!(w.fwd(C1, &initiation(&mut c1s)), Some(addr(SRV)));
     assert_eq!(w.relay.session_count(), 1);
@@ -336,8 +297,8 @@ fn pending_session_expires_quickly() {
 }
 
 #[test]
-fn server_roaming_migrates_sessions() {
-    let mut w = world("response");
+fn listed_peer_roaming_migrates_sessions() {
+    let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     let srv = w.srv.clone();
@@ -349,7 +310,7 @@ fn server_roaming_migrates_sessions() {
 
 #[test]
 fn relay_key_cannot_open_forwarded_initiation_and_ping_works() {
-    let mut w = world("response");
+    let mut w = world();
     let mut c1s = tunn(&w.c1, &w.srv);
     let init = initiation(&mut c1s);
     assert_eq!(w.fwd(C1, &init), Some(addr(SRV)));
@@ -371,7 +332,7 @@ fn relay_key_cannot_open_forwarded_initiation_and_ping_works() {
 
 #[test]
 fn expiry_and_rate_limit() {
-    let mut w = world("none");
+    let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     w.relay.tick(Instant::now() + Duration::from_secs(181));
@@ -382,7 +343,7 @@ fn expiry_and_rate_limit() {
     w.relay.tick(Instant::now() + Duration::from_secs(201));
     assert!(w.relay.session_count() == 0);
 
-    let mut w = world("none");
+    let mut w = world();
     let mut c1s = tunn(&w.c1, &w.srv);
     let init = initiation(&mut c1s);
     let ok = (0..100).filter(|_| w.fwd(C1, &init).is_some()).count();
@@ -392,45 +353,43 @@ fn expiry_and_rate_limit() {
 
 #[test]
 fn garbage_never_panics() {
-    for gate in ["none", "response"] {
-        let mut w = world(gate);
-        let srv = w.srv.clone();
-        let mut sr = w.register(&srv, SRV);
-        let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-        let init = initiation(&mut c1s);
-        let resp = reply(&mut sc1, &init).unwrap();
-        let seeds = [
-            init,
-            resp,
-            encrypt(&mut sr, &ping([10, 99, 0, 1], [10, 99, 0, 254])),
-            initiation(&mut sr),
-        ];
-        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
-        let mut rnd = move || {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            x
-        };
-        for i in 0..10_000 {
-            let mut p = seeds[i % seeds.len()].clone();
-            match rnd() % 4 {
-                0 => p.truncate((rnd() % 200) as usize),
-                1 => p = (0..rnd() % 300).map(|_| rnd() as u8).collect(),
-                _ => {
-                    for _ in 0..1 + rnd() % 4 {
-                        let j = (rnd() as usize) % p.len();
-                        p[j] = rnd() as u8;
-                    }
+    let mut w = world();
+    let srv = w.srv.clone();
+    let mut sr = w.register(&srv, SRV);
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    let init = initiation(&mut c1s);
+    let resp = reply(&mut sc1, &init).unwrap();
+    let seeds = [
+        init,
+        resp,
+        encrypt(&mut sr, &ping([10, 99, 0, 1], [10, 99, 0, 254])),
+        initiation(&mut sr),
+    ];
+    let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut rnd = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for i in 0..10_000 {
+        let mut p = seeds[i % seeds.len()].clone();
+        match rnd() % 4 {
+            0 => p.truncate((rnd() % 200) as usize),
+            1 => p = (0..rnd() % 300).map(|_| rnd() as u8).collect(),
+            _ => {
+                for _ in 0..1 + rnd() % 4 {
+                    let j = (rnd() as usize) % p.len();
+                    p[j] = rnd() as u8;
                 }
             }
-            if let (0, Some(b)) = (rnd() % 2, p.first_mut()) {
-                *b = 1 + (rnd() % 4) as u8;
-            }
-            let src = [SRV, C1, ST][(rnd() % 3) as usize];
-            w.fwd(src, &p);
-            w.relay.take_outbox();
         }
-        assert!(w.n(Reason::Malformed) > 500, "{}", w.relay.metrics());
+        if let (0, Some(b)) = (rnd() % 2, p.first_mut()) {
+            *b = 1 + (rnd() % 4) as u8;
+        }
+        let src = [SRV, C1, C2][(rnd() % 3) as usize];
+        w.fwd(src, &p);
+        w.relay.take_outbox();
     }
+    assert!(w.n(Reason::Malformed) > 500, "{}", w.relay.metrics());
 }

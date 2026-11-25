@@ -1,7 +1,3 @@
-use std::fmt;
-
-use super::Gate;
-
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RateError {
     #[error("missing unit, expected \"<n>/s\" or \"<n>/m\"")]
@@ -20,37 +16,12 @@ pub enum ConfigError {
     Read(#[from] std::io::Error),
     #[error("invalid toml")]
     Parse(#[from] toml::de::Error),
-    #[error("at least one [[server]] is required")]
-    NoServer,
+    #[error("at least one [[peer]] is required")]
+    NoPeer,
     #[error("{name} uses the relay's own key")]
     RelayKeyReused { name: String },
     #[error("{name} has the same pubkey as another peer")]
     DuplicatePubkey { name: String },
     #[error("duplicate name {name}")]
     DuplicateName { name: String },
-    #[error("client {client} lists unknown server {server:?}")]
-    UnknownServer { client: String, server: String },
-}
-
-/// A valid but probably unintended setting.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConfigWarning {
-    NoClients { gate: Gate },
-    ClientWithoutServers { name: String },
-}
-
-impl fmt::Display for ConfigWarning {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ConfigWarning::NoClients { gate } => {
-                write!(
-                    f,
-                    "client_gate = {gate:?} but no [[client]] entries, so no client can connect"
-                )
-            }
-            ConfigWarning::ClientWithoutServers { name } => {
-                write!(f, "client {name} may not reach any server")
-            }
-        }
-    }
 }
