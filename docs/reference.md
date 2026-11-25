@@ -4,17 +4,17 @@ The exact rules wg-relay follows and its known limitations. For a guided tour wi
 
 ## Design
 
-`relay.toml` lists the peers that must be reachable, by public key: usually the servers. Listed peers register with the relay; everyone else is unlisted and needs no relay config. One UDP socket carries two kinds of traffic: registration tunnels with listed peers, and forwarded traffic between peers.
+`relay.toml` lists the peers that must be reachable, by public key: usually the servers. Listed peers register with the relay; everyone else is unlisted and needs no relay config. One UDP socket carries two kinds of traffic: registration tunnels with listed peers, and forwarded traffic between peers. [How it works](how-it-works.md) defines these and the other terms used here (session, pending, open, reserved prefix) at its top.
 
-Inside, the relay is split into two halves. The **forwarding half** (`Forwarder`) holds only the open sessions (index to destination, expected source and opening time) and the index prefixes of the relay's own tunnels; it forwards data packets and cookie replies on live open sessions, drops what it can judge alone (`invalid_source`, `malformed`, `wrong_source`), never writes, and hands everything else to the control half: handshakes, packets in a relay tunnel's prefix, and indexes that are not a live open session. The **control half** (`Control`) owns everything that changes: listed peers and their tunnels, the registry, the rate limiter, the budgets, the session table with its quotas and lifetimes, reload. It is the forwarding half's only writer: the session table publishes or withdraws an open entry in the same call that changes it, and reload replaces the reserved prefixes, so the two never disagree. Both halves run on the one thread; the split prepares for forwarding on several.
+Inside, the relay is split into two halves. The **forwarding half** (`Forwarder`) holds only the open sessions (index to destination, expected source and opening time) and the reserved prefixes (the registration tunnels' index prefixes); it forwards transport data and cookie replies on live open sessions, drops what it can judge alone (`invalid_source`, `malformed`, `wrong_source`), never writes, and hands everything else to the control half: handshake messages, messages to a registration tunnel, and indexes that are not a live open session. The **control half** (`Control`) owns everything that changes: listed peers and their registration tunnels, the registry, the rate limiter, the budgets, the session table with its quotas and lifetimes, reload. It is the forwarding half's only writer: the session table publishes or withdraws an open entry in the same call that changes it, and reload replaces the reserved prefixes, so the two never disagree. Both halves run on the one thread; the split prepares for forwarding on several.
 
 ### Registration (listed peers only)
 
 Each listed peer has the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` and `PersistentKeepalive = 25`. The relay runs one `boringtun::noise::Tunn` per listed peer.
 
-* An initiation whose mac1 is keyed to the **relay's** public key is for the relay. `parse_handshake_anon` decrypts the sender's static key. Keys that are not listed are rejected (`registration_unknown_key`). A listed peer's initiation goes to its `Tunn`, which performs the full handshake, including replay protection.
+* A handshake initiation whose mac1 is keyed to the **relay's** public key is a registration initiation. `parse_handshake_anon` decrypts the sender's static key. Keys that are not listed are rejected (`registration_unknown_key`). A listed peer's initiation goes to its `Tunn`, which performs the full handshake, including replay protection.
 * After **every packet that authenticates** on a listed peer's tunnel (data or a keepalive; never a bare initiation, which could be a replay, and never a cookie), the relay sets `registry[peer] = src_addr`. If the address changed (roaming), every session table entry using the old address is rewritten. Entries expire after 180 s.
-* **The relay's indexes never collide with forwarded sessions.** Each relay tunnel owns a random 24-bit index prefix, so it uses 256 indexes. A new prefix is never one that a live session is using, and any forwarded handshake that picks an index inside a relay prefix is dropped (`reserved_index`), so the peer retries with a new random index. Packets in a relay prefix go only to that relay tunnel.
+* **The relay's indexes never collide with forwarded sessions.** Each registration tunnel owns a random 24-bit index prefix, a reserved prefix, so it uses 256 indexes. A new prefix is never one that a live session is using, and any forwarded handshake that picks an index inside a reserved prefix is dropped (`reserved_index`), so the peer retries with a new random index. Packets in a reserved prefix go only to that registration tunnel.
 * The relay answers ICMP echo to `tunnel_ip` (`ping 10.99.0.254` from a listed peer checks its registration).
 
 ### Session table
@@ -38,28 +38,28 @@ Before any other work, a datagram whose source can never be a reply destination 
 
 Every initiation is rate-limited per source first. Then, unless it is for the relay and comes from a listed peer's registered address, it must fit in one of two handshake budgets (below). A source is an IPv4 address or an IPv6 /64 (an IPv4-mapped IPv6 address, as a dual-stack `[::]` socket reports IPv4 senders, counts as its IPv4 address), hashed with a random key into one of 65,536 fixed buckets, so the limiter's memory is constant (under 2 MB) however many sources appear; sources that share a bucket share its allowance.
 
-**Type 1, initiation** not for the relay (`sender_idx` must not be in a relay prefix; then the global session cap, the global pending cap and the forwarding budget are checked before the scan):
+**Type 1, handshake initiation** not for the relay, a forwarded initiation (`sender_idx` must not be in a reserved prefix; then the global session cap, the global pending cap and the forwarding budget are checked before the scan):
 
 * **mac1 matches a listed peer P**, which must be below its quota of entries (`peer_quota`) and registered (`peer_not_registered`). Accepted from any source except P's own address (`loop`). The relay records `idx[sender] = {dest: src, expected_src: addr(P), open: false, peer: P}`, evicting P's oldest pending entry if P is at its quota, and forwards to P.
 * Otherwise the packet is dropped (`no_mac1_match`). An unlisted peer can therefore never receive an initiation: a listed peer cannot start a handshake towards it, but listed peers can start handshakes with each other in both directions.
 
-**Type 2, response** (it must match a pending entry and come from its `expected_src`, the listed peer's registered address):
+**Type 2, handshake response** (it must match a pending entry and come from its `expected_src`, the listed peer's registered address):
 
 * The initiator's entry becomes `open`, and an open entry is created for the responder's `sender_idx`; both live 200 s from now. Creating it is subject to P's quota (`peer_quota`) and the global cap (`too_many_sessions`); if refused, the initiator's entry stays pending.
 * A response to an entry that is already open is dropped (`session_not_pending`): one response per initiation.
 
 The relay does not check who the listed peer accepted. Its own WireGuard peer list is the only authentication; the relay only ensures the response really comes from it.
 
-**Types 3 and 4** (cookie reply and data) are forwarded only from `expected_src`. Data requires an `open` session. A cookie reply may also pass on a pending one, so a peer under load can answer an initiation. Neither changes the entry: a session lives as long as its lifetime, not as long as someone keeps sending.
+**Types 3 and 4** (cookie reply and transport data) are forwarded only from `expected_src`. Data requires an `open` session. A cookie reply may also pass on a pending one, so a peer under load can answer an initiation. Neither changes the entry: a session lives as long as its lifetime, not as long as someone keeps sending.
 
 ### Handshake budgets
 
 Initiations are unauthenticated, so their cost must be bounded. Scanning for the destination costs one keyed BLAKE2s per listed key, with eight keys hashed per SIMD batch, and a registration attempt costs an X25519 operation, about as much as 400 key checks, before the sender is known. Two token buckets, each with a one-second burst, are checked before that work and charged after it, so a flood on one path cannot starve the other:
 
-* **Forwarding**, `FORWARD_WORK_PER_SEC` = 1,000,000 mac1 checks per second, charged the number of keys a scan tried. When it is empty, initiations not for the relay are dropped (`handshake_budget`).
-* **Registration**, `REGISTRATION_WORK_PER_SEC` = 200,000 mac1 checks per second, charged 400 per attempt, so 500 attempts per second. When it is empty, relay-bound initiations are dropped (`registration_budget`).
+* **Forwarding**, `FORWARDING_WORK_PER_SEC` = 1,000,000 mac1 checks per second, charged the number of keys a scan tried. When it is empty, initiations not for the relay are dropped (`forwarding_budget`).
+* **Registration**, `REGISTRATION_WORK_PER_SEC` = 200,000 mac1 checks per second, charged 400 per attempt, so 500 attempts per second. When it is empty, registration initiations are dropped (`registration_budget`).
 
-The order for an initiation is: the per-source limit; one mac1 check against the relay's own key; for a relay-bound initiation, **if `src` is the address a listed peer is currently registered from, the registration budget is skipped** (only the per-source limit applies), otherwise the registration budget is required and charged; any other initiation goes to the forwarding rules above. A flood of registration attempts from other addresses therefore cannot stop registered peers from re-handshaking their registration tunnels. Dropped initiations cost only parsing, the limiter and at most one hash, so forwarding continues at full speed during a flood.
+The order for an initiation is: the per-source limit; one mac1 check against the relay's own key; for a registration initiation, **if `src` is the address a listed peer is currently registered from, the registration budget is skipped** (only the per-source limit applies), otherwise the registration budget is required and charged; any other initiation goes to the forwarding rules above. A flood of registration attempts from other addresses therefore cannot stop registered peers from re-handshaking their registration tunnels. Dropped initiations cost only parsing, the limiter and at most one hash, so forwarding continues at full speed during a flood.
 
 Legitimate forwarding load is about `sessions × listed peers / 240` checks per second: every session rekeys every 2 minutes, and a scan tries half the keys on average. The default allows, for example, 1,000 listed peers with 200,000 sessions, or 10,000 with 24,000; the session table's cap holds about 229,000 busy sessions. Legitimate registration load from unregistered addresses is only first registrations and address changes, and at 500 per second even 10,000 peers re-registering after a relay restart are admitted within 20 s.
 
@@ -73,7 +73,7 @@ One thread does everything: a tokio current-thread runtime drives the socket, th
 
 Forwarded datagrams leave through UDP GSO where the kernel supports it. Consecutive datagrams of a batch that go to the same address, carry the same ECN bits and have the same length (the last one may be shorter) are handed to the kernel as one send of at most 64 datagrams and 65,507 bytes, which the kernel or the NIC splits back into the very same datagrams. A run within one receive buffer is sent straight from it; a run that continues into the next buffer is copied together first. A datagram the relay drops or consumes, a change of destination or ECN bits, or a longer datagram ends a run, so datagrams leave byte-identical and in the order they arrived. Without GSO, every forwarded datagram is a send of its own. If a GSO send fails (some drivers and paths reject GSO), its datagrams are sent again one by one, so only those the network itself refuses are lost; after `EIO` or `EINVAL`, `quinn-udp` stops using GSO for the rest of the process's life, and the relay logs that once at `info`. The startup line reports whether GRO and GSO are available (`gro=true gso=true`).
 
-The ECN bits of a received datagram are copied to the datagrams forwarded from it, as WireGuard copies them from the inner packet to the outer one, so congestion marks reach the far end. The rest of the TOS byte (DSCP) is not kept. The relay's own tunnel datagrams (handshake responses, keepalives, ping replies) are sent without ECN after every batch.
+The ECN bits of a received datagram are copied to the datagrams forwarded from it, as WireGuard copies them from the inner packet to the outer one, so congestion marks reach the far end. The rest of the TOS byte (DSCP) is not kept. The registration tunnels' own datagrams (handshake responses, keepalives, ping replies) are sent without ECN after every batch.
 
 When it sets up the socket, `quinn-udp` forbids IP fragmentation and turns on receive timestamps. On Linux the relay puts both back as the kernel had them: a datagram larger than a path's MTU is fragmented as by any other UDP socket instead of being dropped, and the timestamps' control message would leave no room for the ECN bits next to a GRO segment size.
 
@@ -88,8 +88,8 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 | `invalid_source` | the source can never be a reply destination: port 0, unspecified, multicast or IPv4 broadcast |
 | `malformed` | wrong size, type or reserved bytes |
 | `rate_limited` | the source (IPv4 address or IPv6 /64) exceeded `handshake_rate_per_ip` |
-| `handshake_budget` | the forwarding budget is spent; the initiation was dropped before the mac1 scan |
-| `registration_budget` | the registration budget is spent and the relay-bound initiation did not come from a registered address; dropped before any X25519 work |
+| `forwarding_budget` | the forwarding budget is spent; the forwarded initiation was dropped before the mac1 scan. Called `handshake_budget` before, a name that hid that registration has its own budget |
+| `registration_budget` | the registration budget is spent and the registration initiation did not come from a registered address; dropped before any X25519 work |
 | `reserved_index` | a forwarded handshake picked an index in the relay's range |
 | `no_mac1_match` | the initiation is not for any listed peer or the relay |
 | `peer_not_registered` | the target listed peer has no current registration |
@@ -102,14 +102,14 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 | `wrong_source` | the packet is not from the session's `expected_src_addr` |
 | `session_not_pending` | a response to a handshake that was already answered |
 | `session_not_open` | data on a session whose handshake has not completed |
-| `registration_unknown_key` | the relay-bound handshake came from a key that is not listed |
-| `tunnel_auth_failed` | a registration-tunnel packet failed authentication |
+| `registration_unknown_key` | the registration initiation came from a key that is not listed |
+| `tunnel_auth_failed` | a datagram to a registration tunnel failed authentication |
 
 ## Reload (SIGHUP)
 
 `relay.toml` is re-read and validated. If it is invalid, the current config stays in effect and an error is logged. Changes to `listen` and `private_key` need a restart. Everything else applies immediately:
 
-* A **removed peer** loses its registration, its relay tunnel and every session routed to it. The next packet of any of those sessions is rejected (`unknown_index`), in both directions.
+* A **removed peer** loses its registration, its registration tunnel and every session routed to it. The next packet of any of those sessions is rejected (`unknown_index`), in both directions.
 * Sessions with peers that are still listed are untouched.
 * Unlisted peers are revoked in the listed peers' WireGuard configs, not at the relay.
 
@@ -124,7 +124,7 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 * **The per-source initiation limit is shared** by all hosts behind one NAT address or in one IPv6 /64, and by unrelated sources that hash to the same bucket. Many distributed sources are held back only by the handshake budgets.
 * **A flood spread over the whole address space saturates every rate-limit bucket.** There are 65,536 buckets, so spoofed initiations from sources spread across all of them at roughly 65,536 × `handshake_rate_per_ip` per second (655,360 per second at the default 10/s) leave every bucket empty, including those of registered listed peers, whose re-handshakes with the relay are then dropped (`rate_limited`) until the flood ends, as are every other host's new handshakes and rekeys. Open sessions keep forwarding, and keepalives on a registration tunnel are not rate-limited, so a listed peer stays registered until its tunnel's current keys age out (at most 180 s after its last handshake with the relay) and its registration then expires (180 s later).
 * **Spoofed initiations can crowd out handshakes to one listed peer.** Each one aimed at a listed peer takes one of that peer's 1,024 pending slots. A flood that cycles through all of them before the peer's response comes back (with a 100 ms round trip, about 10,000 initiations per second) evicts every legitimate pending entry, so new handshakes to that peer (only) fail until the flood ends. Other peers' handshakes, open sessions and memory are unaffected.
-* **Junk initiations can exhaust the forwarding budget.** A mac1 cannot be looked up by index, so an initiation that matches no key costs a scan of every listed key before it can be dropped. A sustained flood of them makes forwarded handshakes compete for the budget: open sessions keep forwarding and registration tunnels are unaffected, but new handshakes and rekeys between peers may be dropped (`handshake_budget`) until the flood ends.
+* **Junk initiations can exhaust the forwarding budget.** A mac1 cannot be looked up by index, so an initiation that matches no key costs a scan of every listed key before it can be dropped. A sustained flood of them makes forwarded handshakes compete for the budget: open sessions keep forwarding and registration tunnels are unaffected, but new handshakes and rekeys between peers may be dropped (`forwarding_budget`) until the flood ends.
 * **During a registration flood, a peer registering from a new address competes for the registration budget.** That covers a first registration, NAT rebinding and every peer after a relay restart; their registrations may be delayed (`registration_budget`) until the flood ends. Peers already registered from their current address are not affected.
 * **Packets spoofed from a listed peer's registered `ip:port` are trusted as that peer.** The source address is the only check on the forwarding path. Relay-bound initiations from it skip the registration budget and are limited only per source, so X25519 work from such packets grows with the number of registered peers times `handshake_rate_per_ip` instead of being capped. Fake responses from it open pending sessions to that peer, and fake cookie replies pass on pending ones (but no longer extend them). The per-peer and global quotas bound the memory this can take; it remains a denial-of-service lever against that one peer, whose quota it can fill. This needs the registered `ip:port` and a network path that allows spoofing it.
 * **A listed peer can fill its own quota.** A malicious or compromised listed peer can answer spoofed initiations aimed at itself with fabricated responses, each creating two open entries for 200 s, until it holds 65,536 entries. That denies new sessions only to itself; other peers have their own quotas, and the global cap needs 14 such peers. Conversely, a listed peer that genuinely carries more than about 16,000 busy sessions reaches its quota (`peer_quota`) and needs `MAX_SESSIONS_PER_PEER` raised.

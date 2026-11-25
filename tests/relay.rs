@@ -192,7 +192,7 @@ fn unlisted_peer_cannot_register() {
     let mut w = world();
     let mut c1r = tunn(&w.c1, &w.r);
     assert_eq!(w.fwd(C1, &initiation(&mut c1r)), None);
-    assert_eq!(w.n(Reason::UnknownKey), 1);
+    assert_eq!(w.n(Reason::RegistrationUnknownKey), 1);
     assert!(w.relay.take_outbox().is_empty());
 }
 
@@ -252,16 +252,16 @@ fn reload_revokes_removed_peer_immediately() {
 }
 
 #[test]
-fn relay_indexes_are_reserved() {
+fn registration_tunnel_indexes_are_reserved() {
     let mut w = world();
-    // The relay's own session index, as seen in its handshake response.
+    // The registration tunnel's index, as seen in the relay's handshake response.
     let srv = w.srv.clone();
     let mut t = tunn(&srv, &w.r);
     let init = initiation(&mut t);
     w.fwd(SRV, &init);
     let resp = w.relay.take_outbox().pop().unwrap().1;
     let relay_idx = u32::from_le_bytes(resp[4..8].try_into().unwrap());
-    // A forwarded handshake trying to use an index in the relay's range is refused.
+    // A forwarded initiation trying to use an index in its reserved prefix is refused.
     let mut c1s = tunn(&w.c1, &w.srv);
     let forged = with_sender(&initiation(&mut c1s), relay_idx ^ 0x7f, &w.srv.pk);
     assert_eq!(w.fwd(C1, &forged), None);
@@ -311,7 +311,7 @@ fn registration_needs_key_confirmation() {
     let srv = w.srv.clone();
     let moved = "203.0.113.9:1234";
     let mut t = tunn(&srv, &w.r);
-    // An initiation alone (which could be a replay) does not move the registration.
+    // A registration initiation alone (which could be a replay) does not move the registration.
     assert_eq!(w.fwd(moved, &initiation(&mut t)), None);
     let resp = w.relay.take_outbox().pop().unwrap().1;
     assert_eq!(w.relay.registered_addr(&srv.id(), Instant::now()), Some(addr(SRV)));
@@ -432,7 +432,7 @@ fn garbage_never_panics() {
 fn registration_flood_does_not_block_registered_peers() {
     let mut w = world();
     let now = Instant::now();
-    // Initiations for the relay from unregistered sources, more than its
+    // Registration initiations from unregistered sources, more than the
     // registration budget's burst. All arrive at `now`, so nothing refills.
     let junk = with_sender(&initiation(&mut tunn(&w.c1, &w.r)), 0x5000_0000, &w.r.pk);
     for i in 0..600 {
@@ -447,7 +447,7 @@ fn registration_flood_does_not_block_registered_peers() {
     let moved = addr("203.0.113.9:1234");
     let shed = Verdict::Drop(Reason::RegistrationBudget);
     assert_eq!(w.relay.handle(moved, &initiation(&mut t), now), shed);
-    // Forwarding has its own budget.
+    // Forwarded handshakes have their own budget.
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
 }

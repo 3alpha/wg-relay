@@ -36,14 +36,14 @@ fn src(i: u8) -> SocketAddr {
     SocketAddr::from(([192, 0, 2, i], 1))
 }
 
-/// An initiation matching no listed key, so it costs a scan of all three.
+/// A handshake initiation matching no listed key, so it costs a scan of all three.
 fn junk() -> Vec<u8> {
     let mut p = vec![0u8; packet::INIT_LEN];
     p[0] = 1;
     p
 }
 
-/// An initiation whose mac1 is for the relay but whose body is garbage.
+/// A handshake initiation whose mac1 is for the relay but whose body is garbage.
 fn junk_for_relay(relay: &Relay) -> Vec<u8> {
     let mut p = junk();
     let mac = relay.control.relay_mac1.mac(&p[..116]);
@@ -52,31 +52,32 @@ fn junk_for_relay(relay: &Relay) -> Vec<u8> {
 }
 
 #[test]
-fn handshake_budget_sheds_initiations_once_spent() {
+fn forwarding_budget_sheds_forwarded_initiations_once_spent() {
     let mut relay = relay();
-    relay.control.forward_budget = WorkBudget::new(10.0);
+    relay.control.forwarding_budget = WorkBudget::new(10.0);
     let t0 = Instant::now();
     let junk = junk();
     let verdicts: Vec<Verdict> = (0..5).map(|i| relay.handle(src(i), &junk, t0)).collect();
-    let (miss, shed) = (Verdict::Drop(Reason::NoMac1Match), Verdict::Drop(Reason::HandshakeBudget));
+    let (miss, shed) =
+        (Verdict::Drop(Reason::NoMac1Match), Verdict::Drop(Reason::ForwardingBudget));
     assert_eq!(verdicts, [miss, miss, miss, miss, shed], "10 -> 7 -> 4 -> 1 -> -2");
     assert_eq!(relay.handle(src(9), &junk, t0 + Duration::from_millis(300)), miss, "refilled");
-    assert_eq!(relay.metrics().rejected(Reason::HandshakeBudget), 1);
+    assert_eq!(relay.metrics().rejected(Reason::ForwardingBudget), 1);
 }
 
 /// A relay whose forwarding budget allows one scan and whose registration
-/// budget allows one attempt, plus a relay-bound initiation for it.
+/// budget allows one attempt, plus a registration initiation for it.
 fn tiny_budgets() -> (Relay, Vec<u8>) {
     let mut relay = relay();
-    relay.control.forward_budget = WorkBudget::new(3.0);
+    relay.control.forwarding_budget = WorkBudget::new(3.0);
     relay.control.registration_budget = WorkBudget::new(REGISTRATION_WORK as f64);
     let reg = junk_for_relay(&relay);
     (relay, reg)
 }
 
 const MISS: Verdict = Verdict::Drop(Reason::NoMac1Match);
-const FWD_SHED: Verdict = Verdict::Drop(Reason::HandshakeBudget);
-const ATTEMPT: Verdict = Verdict::Drop(Reason::TunnelAuth);
+const FWD_SHED: Verdict = Verdict::Drop(Reason::ForwardingBudget);
+const REG_ATTEMPT: Verdict = Verdict::Drop(Reason::TunnelAuthFailed);
 const REG_SHED: Verdict = Verdict::Drop(Reason::RegistrationBudget);
 
 #[test]
@@ -84,7 +85,7 @@ fn spent_forwarding_budget_leaves_registration_admitted() {
     let (t0, fwd) = (Instant::now(), junk());
     let (mut relay, reg) = tiny_budgets();
     assert_eq!([relay.handle(src(1), &fwd, t0), relay.handle(src(2), &fwd, t0)], [MISS, FWD_SHED]);
-    assert_eq!(relay.handle(src(3), &reg, t0), ATTEMPT);
+    assert_eq!(relay.handle(src(3), &reg, t0), REG_ATTEMPT);
     assert_eq!(relay.handle(src(4), &reg, t0), REG_SHED);
     assert_eq!(relay.handle(src(5), &fwd, t0), FWD_SHED);
 }
@@ -95,7 +96,7 @@ fn spent_registration_budget_leaves_forwarding_scanning() {
     let (mut relay, reg) = tiny_budgets();
     assert_eq!(
         [relay.handle(src(1), &reg, t0), relay.handle(src(2), &reg, t0)],
-        [ATTEMPT, REG_SHED]
+        [REG_ATTEMPT, REG_SHED]
     );
     assert_eq!(relay.handle(src(3), &fwd, t0), MISS);
     assert_eq!(relay.handle(src(4), &fwd, t0), FWD_SHED);
@@ -109,22 +110,22 @@ fn registered_address_skips_the_spent_registration_budget() {
     relay.control.registry.update(listed, src(7), t0);
     assert_eq!(
         [relay.handle(src(1), &reg, t0), relay.handle(src(2), &reg, t0)],
-        [ATTEMPT, REG_SHED]
+        [REG_ATTEMPT, REG_SHED]
     );
-    assert_eq!(relay.handle(src(7), &reg, t0), ATTEMPT, "registered");
+    assert_eq!(relay.handle(src(7), &reg, t0), REG_ATTEMPT, "registered");
     // Once the registration expires, the address competes for the budget again.
     let later = t0 + REGISTRY_TTL;
     relay.control.registration_budget = WorkBudget::new(REGISTRATION_WORK as f64);
     assert_eq!(
         [relay.handle(src(2), &reg, later), relay.handle(src(7), &reg, later)],
-        [ATTEMPT, REG_SHED]
+        [REG_ATTEMPT, REG_SHED]
     );
 }
 
 #[test]
 fn full_pending_table_refuses_initiations_before_the_scan() {
     let mut relay = relay();
-    relay.control.forward_budget = WorkBudget::new(10.0);
+    relay.control.forwarding_budget = WorkBudget::new(10.0);
     let (now, a, b) = (Instant::now(), src(1), src(2));
     // Spread over enough peers that no quota evicts anything.
     let control = &mut relay.control;
@@ -163,12 +164,12 @@ fn listed(i: usize) -> SocketAddr {
     SocketAddr::from(([203, 0, 113, i as u8 + 1], 51820))
 }
 
-/// An initiation for listed peer `i`, announcing `sender`.
+/// A forwarded initiation for listed peer `i`, announcing `sender`.
 fn init_for(relay: &Relay, i: usize, sender: u32) -> Vec<u8> {
     init_keyed(&relay.control.mac1.keys[i], sender)
 }
 
-/// An initiation for the holder of `key`, announcing `sender`.
+/// A handshake initiation for the holder of `key`, announcing `sender`.
 fn init_keyed(key: &Mac1Key, sender: u32) -> Vec<u8> {
     let mut p = junk();
     p[4..8].copy_from_slice(&sender.to_le_bytes());
@@ -177,7 +178,7 @@ fn init_keyed(key: &Mac1Key, sender: u32) -> Vec<u8> {
     p
 }
 
-/// A response-shaped datagram; the relay never checks its contents.
+/// A handshake-response-shaped datagram; the relay never checks its contents.
 fn response(sender: u32, receiver: u32) -> Vec<u8> {
     let mut p = vec![0u8; 92];
     p[0] = 2;
@@ -186,7 +187,7 @@ fn response(sender: u32, receiver: u32) -> Vec<u8> {
     p
 }
 
-/// A data packet for `receiver`.
+/// A transport data message for `receiver`.
 fn data(receiver: u32) -> Vec<u8> {
     let mut p = vec![0u8; 48];
     p[0] = 4;
@@ -250,12 +251,12 @@ fn full_table_refuses_initiations_before_the_scan() {
         let init = init_for(&relay, usize::from(i % 2), 0x100 + u32::from(i));
         assert_eq!(relay.handle(src(i), &init, t0), Verdict::Forward(listed(usize::from(i % 2))));
     }
-    relay.control.forward_budget = WorkBudget::new(3.0);
+    relay.control.forwarding_budget = WorkBudget::new(3.0);
     let full = Verdict::Drop(Reason::TooManySessions);
     let verdicts: Vec<Verdict> =
         (0..5).map(|i| relay.handle(src(10 + i), &init_for(&relay, 1, 0x200), t0)).collect();
     assert_eq!(verdicts, [full; 5]);
-    assert!(relay.control.forward_budget.available(t0), "one scan would have spent it all");
+    assert!(relay.control.forwarding_budget.available(t0), "one scan would have spent it all");
     // A response needs a new entry too.
     assert_eq!(relay.handle(listed(0), &response(0x300, 0x100), t0), full);
     relay.tick(t0 + PENDING_TTL);
@@ -340,8 +341,8 @@ fn unreplyable_sources_are_dropped_before_parsing() {
 }
 
 /// What the forwarding half alone makes of a datagram.
-fn fast(relay: &Relay, from: SocketAddr, pkt: &[u8], now: Instant) -> Result<Lookup, Reason> {
-    relay.control.forwarder().lookup(from, pkt, now)
+fn fast(relay: &Relay, from: SocketAddr, datagram: &[u8], now: Instant) -> Result<Lookup, Reason> {
+    relay.control.forwarder().lookup(from, datagram, now)
 }
 
 #[test]
@@ -350,12 +351,12 @@ fn forwarder_follows_every_control_change() {
     let limits = SessionLimits { pending_per_peer: 2, per_peer: 100, total: 100 };
     let mut relay = limited(limits, t0);
     let peers = relay.control.mac1.peers.clone();
-    let not_mine = |p: &[u8]| Ok(Lookup::NotMine(packet::parse(p).unwrap()));
+    let to_control = |p: &[u8]| Ok(Lookup::ToControl(packet::parse(p).unwrap()));
 
     // A pending session stays with the control half.
     assert_eq!(relay.handle(src(1), &init_for(&relay, 0, 0x10), t0), Verdict::Forward(listed(0)));
-    assert_eq!(fast(&relay, listed(0), &data(0x10), t0), not_mine(&data(0x10)));
-    assert_eq!(fast(&relay, listed(0), &cookie(0x10), t0), not_mine(&cookie(0x10)));
+    assert_eq!(fast(&relay, listed(0), &data(0x10), t0), to_control(&data(0x10)));
+    assert_eq!(fast(&relay, listed(0), &cookie(0x10), t0), to_control(&cookie(0x10)));
     relay.control.assert_forwarder_in_step();
 
     // Opening publishes both indexes.
@@ -375,33 +376,33 @@ fn forwarder_follows_every_control_change() {
 
     // Roaming rewrites both directions.
     let moved = SocketAddr::from(([203, 0, 113, 77], 4000));
-    relay.control.confirm(peers[0], moved, t0);
+    relay.control.register(peers[0], moved, t0);
     assert_eq!(fast(&relay, src(1), &data(0x11), t0), Ok(Lookup::Forward(moved)));
     assert_eq!(fast(&relay, moved, &data(0x10), t0), Ok(Lookup::Forward(src(1))));
     assert_eq!(fast(&relay, listed(0), &data(0x10), t0), Err(Reason::WrongSource));
     relay.control.assert_forwarder_in_step();
 
-    // A new peer's tunnel reserves its prefix at once.
+    // A new peer's registration tunnel reserves its prefix at once.
     let extra: PeerKey = PublicKey::from(&StaticSecret::random_from_rng(OsRng)).into();
     reload_listing(&mut relay, &[peers[0], peers[1], peers[2], extra]);
-    let prefix = relay.control.tunn_by_prefix.iter().find(|(_, k)| **k == extra).unwrap().0;
+    let prefix = relay.control.reserved.iter().find(|(_, k)| **k == extra).unwrap().0;
     let in_prefix = prefix.get() << 8 | 7;
-    assert_eq!(fast(&relay, src(1), &data(in_prefix), t0), not_mine(&data(in_prefix)));
+    assert_eq!(fast(&relay, src(1), &data(in_prefix), t0), to_control(&data(in_prefix)));
     relay.control.assert_forwarder_in_step();
 
     // Removing a peer revokes its open sessions and frees its prefix.
     assert_eq!(relay.handle(src(4), &init_for(&relay, 1, 0x30), t0), Verdict::Forward(listed(1)));
     assert_eq!(relay.handle(listed(1), &response(0x31, 0x30), t0), Verdict::Forward(src(4)));
     reload_listing(&mut relay, &[peers[0], peers[2]]);
-    assert_eq!(fast(&relay, listed(1), &data(0x30), t0), not_mine(&data(0x30)));
+    assert_eq!(fast(&relay, listed(1), &data(0x30), t0), to_control(&data(0x30)));
     assert_eq!(relay.handle(listed(1), &data(0x30), t0), Verdict::Drop(Reason::UnknownIndex));
     assert_eq!(fast(&relay, moved, &data(0x10), t0), Ok(Lookup::Forward(src(1))), "kept");
-    assert!(relay.control.tunn_by_prefix.values().all(|k| *k != extra));
+    assert!(relay.control.reserved.values().all(|k| *k != extra));
     relay.control.assert_forwarder_in_step();
 
     // Expiry withdraws the rest, and lookups stop before the sweep.
     let late = t0 + SESSION_TTL;
-    assert_eq!(fast(&relay, moved, &data(0x10), late), not_mine(&data(0x10)));
+    assert_eq!(fast(&relay, moved, &data(0x10), late), to_control(&data(0x10)));
     assert_eq!(relay.handle(moved, &data(0x10), late), Verdict::Drop(Reason::UnknownIndex));
     relay.tick(late);
     assert_eq!(relay.control.forwarder.open.len(), 0);
@@ -450,8 +451,8 @@ fn forwarder_stays_in_step_through_random_changes() {
     let mut rnd = rng(0x9e37_79b9_7f4a_7c15);
     for step in 0..20_000 {
         let mut pick = |n: u64| (rnd() % n) as usize;
-        // Mostly forwarded indexes, some in a relay tunnel's prefix.
-        let tunnel = relay.control.tunn_by_prefix.keys().next().copied();
+        // Mostly forwarded indexes, some in a reserved prefix.
+        let tunnel = relay.control.reserved.keys().next().copied();
         let idx = match (pick(8), tunnel) {
             (0, Some(prefix)) => prefix.get() << 8 | pick(4) as u32,
             _ => 0x100 + pick(48) as u32,
@@ -470,27 +471,28 @@ fn forwarder_stays_in_step_through_random_changes() {
                 relay.handle(from, &response(sender, idx), now);
             }
             8..=12 => {
-                let (pkt, is_data) = match pick(2) {
+                let (datagram, is_data) = match pick(2) {
                     0 => (data(idx), true),
                     _ => (cookie(idx), false),
                 };
                 // The control half alone reaches the same verdict as the two halves.
-                let packet = packet::parse(&pkt).unwrap();
-                let decided = match fast(&relay, from, &pkt, now) {
-                    Ok(Lookup::NotMine(_)) => None,
+                let message = packet::parse(&datagram).unwrap();
+                let decided = match fast(&relay, from, &datagram, now) {
+                    Ok(Lookup::ToControl(_)) => None,
                     Ok(Lookup::Forward(dst)) => Some(Ok(Accepted::Forward(dst))),
                     Err(reason) => Some(Err(reason)),
                 };
-                let alone = Verdict::from(relay.control.route(from, &pkt, packet, now));
+                let alone = Verdict::from(relay.control.decide(from, &datagram, message, now));
                 match decided {
                     Some(decided) => assert_eq!(Verdict::from(decided), alone, "step {step}"),
-                    // Data on an open session never reaches the control half.
+                    // Only a live open session forwards transport data, and the
+                    // forwarding half holds all of those.
                     None if is_data => {
                         assert!(!matches!(alone, Verdict::Forward(_)), "step {step}: {alone:?}")
                     }
                     None => {}
                 }
-                relay.handle(from, &pkt, now);
+                relay.handle(from, &datagram, now);
             }
             13 => {
                 now += Duration::from_secs(pick(30) as u64);
@@ -501,7 +503,7 @@ fn forwarder_stays_in_step_through_random_changes() {
                 let moved = SocketAddr::from(([203, 0, 113, 100 + pick(50) as u8], 1));
                 if relay.control.peers.contains_key(&peers[i]) {
                     addrs[i] = moved;
-                    relay.control.confirm(peers[i], moved, now);
+                    relay.control.register(peers[i], moved, now);
                 }
             }
             _ => match pick(2) {

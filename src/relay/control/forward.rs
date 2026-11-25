@@ -6,27 +6,29 @@ use crate::key::PeerKey;
 use crate::packet::{self, SessionIdx};
 use crate::tables::{Session, SessionState};
 
-/// The packets routed by receiver index along a session, and what each needs from it.
+/// The messages routed along a forwarded session by their receiver index,
+/// and what each needs from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Indexed {
+pub(super) enum OnSession {
     /// Opens a pending session, announcing the responder's index.
-    Response { sender: SessionIdx },
+    HandshakeResponse { sender: SessionIdx },
     /// Passes on a pending or open session.
-    Cookie,
+    CookieReply,
     /// Passes on an open session only.
-    Data,
+    TransportData,
 }
 
 impl Control {
-    /// Route a handshake initiation to the registered peer its mac1 names.
-    pub(super) fn forward_init(
+    /// Forward a handshake initiation to the registered listed peer its mac1
+    /// names, opening a pending session for the initiator's index.
+    pub(super) fn forward_initiation(
         &mut self,
         src: SocketAddr,
-        pkt: &[u8],
+        datagram: &[u8],
         sender: SessionIdx,
         now: Instant,
     ) -> Result<SocketAddr, Reason> {
-        if self.reserved(sender) {
+        if self.is_reserved(sender) {
             return Err(Reason::ReservedIndex);
         }
         // Checked before the scan, so a full table also spares the forwarding budget.
@@ -37,7 +39,7 @@ impl Control {
             return Err(Reason::TooManyPending);
         }
         // Anyone may initiate to a listed peer; its own WireGuard peer list decides.
-        let peer = self.mac1_peer(pkt, now)?;
+        let peer = self.listed_peer_by_mac1(datagram, now)?;
         if self.sessions.peer_at_quota(&peer) {
             return Err(Reason::PeerQuota);
         }
@@ -48,19 +50,19 @@ impl Control {
         self.insert_session(sender, Session::pending(src, dst, peer, now))
     }
 
-    /// Is `idx` in a relay tunnel's prefix, where forwarded sessions may not go?
-    fn reserved(&self, idx: SessionIdx) -> bool {
-        self.tunn_by_prefix.contains_key(&idx.prefix())
+    /// Is `idx` in a reserved prefix, where forwarded sessions may not go?
+    fn is_reserved(&self, idx: SessionIdx) -> bool {
+        self.reserved.contains_key(&idx.prefix())
     }
 
-    /// Find the listed peer whose key the packet's mac1 was made for,
+    /// Find the listed peer whose key the initiation's mac1 was made for,
     /// charging the scan to the forwarding budget.
-    fn mac1_peer(&mut self, pkt: &[u8], now: Instant) -> Result<PeerKey, Reason> {
-        if !self.forward_budget.available(now) {
-            return Err(Reason::HandshakeBudget);
+    fn listed_peer_by_mac1(&mut self, datagram: &[u8], now: Instant) -> Result<PeerKey, Reason> {
+        if !self.forwarding_budget.available(now) {
+            return Err(Reason::ForwardingBudget);
         }
-        let search = packet::find_mac1(&self.mac1.keys, pkt);
-        self.forward_budget.spend(search.tried);
+        let search = packet::find_mac1(&self.mac1.keys, datagram);
+        self.forwarding_budget.spend(search.tried);
         search.found.map(|i| self.mac1.peers[i]).ok_or(Reason::NoMac1Match)
     }
 
@@ -72,47 +74,52 @@ impl Control {
         Ok(s.expected_src)
     }
 
-    /// Route along the session `receiver` names: only from its expected
-    /// source, data only once it is open, one response per initiation.
+    /// Forward along the session `receiver` names: only from its expected
+    /// source, transport data only once it is open, one response per initiation.
     pub(super) fn forward_on_session(
         &mut self,
         src: SocketAddr,
         receiver: SessionIdx,
-        kind: Indexed,
+        kind: OnSession,
         now: Instant,
     ) -> Result<SocketAddr, Reason> {
         let session = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
-        // For a response, the listed peer's registered address, so only it can open the session.
+        // For a handshake response this is the listed peer's registered address,
+        // so only that peer can open the session.
         if src != session.expected_src {
             return Err(Reason::WrongSource);
         }
         match (kind, session.state) {
-            (Indexed::Response { sender }, SessionState::Pending) => {
+            (OnSession::HandshakeResponse { sender }, SessionState::Pending) => {
                 self.accept_response(receiver, sender, session, now)
             }
             // An open session could otherwise mint new entries.
-            (Indexed::Response { .. }, SessionState::Open) => Err(Reason::SessionNotPending),
-            (Indexed::Data, SessionState::Pending) => Err(Reason::SessionNotOpen),
-            (Indexed::Data, SessionState::Open)
-            | (Indexed::Cookie, SessionState::Pending | SessionState::Open) => Ok(session.dest),
+            (OnSession::HandshakeResponse { .. }, SessionState::Open) => {
+                Err(Reason::SessionNotPending)
+            }
+            (OnSession::TransportData, SessionState::Pending) => Err(Reason::SessionNotOpen),
+            (OnSession::TransportData, SessionState::Open)
+            | (OnSession::CookieReply, SessionState::Pending | SessionState::Open) => {
+                Ok(session.dest)
+            }
         }
     }
 
-    /// Open the session a response answers: the responder's index gets an
-    /// open entry and the initiator's opens, both living from now.
+    /// Open the session a handshake response answers: the responder's index
+    /// gets an open session and the initiator's opens, both living from now.
     fn accept_response(
         &mut self,
         receiver: SessionIdx,
         sender: SessionIdx,
-        init: Session,
+        initiator: Session,
         now: Instant,
     ) -> Result<SocketAddr, Reason> {
-        if self.reserved(sender) {
+        if self.is_reserved(sender) {
             return Err(Reason::ReservedIndex);
         }
-        let responder = Session::open(init.expected_src, init.dest, init.peer, now);
+        let responder = Session::open(initiator.expected_src, initiator.dest, initiator.peer, now);
         self.insert_session(sender, responder)?;
         self.sessions.open(receiver, now, &mut self.forwarder.open);
-        Ok(init.dest)
+        Ok(initiator.dest)
     }
 }

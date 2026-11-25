@@ -6,10 +6,11 @@ use tracing::{debug, info};
 use super::{Control, SWEEP_INTERVAL};
 
 impl Control {
-    /// Run relay tunnel timers and expire soft state.
+    /// Run the registration tunnels' timers and expire soft state.
     pub(in crate::relay) fn tick(&mut self, now: Instant) {
         for (key, peer) in &mut self.peers {
-            let TunnResult::WriteToNetwork(out) = peer.tunn.update_timers(&mut self.scratch) else {
+            let TunnResult::WriteToNetwork(out) = peer.tunnel.update_timers(&mut self.scratch)
+            else {
                 continue;
             };
             if let Some(addr) = self.registry.addr(key, now) {

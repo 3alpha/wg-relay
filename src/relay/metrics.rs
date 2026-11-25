@@ -8,12 +8,14 @@ use super::{Reason, Verdict};
 pub struct Metrics {
     pub rx: u64,
     pub forwarded: u64,
+    /// Datagrams taken by registration tunnels.
     pub tunnel_rx: u64,
+    /// Datagrams the registration tunnels sent: handshake responses, keepalives, ping replies.
     pub tunnel_tx: u64,
     pub send_errors: u64,
     pub recv_errors: u64,
-    /// Pending entries evicted by newer initiations to the same listed peer;
-    /// a steady rise means a flood aimed at that peer.
+    /// Pending sessions evicted by newer forwarded initiations to the same
+    /// listed peer; a steady rise means a flood aimed at that peer.
     pub pending_evicted: u64,
     rejects: [u64; Reason::COUNT],
 }

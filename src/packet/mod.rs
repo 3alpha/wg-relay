@@ -19,12 +19,13 @@ const MAC1_LEN: usize = 16;
 /// Keys tried per SIMD batch: the widest lane count blake2s_simd uses (AVX2).
 const MAC1_BATCH: usize = 8;
 
-/// A WireGuard session index (`sender_idx` / `receiver_idx`).
+/// A WireGuard index, as carried in `sender_idx` and `receiver_idx`. Each
+/// side picks one per handshake; later messages to it carry it as `receiver_idx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionIdx(u32);
 
 impl SessionIdx {
-    /// The upper 24 bits, which identify the relay tunnel that owns an index.
+    /// The upper 24 bits, which tell whether a registration tunnel owns the index.
     pub fn prefix(self) -> IdxPrefix {
         IdxPrefix(self.0 >> 8)
     }
@@ -59,13 +60,26 @@ impl IdxPrefix {
     }
 }
 
-/// The routing-relevant header fields of a WireGuard message.
+/// A WireGuard message's type and the indexes the relay routes by, named as in
+/// the WireGuard spec. Types 1 and 2 are handshake messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Packet {
-    Init { sender: SessionIdx },
-    Response { sender: SessionIdx, receiver: SessionIdx },
-    Cookie { receiver: SessionIdx },
-    Data { receiver: SessionIdx },
+pub enum Message {
+    HandshakeInitiation { sender: SessionIdx },
+    HandshakeResponse { sender: SessionIdx, receiver: SessionIdx },
+    CookieReply { receiver: SessionIdx },
+    TransportData { receiver: SessionIdx },
+}
+
+impl Message {
+    /// The index this message is addressed to; a handshake initiation has none yet.
+    pub fn receiver(self) -> Option<SessionIdx> {
+        match self {
+            Message::HandshakeInitiation { .. } => None,
+            Message::HandshakeResponse { receiver, .. }
+            | Message::CookieReply { receiver }
+            | Message::TransportData { receiver } => Some(receiver),
+        }
+    }
 }
 
 fn idx(b: &[u8], off: usize) -> Result<SessionIdx, ParseError> {
@@ -75,8 +89,8 @@ fn idx(b: &[u8], off: usize) -> Result<SessionIdx, ParseError> {
         .ok_or(ParseError::TooShort)
 }
 
-/// Parse and size-check a datagram. Never panics.
-pub fn parse(b: &[u8]) -> Result<Packet, ParseError> {
+/// Parse and size-check a datagram as a WireGuard message. Never panics.
+pub fn parse(b: &[u8]) -> Result<Message, ParseError> {
     if b.len() < 4 {
         return Err(ParseError::TooShort);
     }
@@ -88,18 +102,18 @@ pub fn parse(b: &[u8]) -> Result<Packet, ParseError> {
     match b[0] {
         1 => {
             exact(INIT_LEN)?;
-            Ok(Packet::Init { sender: idx(b, 4)? })
+            Ok(Message::HandshakeInitiation { sender: idx(b, 4)? })
         }
         2 => {
             exact(RESP_LEN)?;
-            Ok(Packet::Response { sender: idx(b, 4)?, receiver: idx(b, 8)? })
+            Ok(Message::HandshakeResponse { sender: idx(b, 4)?, receiver: idx(b, 8)? })
         }
         3 => {
             exact(COOKIE_LEN)?;
-            Ok(Packet::Cookie { receiver: idx(b, 4)? })
+            Ok(Message::CookieReply { receiver: idx(b, 4)? })
         }
         4 if b.len() < DATA_MIN_LEN => Err(bad_length),
-        4 => Ok(Packet::Data { receiver: idx(b, 4)? }),
+        4 => Ok(Message::TransportData { receiver: idx(b, 4)? }),
         t => Err(ParseError::BadType(t)),
     }
 }
@@ -122,24 +136,24 @@ impl Mac1Key {
         out
     }
 
-    /// True if `pkt` is an initiation or response whose mac1 was made for the
-    /// holder of this key. Constant-time comparison.
-    pub fn matches(&self, pkt: &[u8]) -> bool {
-        mac1_parts(pkt).is_some_and(|(covered, tag)| self.0.hash(covered) == *tag)
+    /// Is `datagram` a handshake message whose mac1 was made for the holder of
+    /// this key? Constant-time comparison.
+    pub fn matches(&self, datagram: &[u8]) -> bool {
+        mac1_parts(datagram).is_some_and(|(covered, tag)| self.0.hash(covered) == *tag)
     }
 }
 
 /// Split a handshake message into the bytes mac1 covers and mac1 itself.
-fn mac1_parts(pkt: &[u8]) -> Option<(&[u8], &[u8])> {
-    let off = match (pkt.first(), pkt.len()) {
+fn mac1_parts(datagram: &[u8]) -> Option<(&[u8], &[u8])> {
+    let off = match (datagram.first(), datagram.len()) {
         (Some(1), INIT_LEN) => INIT_MAC1_OFF,
         (Some(2), RESP_LEN) => RESP_MAC1_OFF,
         _ => return None,
     };
-    Some((&pkt[..off], &pkt[off..off + MAC1_LEN]))
+    Some((&datagram[..off], &datagram[off..off + MAC1_LEN]))
 }
 
-/// The outcome of searching keys for the one a packet's mac1 was made for.
+/// The outcome of searching keys for the one a handshake message's mac1 was made for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mac1Search {
     /// Index of the matching key.
@@ -148,10 +162,10 @@ pub struct Mac1Search {
     pub tried: usize,
 }
 
-/// Find the key `pkt`'s mac1 was made for, hashing several keys at once with SIMD.
-pub fn find_mac1(keys: &[Mac1Key], pkt: &[u8]) -> Mac1Search {
+/// Find the key `datagram`'s mac1 was made for, hashing several keys at once with SIMD.
+pub fn find_mac1(keys: &[Mac1Key], datagram: &[u8]) -> Mac1Search {
     let mut search = Mac1Search { found: None, tried: 0 };
-    let Some((covered, tag)) = mac1_parts(pkt) else { return search };
+    let Some((covered, tag)) = mac1_parts(datagram) else { return search };
     for (n, batch) in keys.chunks(MAC1_BATCH).enumerate() {
         let mut jobs: [Option<HashManyJob<'_>>; MAC1_BATCH] =
             std::array::from_fn(|i| batch.get(i).map(|k| HashManyJob::new(&k.0, covered)));

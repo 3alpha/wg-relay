@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 use super::live;
 use crate::key::PeerKey;
 
-/// key -> (address, last authenticated packet), plus the reverse map. Only
-/// written after a packet authenticates on that key's relay tunnel.
+/// Where each listed peer is: key -> (address, last authenticated datagram),
+/// plus the reverse map. Written only after a datagram authenticates on that
+/// peer's registration tunnel.
 pub struct Registry {
     ttl: Duration,
     by_key: HashMap<PeerKey, (SocketAddr, Instant)>,

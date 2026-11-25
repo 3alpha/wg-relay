@@ -9,9 +9,9 @@ use crate::packet::SessionIdx;
 /// What forwarding needs of an open session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Route {
-    /// Where packets carrying this index are sent.
+    /// Where messages carrying this index are sent.
     pub dest: SocketAddr,
-    /// The only address allowed to send packets carrying this index.
+    /// The only address allowed to send messages carrying this index.
     pub expected_src: SocketAddr,
     /// When the session opened; its lifetime runs from here.
     pub opened: Instant,

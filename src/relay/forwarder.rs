@@ -3,16 +3,16 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use super::Reason;
-use crate::packet::{self, IdxPrefix, Packet};
+use crate::packet::{self, IdxPrefix, Message};
 use crate::tables::{OpenSessions, Route};
 
-/// The forwarding half: forwards data and cookie replies on open sessions
-/// from state it holds alone, writing nothing, and hands every other datagram
-/// to the control half, its only writer.
+/// The forwarding half: forwards transport data and cookie replies on open
+/// sessions from state it only reads, and hands every other datagram to the
+/// control half, which is also its only writer.
 pub(super) struct Forwarder {
     /// Open sessions, written only by the session table as its open entries change.
     pub(super) open: OpenSessions,
-    /// Index prefixes of the relay's own tunnels, whose packets only the control half takes.
+    /// Index prefixes of the registration tunnels. Messages to them go to the control half.
     reserved: HashSet<IdxPrefix>,
 }
 
@@ -27,9 +27,9 @@ const _: () = {
 pub(super) enum Lookup {
     /// Send it, unchanged, to this address.
     Forward(SocketAddr),
-    /// Only the control half can decide: a handshake, a relay tunnel's packet,
-    /// or an index that is not an open session (it may be pending, or unknown).
-    NotMine(Packet),
+    /// Only the control half can decide: a handshake message, a message to a
+    /// registration tunnel, or an index that is not a live open session.
+    ToControl(Message),
 }
 
 impl Forwarder {
@@ -41,15 +41,15 @@ impl Forwarder {
     pub(super) fn lookup(
         &self,
         src: SocketAddr,
-        pkt: &[u8],
+        datagram: &[u8],
         now: Instant,
     ) -> Result<Lookup, Reason> {
         if !replyable(src) {
             return Err(Reason::InvalidSource);
         }
-        let packet = packet::parse(pkt)?;
-        let Some(route) = self.open_route(packet, now) else {
-            return Ok(Lookup::NotMine(packet));
+        let message = packet::parse(datagram)?;
+        let Some(route) = self.open_route(message, now) else {
+            return Ok(Lookup::ToControl(message));
         };
         if src != route.expected_src {
             return Err(Reason::WrongSource);
@@ -57,12 +57,12 @@ impl Forwarder {
         Ok(Lookup::Forward(route.dest))
     }
 
-    /// The live open session a data packet or cookie reply travels on; never
-    /// one for a handshake or for an index a relay tunnel owns.
-    fn open_route(&self, packet: Packet, now: Instant) -> Option<&Route> {
-        let receiver = match packet {
-            Packet::Init { .. } | Packet::Response { .. } => return None,
-            Packet::Cookie { receiver } | Packet::Data { receiver } => receiver,
+    /// Find the live open session a transport data message or cookie reply
+    /// travels on. Handshake messages and reserved indexes never have one.
+    fn open_route(&self, message: Message, now: Instant) -> Option<&Route> {
+        let receiver = match message {
+            Message::HandshakeInitiation { .. } | Message::HandshakeResponse { .. } => return None,
+            Message::CookieReply { receiver } | Message::TransportData { receiver } => receiver,
         };
         if self.reserved.contains(&receiver.prefix()) {
             return None;
@@ -70,7 +70,7 @@ impl Forwarder {
         self.open.get(receiver, now)
     }
 
-    /// Replace the relay tunnels' index prefixes.
+    /// Replace the registration tunnels' index prefixes.
     pub(super) fn set_reserved(&mut self, prefixes: impl IntoIterator<Item = IdxPrefix>) {
         self.reserved = prefixes.into_iter().collect();
     }
@@ -103,7 +103,7 @@ mod tests {
     }
 
     /// A datagram of WireGuard message type `kind` and length `len`, carrying `idx` at offset 4.
-    fn message(kind: u8, len: usize, idx: u32) -> Vec<u8> {
+    fn datagram_of(kind: u8, len: usize, idx: u32) -> Vec<u8> {
         let mut p = vec![0u8; len];
         p[0] = kind;
         p[4..8].copy_from_slice(&idx.to_le_bytes());
@@ -111,20 +111,20 @@ mod tests {
     }
 
     fn data(receiver: u32) -> Vec<u8> {
-        message(4, 48, receiver)
+        datagram_of(4, 48, receiver)
     }
 
     fn cookie(receiver: u32) -> Vec<u8> {
-        message(3, packet::COOKIE_LEN, receiver)
+        datagram_of(3, packet::COOKIE_LEN, receiver)
     }
 
     const OPEN: u32 = 0x10;
     const PENDING: u32 = 0x20;
-    const IN_TUNNEL_PREFIX: u32 = 0x3005;
+    const RESERVED: u32 = 0x3005;
 
     /// A forwarder written by a session table: `OPEN` carries traffic from
-    /// addr(1) to addr(2), `PENDING` awaits a response, and prefix 0x30 is a
-    /// relay tunnel's, with an open session in it that must not be forwarded.
+    /// addr(1) to addr(2), `PENDING` awaits a handshake response, and prefix
+    /// 0x30 is reserved, with an open session in it that must not be forwarded.
     fn setup(t0: Instant) -> Forwarder {
         let limits = SessionLimits { pending_per_peer: 8, per_peer: 8, total: 8 };
         let mut table = SessionTable::new(SESSION_TTL, PENDING_TTL, limits);
@@ -133,24 +133,24 @@ mod tests {
         for (idx, s) in [
             (OPEN, Session::open(addr(2), addr(1), peer, t0)),
             (PENDING, Session::pending(addr(2), addr(1), peer, t0)),
-            (IN_TUNNEL_PREFIX, Session::open(addr(2), addr(1), peer, t0)),
+            (RESERVED, Session::open(addr(2), addr(1), peer, t0)),
         ] {
             table.insert(idx.into(), s, &mut fwd.open).unwrap();
         }
-        fwd.set_reserved([SessionIdx::from(IN_TUNNEL_PREFIX).prefix()]);
+        fwd.set_reserved([SessionIdx::from(RESERVED).prefix()]);
         fwd
     }
 
     #[test]
-    fn forwards_data_and_cookies_on_open_sessions_from_the_expected_source_only() {
+    fn forwards_data_and_cookie_replies_on_open_sessions_from_the_expected_source_only() {
         let t0 = Instant::now();
         let fwd = setup(t0);
         let later = t0 + SESSION_TTL - Duration::from_secs(1);
-        for pkt in [data(OPEN), cookie(OPEN)] {
-            assert_eq!(fwd.lookup(addr(1), &pkt, t0), Ok(Lookup::Forward(addr(2))));
-            assert_eq!(fwd.lookup(addr(1), &pkt, later), Ok(Lookup::Forward(addr(2))));
-            assert_eq!(fwd.lookup(addr(3), &pkt, t0), Err(Reason::WrongSource));
-            assert_eq!(fwd.lookup(addr(2), &pkt, t0), Err(Reason::WrongSource), "reflected");
+        for datagram in [data(OPEN), cookie(OPEN)] {
+            assert_eq!(fwd.lookup(addr(1), &datagram, t0), Ok(Lookup::Forward(addr(2))));
+            assert_eq!(fwd.lookup(addr(1), &datagram, later), Ok(Lookup::Forward(addr(2))));
+            assert_eq!(fwd.lookup(addr(3), &datagram, t0), Err(Reason::WrongSource));
+            assert_eq!(fwd.lookup(addr(2), &datagram, t0), Err(Reason::WrongSource), "reflected");
         }
     }
 
@@ -158,21 +158,25 @@ mod tests {
     fn hands_everything_else_to_the_control_half() {
         let t0 = Instant::now();
         let fwd = setup(t0);
-        let init = message(1, packet::INIT_LEN, OPEN);
-        let mut response = message(2, packet::RESP_LEN, 0x99);
+        let init = datagram_of(1, packet::INIT_LEN, OPEN);
+        let mut response = datagram_of(2, packet::RESP_LEN, 0x99);
         response[8..12].copy_from_slice(&OPEN.to_le_bytes());
         let cases = [
-            (init, t0, "initiation"),
-            (response, t0, "response, even to an open index"),
-            (data(PENDING), t0, "data on a pending index"),
+            (init, t0, "handshake initiation"),
+            (response, t0, "handshake response, even to an open index"),
+            (data(PENDING), t0, "transport data on a pending index"),
             (cookie(PENDING), t0, "cookie reply on a pending index"),
             (data(0x99), t0, "unknown index"),
-            (data(IN_TUNNEL_PREFIX), t0, "a relay tunnel's prefix"),
+            (data(RESERVED), t0, "a registration tunnel's prefix"),
             (data(OPEN), t0 + SESSION_TTL, "expired, not yet swept"),
         ];
-        for (pkt, now, what) in cases {
-            let packet = packet::parse(&pkt).unwrap();
-            assert_eq!(fwd.lookup(addr(1), &pkt, now), Ok(Lookup::NotMine(packet)), "{what}");
+        for (datagram, now, what) in cases {
+            let message = packet::parse(&datagram).unwrap();
+            assert_eq!(
+                fwd.lookup(addr(1), &datagram, now),
+                Ok(Lookup::ToControl(message)),
+                "{what}"
+            );
         }
     }
 

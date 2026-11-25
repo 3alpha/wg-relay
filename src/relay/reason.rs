@@ -27,7 +27,7 @@ reasons! {
     InvalidSource => "invalid_source",
     Malformed => "malformed",
     RateLimited => "rate_limited",
-    HandshakeBudget => "handshake_budget",
+    ForwardingBudget => "forwarding_budget",
     RegistrationBudget => "registration_budget",
     ReservedIndex => "reserved_index",
     NoMac1Match => "no_mac1_match",
@@ -41,8 +41,8 @@ reasons! {
     WrongSource => "wrong_source",
     SessionNotPending => "session_not_pending",
     SessionNotOpen => "session_not_open",
-    UnknownKey => "registration_unknown_key",
-    TunnelAuth => "tunnel_auth_failed",
+    RegistrationUnknownKey => "registration_unknown_key",
+    TunnelAuthFailed => "tunnel_auth_failed",
 }
 
 /// What happened to one datagram.
@@ -50,7 +50,7 @@ reasons! {
 pub enum Verdict {
     /// Send the datagram, unchanged, to this address.
     Forward(SocketAddr),
-    /// Handled by the relay's own registration tunnel.
+    /// Taken by a listed peer's registration tunnel with the relay.
     Consumed,
     Drop(Reason),
 }
@@ -60,7 +60,7 @@ pub enum Verdict {
 pub(crate) enum Accepted {
     /// Send it, unchanged, to this address.
     Forward(SocketAddr),
-    /// Handled by the relay's own registration tunnel.
+    /// Taken by a listed peer's registration tunnel with the relay.
     Consumed,
 }
 

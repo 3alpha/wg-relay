@@ -9,7 +9,7 @@ use super::forwarder::Forwarder;
 use super::{Accepted, Metrics, Reason, Verdict, settle};
 use crate::config::Config;
 use crate::key::PeerKey;
-use crate::packet::{IdxPrefix, Mac1Key, Packet, SessionIdx};
+use crate::packet::{IdxPrefix, Mac1Key, Message, SessionIdx};
 use crate::tables::{
     PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, SessionLimits, SessionTable,
     WorkBudget,
@@ -22,39 +22,38 @@ mod reload;
 mod tests;
 mod timers;
 
-use forward::Indexed;
+use forward::OnSession;
 
 const SCRATCH_LEN: usize = 65536 + 256;
-/// Expiry scans every table, so it runs less often than the tunnel timers.
+/// Expiry scans every table, so it runs less often than the registration tunnels' timers.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
-/// Mac1 checks per second for finding forwarded initiations' destinations;
-/// separate from registration so a flood of either cannot starve the other.
-const FORWARD_WORK_PER_SEC: f64 = 1_000_000.0;
+/// Mac1 checks per second spent finding forwarded initiations' destinations.
+/// Kept apart from registration so a flood of either cannot starve the other.
+const FORWARDING_WORK_PER_SEC: f64 = 1_000_000.0;
 /// Registration work per second from sources that are not a registered
 /// peer's address, in mac1 checks: 500 attempts.
 const REGISTRATION_WORK_PER_SEC: f64 = 200_000.0;
 /// What a registration attempt costs: its X25519 work, measured in mac1 checks.
 const REGISTRATION_WORK: usize = 400;
-/// Most handshakes one listed peer may have awaiting a response; a new one
-/// evicts its oldest, so a flood aimed at one peer only disturbs that peer.
+/// Most pending sessions one listed peer may have. A new one evicts its
+/// oldest, so a flood aimed at one peer only disturbs that peer.
 const MAX_PENDING_PER_PEER: usize = 1_024;
-/// Most handshakes awaiting a response at once, so a flood of initiations
-/// leaves most of the table to open sessions; the forwarding budget keeps
-/// floods well below it.
+/// Most pending sessions at once, so a flood of initiations leaves most of
+/// the table to open sessions. The forwarding budget keeps floods well below it.
 const MAX_PENDING: usize = 262_144;
-/// Most entries, pending or open, routed to one listed peer: room for about
-/// 16,000 busy sessions (4 entries each), so a listed peer answering spoofed
-/// initiations cannot take the whole table.
+/// Most sessions, pending or open, routed to one listed peer: room for about
+/// 16,000 busy WireGuard sessions (4 indexes each), so a listed peer answering
+/// spoofed initiations cannot take the whole table.
 const MAX_SESSIONS_PER_PEER: usize = 65_536;
-/// Most entries in the session table, a memory backstop: 7 × 2^17 is the
-/// most a `HashMap` holds in 2^20 buckets of 129 bytes, about 135 MB.
+/// Most sessions in the table, a memory backstop: 7 × 2^17 is the most a
+/// `HashMap` holds in 2^20 buckets of 129 bytes, about 135 MB.
 const MAX_SESSIONS: usize = 917_504;
 
 /// What the relay holds for each listed peer.
 struct PeerState {
     name: String,
-    /// The peer's registration tunnel with the relay.
-    tunn: Box<Tunn>,
+    /// The peer's registration tunnel, where the relay is its WireGuard peer.
+    tunnel: Box<Tunn>,
 }
 
 /// The listed peers' mac1 keys in one contiguous list, for batched scans.
@@ -64,19 +63,20 @@ struct Mac1Index {
     keys: Vec<Mac1Key>,
 }
 
-/// The control half: listed peers and their tunnels, the registry, limits,
-/// budgets and every session with its lifetime. It decides what the
-/// forwarding half hands over and is the forwarding half's only writer.
+/// The control half: listed peers and their registration tunnels, the
+/// registry, limits, budgets and every session with its lifetime. It decides
+/// what the forwarding half hands over and is the forwarding half's only writer.
 pub(super) struct Control {
     secret: StaticSecret,
     public: PublicKey,
+    /// Matches handshake initiations addressed to the relay itself.
     relay_mac1: Mac1Key,
     tunnel_ip: Ipv4Addr,
     peers: HashMap<PeerKey, PeerState>,
     mac1: Mac1Index,
-    /// Index prefix of each relay tunnel. Forwarded sessions may never use
-    /// these (see `reserved`).
-    tunn_by_prefix: HashMap<IdxPrefix, PeerKey>,
+    /// Reserved index prefixes, each with the listed peer whose registration
+    /// tunnel numbers its indexes there. Forwarded sessions may never use them.
+    reserved: HashMap<IdxPrefix, PeerKey>,
     /// Where each listed peer last proved it can be reached.
     registry: Registry,
     /// Every session, pending or open: the truth the forwarding half's open
@@ -85,12 +85,13 @@ pub(super) struct Control {
     /// What the forwarding half reads. Its open sessions change only through
     /// `sessions`, its reserved prefixes only on reload.
     forwarder: Forwarder,
+    /// Per-source limit on handshake initiations, registration and forwarded alike.
     limiter: RateLimiter,
-    forward_budget: WorkBudget,
+    forwarding_budget: WorkBudget,
     registration_budget: WorkBudget,
-    /// What the control half decided, and its own tunnels' output.
+    /// What the control half decided, and the registration tunnels' output.
     metrics: Metrics,
-    /// Datagrams produced by the relay's own tunnels, to be sent by the caller.
+    /// Datagrams the registration tunnels produced, for the caller to send.
     outbox: Vec<(SocketAddr, Vec<u8>)>,
     scratch: Vec<u8>,
     last_sweep: Option<Instant>,
@@ -116,12 +117,12 @@ impl Control {
             tunnel_ip: cfg.tunnel_ip,
             peers: HashMap::new(),
             mac1: Mac1Index::default(),
-            tunn_by_prefix: HashMap::new(),
+            reserved: HashMap::new(),
             registry: Registry::new(REGISTRY_TTL),
             forwarder: Forwarder::new(sessions.new_view()),
             sessions,
             limiter: RateLimiter::new(cfg.handshake_rate.per_sec()),
-            forward_budget: WorkBudget::new(FORWARD_WORK_PER_SEC),
+            forwarding_budget: WorkBudget::new(FORWARDING_WORK_PER_SEC),
             registration_budget: WorkBudget::new(REGISTRATION_WORK_PER_SEC),
             metrics: Metrics::default(),
             outbox: Vec::new(),
@@ -166,79 +167,88 @@ impl Control {
     pub(super) fn handle(
         &mut self,
         src: SocketAddr,
-        pkt: &[u8],
-        packet: Packet,
+        datagram: &[u8],
+        message: Message,
         now: Instant,
     ) -> Verdict {
-        let outcome = self.route(src, pkt, packet, now);
+        let outcome = self.decide(src, datagram, message, now);
         settle(&mut self.metrics, src, outcome)
     }
 
-    fn route(
+    fn decide(
         &mut self,
         src: SocketAddr,
-        pkt: &[u8],
-        packet: Packet,
+        datagram: &[u8],
+        message: Message,
         now: Instant,
     ) -> Result<Accepted, Reason> {
-        match packet {
-            Packet::Init { sender } => self.initiation(src, pkt, sender, now),
-            Packet::Response { sender, receiver } => {
-                self.indexed(src, pkt, receiver, Indexed::Response { sender }, now)
+        match message {
+            Message::HandshakeInitiation { sender } => {
+                self.route_initiation(src, datagram, sender, now)
             }
-            Packet::Cookie { receiver } => self.indexed(src, pkt, receiver, Indexed::Cookie, now),
-            Packet::Data { receiver } => self.indexed(src, pkt, receiver, Indexed::Data, now),
+            Message::HandshakeResponse { sender, receiver } => self.route_by_receiver(
+                src,
+                datagram,
+                receiver,
+                OnSession::HandshakeResponse { sender },
+                now,
+            ),
+            Message::CookieReply { receiver } => {
+                self.route_by_receiver(src, datagram, receiver, OnSession::CookieReply, now)
+            }
+            Message::TransportData { receiver } => {
+                self.route_by_receiver(src, datagram, receiver, OnSession::TransportData, now)
+            }
         }
     }
 
-    /// Route an initiation: to the relay's own tunnel if its mac1 is for the
-    /// relay, otherwise to the listed peer its mac1 names.
-    fn initiation(
+    /// Route a handshake initiation: to a registration tunnel if its mac1 is
+    /// for the relay, otherwise to the listed peer its mac1 names.
+    fn route_initiation(
         &mut self,
         src: SocketAddr,
-        pkt: &[u8],
+        datagram: &[u8],
         sender: SessionIdx,
         now: Instant,
     ) -> Result<Accepted, Reason> {
         if !self.limiter.allow(src.ip(), now) {
             return Err(Reason::RateLimited);
         }
-        if !self.relay_mac1.matches(pkt) {
-            return self.forward_init(src, pkt, sender, now).map(Accepted::Forward);
+        if !self.relay_mac1.matches(datagram) {
+            return self.forward_initiation(src, datagram, sender, now).map(Accepted::Forward);
         }
-        self.admit_registration(src, now)?;
-        self.register_init(src, pkt, now)
+        self.start_registration_handshake(src, datagram, now)
     }
 
-    /// Route a packet by its receiver index: to the relay tunnel that owns the
-    /// index, otherwise along the session it names.
-    fn indexed(
+    /// Route a message by its receiver index: to the registration tunnel that
+    /// owns the index, otherwise along the session it names.
+    fn route_by_receiver(
         &mut self,
         src: SocketAddr,
-        pkt: &[u8],
+        datagram: &[u8],
         receiver: SessionIdx,
-        kind: Indexed,
+        kind: OnSession,
         now: Instant,
     ) -> Result<Accepted, Reason> {
-        match self.relay_tunnel(receiver) {
-            Some(key) => self.tunnel_rx(key, src, pkt, now),
+        match self.tunnel_owner(receiver) {
+            Some(peer) => self.feed_tunnel(peer, src, datagram, now),
             None => self.forward_on_session(src, receiver, kind, now).map(Accepted::Forward),
         }
     }
 
-    /// The registration tunnel that owns this receiver index, if any.
-    fn relay_tunnel(&self, idx: SessionIdx) -> Option<PeerKey> {
-        self.tunn_by_prefix.get(&idx.prefix()).copied()
+    /// Find the listed peer whose registration tunnel owns this index.
+    fn tunnel_owner(&self, idx: SessionIdx) -> Option<PeerKey> {
+        self.reserved.get(&idx.prefix()).copied()
     }
 
     /// Panic unless the session table's accounts are exact and the forwarding
-    /// half holds exactly the open sessions and relay tunnel prefixes this half holds.
+    /// half holds exactly the open sessions and reserved prefixes this half holds.
     #[cfg(test)]
     fn assert_forwarder_in_step(&self) {
         assert!(self.sessions.accounts_exact(), "session accounts diverged");
         assert!(self.sessions.matches_view(&self.forwarder.open), "open sessions diverged");
         let prefixes: std::collections::HashSet<IdxPrefix> =
-            self.tunn_by_prefix.keys().copied().collect();
+            self.reserved.keys().copied().collect();
         assert_eq!(self.forwarder.reserved(), &prefixes, "reserved prefixes diverged");
     }
 }
