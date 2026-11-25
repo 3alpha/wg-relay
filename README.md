@@ -17,6 +17,10 @@ and from addresses it has authenticated.
    (Endpoint=relay for every peer)     └──NAT── stranger (dropped)
 ```
 
+**New here? Read [How wg-relay works](docs/how-it-works.md)**: a guided tour
+with diagrams of every packet path, the state the relay keeps, the client gates,
+reload, roaming and the security model.
+
 ## Build, run, test
 
 ```sh
