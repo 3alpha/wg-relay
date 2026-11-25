@@ -294,6 +294,8 @@ What this means behind the relay:
 
 The relay is a single-threaded state machine (`Relay` in `src/relay/mod.rs`). `Relay::handle(src, datagram, now)` does no I/O: it returns a verdict, and the socket loop in `src/app.rs` acts on it.
 
+The socket loop reads the socket in batches: one `recvmmsg` call returns up to 32 receive buffers, and where the kernel supports UDP GRO each buffer can hold up to 64 datagrams from one source. Every datagram goes through `handle()` on its own. Consecutive datagrams forwarded to the same address then leave as one UDP GSO send of their unchanged bytes, which the kernel splits back into the same datagrams, with the ECN bits they arrived with. Without GRO and GSO the same loop works one datagram at a time. The [reference](reference.md#socket-io) has the details.
+
 ```mermaid
 flowchart LR
     subgraph cfg["From relay.toml"]
@@ -497,7 +499,7 @@ flowchart TD
 
 Initiations are the only packets that cost real CPU before anyone is authenticated. Finding the destination means hashing the mac1 against the listed keys, eight at a time with SIMD; a registration attempt costs an X25519 operation, about as much as 400 key checks. The two paths have separate token buckets, so a flood on one cannot starve the other: the forwarding scan may spend 1,000,000 key checks per second, registration attempts 200,000 (500 attempts). Telling the two apart costs one mac1 check against the relay's own key. A relay-bound initiation from the address a listed peer is currently registered from skips the registration budget, limited only by its per-source allowance, so a flood of registration attempts from elsewhere cannot stop registered peers from re-handshaking with the relay. While a budget is empty, initiations on that path are dropped after at most one hash, so a flood from many sources costs little and data keeps flowing. Legitimate handshakes on the flooded path still compete with the flood: junk initiations can delay forwarded handshakes (a mac1 cannot be looked up by index, so each costs a full scan), and a registration flood can delay peers registering from a new address, but open sessions are unaffected.
 
-Each forwarding rule returns `Result<SocketAddr, Reason>`; `handle()` turns that into a `Verdict`, counts it, and logs drops at debug level with their reason. The socket loop sends `Forward` datagrams unchanged and drains the relay tunnels' own output (handshake responses, keepalives, ping replies) after every event.
+Each forwarding rule returns `Result<SocketAddr, Reason>`; `handle()` turns that into a `Verdict`, counts it, and logs drops at debug level with their reason. The socket loop sends `Forward` datagrams unchanged and drains the relay tunnels' own output (handshake responses, keepalives, ping replies) after every batch of received datagrams and every timer or signal.
 
 The initiation rule in full:
 
@@ -671,6 +673,7 @@ flowchart LR
 ```mermaid
 flowchart TD
     main["main.rs<br/>parse CLI, logging, report errors"] --> app["app.rs<br/>Cli, socket loop, timers, signals"]
+    app --> udp["udp.rs + udp/runs.rs<br/>batched I/O on quinn-udp,<br/>GRO split, GSO runs"]
     app --> cfg["config/<br/>relay.toml, Rate, Summary, ConfigError"]
     app --> relay["relay/mod.rs<br/>Relay, handle, route, tick"]
     relay --> fwd["relay/forward.rs<br/>forward_init, forward_response,<br/>forward_indexed"]
@@ -685,17 +688,17 @@ flowchart TD
 
 Following one data packet through the code:
 
-1. `app.rs` `serve()` receives it with `recv_from` and calls `relay.handle(src, bytes, now)`.
+1. `app.rs` `forward_batch()` receives it in a batch with `Socket::try_recv` (`recvmmsg`, in `udp.rs`), either alone in a receive buffer or as one segment of a GRO buffer, which `udp::runs::segments()` splits at the reported size. It calls `relay.handle(src, bytes, now)`.
 2. `handle()` calls `route()`, which calls `packet::parse()` and gets `Packet::Data { receiver }`.
 3. `relay_tunnel(receiver)` finds no relay prefix, so `forward_indexed()` looks up `sessions.get(receiver)`, checks `expected_src` and the state, and writes nothing: the entry's lifetime is fixed.
 4. It returns `Ok(dest)`; `handle()` records `Verdict::Forward(dest)` in the metrics.
-5. `serve()` calls `send_to(bytes, dest)` with the original, unmodified bytes.
+5. `Plan::make()` in `udp/runs.rs` groups it with the neighbouring datagrams that go to the same address, and `forward()` sends the group as one GSO send of the original, unmodified bytes (or alone, with a plain send). If the GSO send fails, the datagrams go again one by one.
 
 ## 17. How it is tested
 
 | Layer | What | Where |
 |---|---|---|
-| Unit | session table: fixed lifetimes, per-peer pending eviction, per-peer quota, global cap and exact counts; read-only forwarding, source validation, eviction counter; registry, rate limiter, handshake budgets and their independence, `Rate` parsing, ICMP reply | `#[cfg(test)]` modules in `src/` |
+| Unit | session table: fixed lifetimes, per-peer pending eviction, per-peer quota, global cap and exact counts; read-only forwarding, source validation, eviction counter; registry, rate limiter, handshake budgets and their independence, `Rate` parsing, ICMP reply; splitting GRO buffers and grouping datagrams into GSO sends | `#[cfg(test)]` modules in `src/` |
 | Packet | parsing, size checks, mac1 matching and batched search on real packets made by boringtun | `tests/packet.rs` |
 | Config | defaults, exact `ConfigError` for each bad input, `--check-config` | `tests/config.rs` |
 | Relay, in-process | full handshakes between boringtun peers through `Relay::handle` (unlisted to listed, listed to listed, listed to unlisted refused), reload, roaming, reserved indexes, index takeover, re-sent initiations, fixed session lifetimes under traffic, IPv4-mapped sources, rate limits, registration and pending floods, 10 000 mutated packets | `tests/relay.rs` |

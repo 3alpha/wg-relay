@@ -21,6 +21,12 @@ pub enum AppError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to set up batched I/O on {addr}")]
+    Offload {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to install the {signal} handler")]
     Signal {
         signal: &'static str,

@@ -8,6 +8,7 @@ use tracing_subscriber::EnvFilter;
 use wg_relay::error::Report;
 
 mod app;
+mod udp;
 
 fn main() -> ExitCode {
     let cli = app::Cli::parse();

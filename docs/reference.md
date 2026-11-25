@@ -65,6 +65,18 @@ Legitimate forwarding load is about `sessions × listed peers / 240` checks per 
 
 The relay never sends cookie replies (or anything else) for forwarded traffic. Datagrams are parsed with explicit size checks: exact sizes for types 1–3, at least 32 B for data, and the reserved bytes must be zero. Nothing on the forwarding path can panic. This is covered by a 10 000-case mutation test.
 
+### Socket I/O
+
+One thread does everything: a tokio current-thread runtime drives the socket, the timers and the signal handlers. The socket is read in batches through `quinn-udp`: one `recvmmsg` call fills up to 32 receive buffers of 64 KiB each (2 MiB, allocated once at startup). Where the kernel supports UDP GRO, one buffer can hold up to 64 datagrams from one source that the kernel coalesced on receipt, never more than 64 KiB in total. The relay splits such a buffer at the reported segment size and passes every datagram to `Relay::handle` on its own, exactly as if it had arrived alone.
+
+Forwarded datagrams leave through UDP GSO where the kernel supports it. Consecutive datagrams of a batch that go to the same address, carry the same ECN bits and have the same length (the last one may be shorter) are handed to the kernel as one send of at most 64 datagrams and 65,507 bytes, which the kernel or the NIC splits back into the very same datagrams. A run within one receive buffer is sent straight from it; a run that continues into the next buffer is copied together first. A datagram the relay drops or consumes, a change of destination or ECN bits, or a longer datagram ends a run, so datagrams leave byte-identical and in the order they arrived. Without GSO, every forwarded datagram is a send of its own. If a GSO send fails (some drivers and paths reject GSO), its datagrams are sent again one by one, so only those the network itself refuses are lost; after `EIO` or `EINVAL`, `quinn-udp` stops using GSO for the rest of the process's life, and the relay logs that once at `info`. The startup line reports whether GRO and GSO are available (`gro=true gso=true`).
+
+The ECN bits of a received datagram are copied to the datagrams forwarded from it, as WireGuard copies them from the inner packet to the outer one, so congestion marks reach the far end. The rest of the TOS byte (DSCP) is not kept. The relay's own tunnel datagrams (handshake responses, keepalives, ping replies) are sent without ECN after every batch.
+
+When it sets up the socket, `quinn-udp` forbids IP fragmentation and turns on receive timestamps. On Linux the relay puts both back as the kernel had them: a datagram larger than a path's MTU is fragmented as by any other UDP socket instead of being dropped, and the timestamps' control message would leave no room for the ECN bits next to a GRO segment size.
+
+The loop handles one batch per wake-up and charges the runtime's cooperative budget for every receive buffer, so under a sustained flood it still yields to the 250 ms timers and to the signal handlers after a bounded amount of work.
+
 ## Rejects and metrics
 
 Every rejected datagram increments a per-reason counter and logs `reject reason=<reason> src=<addr>` at `debug` level. Per-packet logs are kept at debug because otherwise anyone could flood the log. Counters are logged every 60 s and at shutdown, for example `rx=74 forwarded=60 … pending_evicted=0 reject.peer_not_registered=1 reject.unknown_index=4`. Besides the rejects, `send_errors` and `recv_errors` count socket failures (logged individually only at `debug`, since a remote host can cause them at packet rate), and `pending_evicted` counts pending entries evicted by a newer initiation to the same listed peer: a steady rise means a flood aimed at one peer, which otherwise shows up only as later `unknown_index` drops.
@@ -116,7 +128,8 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 * **A listed peer can fill its own quota.** A malicious or compromised listed peer can answer spoofed initiations aimed at itself with fabricated responses, each creating two open entries for 200 s, until it holds 65,536 entries. That denies new sessions only to itself; other peers have their own quotas, and the global cap needs 14 such peers. Conversely, a listed peer that genuinely carries more than about 16,000 busy sessions reaches its quota (`peer_quota`) and needs `MAX_SESSIONS_PER_PEER` raised.
 * **Two listed peers cannot register from the same `ip:port`.** The newest claimant wins and a warning is logged.
 * **Index collisions** between independent sessions (probability 2⁻³² per pair) make the newer handshake fail once (`index_in_use`); its retry uses a new index.
-* **Single-threaded**, with a mac1 scan over the listed peers per handshake, eight keys per SIMD batch. That is fine for thousands of keys.
+* **Single-threaded.** One thread receives, routes and sends, in batches, so one core bounds the forwarding rate. Each handshake also costs a mac1 scan over the listed peers, eight keys per SIMD batch, which is fine for thousands of keys.
+* **Failed GSO sends cost extra sends.** After `EIO` or `EINVAL` from a GSO send (a driver without UDP segmentation offload, for example), GSO stays off until a restart and forwarding continues with one send per datagram. Other failures leave GSO on: to a destination whose path MTU is smaller than the forwarded datagrams, every run first fails as a GSO send (`EMSGSIZE`) and then goes one datagram at a time, fragmented. If the kernel rejects the ECN control message itself (very old kernels), `quinn-udp` stops setting it and forwarded IPv4 datagrams lose their ECN bits.
 * The ICMP responder is IPv4-only, and metrics are logged rather than exported.
 
 ## The namespace integration test
@@ -138,6 +151,21 @@ The test runs a server, two clients the server knows and a stranger. `relay.toml
 5. removing the server from `relay.toml` and sending `SIGHUP` cuts its sessions off immediately, while `c2` stays registered;
 6. in the relay-side capture, forwarded handshakes cannot be opened with the relay's private key (the server's key opens them), forwarding is byte-identical, and the ping payload never appears on the wire.
 
+## The throughput benchmark
+
+`examples/bench_forward.rs` measures forwarding throughput through a real relay process on loopback, so that changes to the forwarding path can be compared the same way:
+
+```sh
+cargo build --release --bins --examples
+target/release/examples/bench_forward          # plain sends, one datagram each
+target/release/examples/bench_forward --gso    # bursts that reach the relay as GRO buffers
+target/release/examples/bench_forward --bin /tmp/old/wg-relay --senders 8 --secs 10 --sizes 64,512,1420
+```
+
+It starts the binary given by `--bin` (default `target/release/wg-relay`) with a temporary config listing one peer, registers that peer through a real handshake with the relay and completes a client handshake through it, both with boringtun. It then sends one encrypted data packet over and over from the client socket in several threads (the relay does not check counters) and counts the copies that reach the server socket. For each plaintext size it prints the rate the senders offered, the forwarded rate in packets per second and in Mbit/s of UDP payload, the loss, and the share of forwarded datagrams that kept the ECN bits they were sent with (ECT(0)). Raise `--senders` until there is loss: only then is the relay, not the senders, setting the rate. The child process and the temporary config are removed at the end.
+
+What it can show is the relay's cost per datagram and per send, compared between builds on the same machine. What it cannot show is a real interface: loopback has no NIC, so there is no driver GRO and no hardware offload, and the receiving side of every send is processed in software. Plain sends reach the relay one datagram per receive buffer (the relay still merges consecutive ones into GSO sends, copying them together); `--gso` sends bursts with one GSO call each, which loopback delivers to the relay's GRO-enabled socket as one coalesced buffer, as a NIC's GRO would, so it exercises the zero-copy path. Compare builds, not machines.
+
 ## Code layout
 
 | File | Purpose |
@@ -147,6 +175,8 @@ The test runs a server, two clients the server knows and a stranger. `relay.toml
 | `src/relay/` | `Relay::handle` (no I/O); `forward.rs` forwarding rules, `registration.rs` registration tunnels, `reload.rs`, `reason.rs`, `metrics.rs` |
 | `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
 | `src/main.rs` | parse the CLI, set up logging, report errors |
-| `src/app.rs` | clap `Cli`, tokio socket loop, timers, SIGHUP/SIGTERM |
+| `src/app.rs` | clap `Cli`, the socket loop (batched receive, forwarding, the relay's own datagrams), timers, SIGHUP/SIGTERM |
+| `src/udp.rs` | batched socket I/O on `quinn-udp`: `recvmmsg` with GRO, GSO sends, ECN, the kernel settings kept |
+| `src/udp/runs.rs` | splitting GRO buffers into datagrams and grouping forwarded datagrams into GSO sends (pure, unit-tested) |
 | `src/key/` | `PeerKey` / `PrivateKey` base64 newtypes |
 | `src/error.rs` | `AppError` and the `Report` error-chain printer |

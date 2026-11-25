@@ -174,9 +174,10 @@ Every rejected packet is counted under a named reason, such as `wrong_source` or
 ```sh
 cargo test                                             # unit and in-process tests
 cargo build --bins --examples && sudo tests/netns.sh   # end-to-end, with kernel WireGuard
+cargo build --release --bins --examples && target/release/examples/bench_forward  # throughput on loopback
 ```
 
-The end-to-end test builds a network in Linux network namespaces: a server, two clients and a stranger, each behind its own NAT and running kernel WireGuard. It verifies that both clients connect and the stranger does not, that rekeys work in both directions, including one the server starts towards a listed client, and that `SIGHUP` revokes a removed peer immediately. A packet capture at the relay verifies that the relay's key cannot open forwarded handshakes and that every forwarded packet is byte-identical. The [reference](docs/reference.md#the-namespace-integration-test) explains how to run the test in Docker without root on the host.
+The end-to-end test builds a network in Linux network namespaces: a server, two clients and a stranger, each behind its own NAT and running kernel WireGuard. It verifies that both clients connect and the stranger does not, that rekeys work in both directions, including one the server starts towards a listed client, and that `SIGHUP` revokes a removed peer immediately. A packet capture at the relay verifies that the relay's key cannot open forwarded handshakes and that every forwarded packet is byte-identical. The [reference](docs/reference.md#the-namespace-integration-test) explains how to run the test in Docker without root on the host. The benchmark forwards encrypted data packets through a real relay process and prints packets per second and Mbit/s, so builds can be compared; the [reference](docs/reference.md#the-throughput-benchmark) explains what it can and cannot show.
 
 ## Documentation
 
