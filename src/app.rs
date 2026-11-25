@@ -58,6 +58,7 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
         .map_err(|source| AppError::Bind { addr: cfg.listen, source })?;
     let on = |kind, name| signal(kind).map_err(|source| AppError::Signal { signal: name, source });
     let mut term = on(SignalKind::terminate(), "SIGTERM")?;
+    let mut int = on(SignalKind::interrupt(), "SIGINT")?;
     let mut hup = on(SignalKind::hangup(), "SIGHUP")?;
     let mut relay = Relay::new(&cfg);
     info!(
@@ -96,7 +97,7 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
                 Ok(new) => relay.reload(&new),
                 Err(e) => error!(error = %Report(&e), "reload failed, keeping current config"),
             },
-            _ = tokio::signal::ctrl_c() => break,
+            _ = int.recv() => break,
             _ = term.recv() => break,
         }
         for (dst, pkt) in relay.take_outbox() {
