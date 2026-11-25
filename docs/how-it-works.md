@@ -221,7 +221,7 @@ flowchart TD
 How these numbers show up in the relay:
 
 - The **2-minute rekey** is why the relay keeps learning new indexes, and why old session entries simply age out.
-- The relay's **200 s session TTL** sits just above `REJECT_AFTER_TIME`, so the relay never forgets an index that WireGuard might still use.
+- The relay's **200 s session lifetime** is counted from the handshake and never extended by traffic. It sits just above `REJECT_AFTER_TIME`: WireGuard never uses a key older than 180 s, so the relay never forgets an index that WireGuard might still use, and no entry outlives its keys by more than the 20 s margin, however much traffic is sent on it.
 - The **15 s no-reply rule** is why a client that changes network recovers in about 5 to 15 s ([section 14](#14-when-things-move-roaming-and-restarts)).
 - **`PersistentKeepalive = 25`** keeps every NAT mapping open, refreshes each listed peer's registration well inside its 180 s TTL, and, because a keepalive counts as sending, keeps sessions rekeying while idle.
 
@@ -244,7 +244,7 @@ sequenceDiagram
 
 The cookie reply is encrypted with a key derived from the responder's public key, and its associated data is the mac1 of the message it answers. Only someone who sent that initiation can use it, and a spoofed source address never receives it. That is why the relay lets cookie replies through on *pending* sessions ([section 7](#7-sessions-the-state-machine)): without that, a server under load could never complete a handshake through the relay.
 
-**What the relay changes here.** The server sees every packet arriving from the relay's address, so it computes the same cookie for every client. The cookie no longer proves anything about the real sender. Someone who obtains one cookie through the relay could attach a valid mac2 to initiations sent from spoofed addresses, and the server would do the expensive work for each. The relay's per-source-IP rate limit and its forwarding budget ([section 10](#10-the-dispatcher-step-by-step)) are then the only brakes, and each spoofed address gets its own per-IP allowance. This is listed under the README's limitations. Possible hardening, not implemented: a global initiation cap per server, or the relay running the cookie exchange itself (it knows each listed peer's public key, which is all the protocol needs).
+**What the relay changes here.** The server sees every packet arriving from the relay's address, so it computes the same cookie for every client. The cookie no longer proves anything about the real sender. Someone who obtains one cookie through the relay could attach a valid mac2 to initiations sent from spoofed addresses, and the server would do the expensive work for each. The relay's per-source rate limit and its forwarding budget ([section 10](#10-the-dispatcher-step-by-step)) are then the only brakes, and each spoofed source gets its own allowance. This is listed under the README's limitations. Possible hardening, not implemented: a global initiation cap per server, or the relay running the cookie exchange itself (it knows each listed peer's public key, which is all the protocol needs).
 
 ### 3.6 Cryptokey routing and roaming
 
@@ -301,7 +301,7 @@ flowchart LR
     end
     subgraph learned_state["Learned at runtime"]
         REG["registry<br/>listed key ↔ address<br/>(authenticated, 180 s TTL)"]
-        SES["session table<br/>receiver_idx → {dest, expected_src,<br/>state, peer}<br/>(200 s idle TTL)<br/>+ pending indexes per listed peer"]
+        SES["session table<br/>receiver_idx → {dest, expected_src,<br/>state, since, peer}<br/>(fixed lifetimes: 200 s open, 10 s pending)<br/>+ pending indexes and entry counts<br/>per listed peer"]
         RL["rate limiter<br/>source → one of 65,536<br/>token buckets"]
         BUD["handshake budgets<br/>forwarding and registration:<br/>one token bucket each"]
     end
@@ -313,7 +313,7 @@ flowchart LR
 | Table | Written when | Read when | Expires |
 |---|---|---|---|
 | `registry` | a packet **authenticates** on a listed peer's relay tunnel | finding a listed peer's address | 180 s without authenticated traffic |
-| `sessions` | a handshake is forwarded (pending) or accepted (open) | every type 2, 3 and 4 packet | 200 s without traffic on that index (10 s while pending); a pending entry also goes when its listed peer has 1,024 newer ones |
+| `sessions` | a handshake is forwarded (pending) or accepted (open); never by forwarded data or cookie replies | every type 2, 3 and 4 packet | 200 s after the handshake was accepted, whatever the traffic (10 s after the initiation while pending); a pending entry also goes when its listed peer has 1,024 newer ones |
 | `rate limiter` | every initiation | every initiation | never: a fixed array of buckets, so memory is constant |
 | `forwarding budget` | after each mac1 scan | every initiation not for the relay | never; refills continuously |
 | `registration budget` | after each registration attempt from an unregistered address | every relay-bound initiation from an unregistered address | never; refills continuously |
@@ -384,8 +384,8 @@ flowchart LR
     NEW(("handshake<br/>seen")) -- "initiation<br/>forwarded" --> P["Pending<br/>only cookie replies pass"]
     P -- "response<br/>accepted" --> O["Open<br/>data and cookies pass"]
     NEW -- "response accepted<br/>(responder's index)" --> O
-    O -- "200 s idle<br/>or reload" --> GONE(("removed"))
-    P -- "10 s idle<br/>or reload" --> GONE
+    O -- "200 s after opening<br/>or reload" --> GONE(("removed"))
+    P -- "10 s after the initiation,<br/>eviction or reload" --> GONE
 ```
 
 What each state lets through, always only from `expected_src`:
@@ -396,7 +396,16 @@ What each state lets through, always only from `expected_src`:
 | Type 3, cookie reply | **yes**, so a peer under load can still answer | yes |
 | Type 4, data | **no** (`session_not_open`) | yes |
 
-A WireGuard session rekeys every 2 minutes, which creates new indexes; the old entries simply age out after 200 s of silence. A pending entry whose handshake is never answered goes after 10 s. Each listed peer may have at most 1,024 pending entries: a new initiation for a peer at its quota evicts that peer's oldest pending entry, so spoofed initiations aimed at one listed peer only compete with handshakes to that peer, and a legitimate handshake survives as long as it is answered before 1,024 newer initiations to the same peer arrive. A global cap of 262,144 pending entries (`too_many_pending`) bounds memory as a backstop, so spoofed initiations cannot grow it without bound; with the default budgets, a flood of initiations cannot create entries fast enough to reach it. When an expiry sweep leaves the table mostly empty, it gives the memory back. If a handshake picks an index that a live entry of a different address pair already holds (probability 2⁻³² per pair by accident), it is dropped (`index_in_use`) and the peer retries with a new index, so an index in use can never be taken over.
+Lifetimes are fixed. An open entry goes 200 s after its handshake was accepted, however much traffic it carries, and a pending entry 10 s after its initiation, however many cookie replies pass through it. Forwarding data and cookie replies only reads the table. This is safe because a WireGuard session rekeys every 2 minutes, which creates new indexes, and never uses a key older than 180 s, so by the time an entry goes its traffic has long moved to the next session's entries. It also means nobody can keep an entry alive by sending: a client that a server has removed from its config cannot keep the relay forwarding junk to the server's address beyond the lifetime of its last accepted handshake.
+
+Quotas keep the table bounded:
+
+- Each listed peer may have at most 1,024 pending entries: a new initiation for a peer at its quota evicts that peer's oldest pending entry (counted as `pending_evicted`), so spoofed initiations aimed at one listed peer only compete with handshakes to that peer, and a legitimate handshake survives as long as it is answered before 1,024 newer initiations to the same peer arrive.
+- Each listed peer may have at most 65,536 entries in all, pending and open, room for about 16,000 busy sessions (a busy session holds four entries: its current pair and, until it expires, the previous one). A listed peer that answers spoofed initiations with fabricated responses gains two open entries per answer; at its quota, new initiations to it and responses from it are dropped (`peer_quota`) until its entries expire, and other peers are unaffected.
+- At most 262,144 entries may be pending in total (`too_many_pending`), so a flood of initiations leaves most of the table to open sessions; with the default budgets, a flood cannot create pending entries fast enough to reach it.
+- At most 917,504 entries may exist in total (`too_many_sessions`), a memory backstop of about 135 MB ([reference](reference.md#session-table)).
+
+When an expiry sweep leaves the table mostly empty, it gives the memory back. If a handshake picks an index that a live entry of a different address pair already holds (probability 2⁻³² per pair by accident), it is dropped (`index_in_use`) and the peer retries with a new index, so an index in use can never be taken over. A live open entry is never replaced at all, not even by its own address pair: an initiation re-sent or replayed with the index of an open session is dropped (`index_in_use`), so it can neither cut the session off by turning the entry back into a pending one nor restart its lifetime. WireGuard uses a fresh index for every initiation, so real peers never hit this.
 
 ## 8. Who can start a handshake
 
@@ -428,7 +437,7 @@ The gap is the server calling an unlisted laptop. In practice it rarely matters:
 
 ## 9. Access control
 
-There is one rule: **a session opens only when a listed peer answers from its registered address.** Anyone may send an initiation to a registered listed peer, subject to the per-IP rate limit, and the listed peer's own WireGuard decides whether it knows the sender. Strangers' initiations reach it and are dropped there, silently. The relay's checks on the response only make sure it really is the listed peer answering, exactly once:
+There is one rule: **a session opens only when a listed peer answers from its registered address.** Anyone may send an initiation to a registered listed peer, subject to the per-source rate limit, and the listed peer's own WireGuard decides whether it knows the sender. Strangers' initiations reach it and are dropped there, silently. The relay's checks on the response only make sure it really is the listed peer answering, exactly once:
 
 ```mermaid
 flowchart TD
@@ -440,7 +449,9 @@ flowchart TD
     P -- no --> X3["Drop: session_not_pending"]
     P -- yes --> I{"responder's sender_idx<br/>free and not reserved?"}
     I -- no --> X4["Drop: index_in_use<br/>or reserved_index"]
-    I -- yes --> OK["Open both entries, forward"]
+    I -- yes --> Q{"peer below its quota<br/>and table below its cap?"}
+    Q -- no --> X5["Drop: peer_quota<br/>or too_many_sessions"]
+    Q -- yes --> OK["Open both entries, forward"]
 ```
 
 What each list decides:
@@ -450,17 +461,19 @@ What each list decides:
 | `relay.toml` | which peers can register, and so be reached through the relay |
 | each listed peer's WireGuard config | who may talk to that peer: the only authentication there is |
 
-To revoke a listed peer, remove it from `relay.toml` and send SIGHUP: its registration and every session routed to it go at once. To revoke an unlisted peer, remove it from the listed peers' WireGuard configs. The relay does not limit how many unlisted peers a listed peer accepts, so it cannot cap who uses its bandwidth beyond the per-IP handshake rate.
+To revoke a listed peer, remove it from `relay.toml` and send SIGHUP: its registration and every session routed to it go at once. To revoke an unlisted peer, remove it from the listed peers' WireGuard configs. The relay does not limit how many unlisted peers a listed peer accepts, so it cannot cap who uses its bandwidth beyond the per-source handshake rate.
 
 ## 10. The dispatcher, step by step
 
-Every datagram goes through `Relay::route` (`src/relay/mod.rs`). The checks are ordered from cheapest to most expensive, so junk is rejected before any cryptography happens.
+Every datagram goes through `Relay::route` (`src/relay/mod.rs`). The checks are ordered from cheapest to most expensive, so junk is rejected before any cryptography happens. The first check drops datagrams whose source could never receive a reply (port 0, an unspecified, multicast or IPv4 broadcast address, after unmapping IPv4-mapped IPv6), so such an address is never stored as a session's destination.
 
 ```mermaid
 flowchart TD
-    IN["UDP datagram from src"] --> P{"parse: type, size,<br/>reserved bytes"}
+    IN["UDP datagram from src"] --> SV{"src can be replied to?<br/>port not 0, not unspecified,<br/>multicast or broadcast"}
+    SV -- no --> D0["Drop: invalid_source"]
+    SV -- yes --> P{"parse: type, size,<br/>reserved bytes"}
     P -- bad --> M["Drop: malformed"]
-    P -- "type 1" --> RL{"rate limit<br/>for src IP"}
+    P -- "type 1" --> RL{"rate limit<br/>for src"}
     RL -- empty --> D1["Drop: rate_limited"]
     RL -- ok --> RM{"mac1 keyed to<br/>relay's own key?"}
     RM -- yes --> RS{"src is a listed peer's<br/>registered address?"}
@@ -492,17 +505,21 @@ The initiation rule in full:
 flowchart TD
     A["Type 1, not for the relay"] --> R{"sender_idx in a<br/>relay prefix?"}
     R -- yes --> X0["Drop: reserved_index"]
-    R -- no --> G{"262,144 handshakes<br/>pending?"}
+    R -- no --> F{"917,504 entries<br/>in the table?"}
+    F -- yes --> X7["Drop: too_many_sessions"]
+    F -- no --> G{"262,144 handshakes<br/>pending?"}
     G -- yes --> X5["Drop: too_many_pending"]
     G -- no --> BG{"forwarding<br/>budget left?"}
     BG -- no --> X6["Drop: handshake_budget"]
     BG -- yes --> B{"mac1 matches<br/>a listed peer?"}
     B -- no --> X1["Drop: no_mac1_match"]
-    B -- yes --> C{"peer<br/>registered?"}
+    B -- yes --> Q{"peer holds 65,536<br/>entries already?"}
+    Q -- yes --> X8["Drop: peer_quota"]
+    Q -- no --> C{"peer<br/>registered?"}
     C -- no --> X2["Drop: peer_not_registered"]
     C -- yes --> L{"src is the peer<br/>itself?"}
     L -- yes --> X3["Drop: loop"]
-    L -- no --> U{"sender_idx held by<br/>another live session?"}
+    L -- no --> U{"sender_idx held by a live<br/>session of another pair,<br/>or a live open one?"}
     U -- yes --> X4["Drop: index_in_use"]
     U -- no --> OK["Pending session for sender_idx<br/>(evicting the peer's oldest pending<br/>one if it has 1,024), forward to the peer"]
 ```
@@ -537,17 +554,18 @@ Together these guarantee the two kinds of index never collide, and a packet whos
 | Peer keepalive | 25 s | node configs (`PersistentKeepalive`) | keeps NAT mappings open, refreshes registrations |
 | WireGuard rekey | about 2 min | WireGuard itself | new keys and new indexes |
 | Registration TTL | 180 s | `REGISTRY_TTL` | a listed peer silent for 3 min is forgotten |
-| Session TTL | 200 s idle | `SESSION_TTL` | indexes from old handshakes age out |
-| Pending TTL | 10 s idle | `PENDING_TTL` | unanswered initiations do not pile up |
+| Session lifetime | 200 s after the handshake, not extended by traffic | `SESSION_TTL` | indexes from old handshakes age out; nobody can keep an entry alive by sending |
+| Pending lifetime | 10 s after the initiation, not extended by cookie replies | `PENDING_TTL` | unanswered initiations do not pile up |
 | Relay tick | 250 ms | `app.rs` | runs relay tunnel timers |
 | Table sweep | 1 s | `SWEEP_INTERVAL` | expires tables, shrinks them when mostly empty |
 | Stats log | 60 s | `app.rs` | logs all counters, including per-reason rejects |
 | Rate limit | `handshake_rate_per_ip`, burst 2 s worth | `relay.toml` | caps initiations per source (IPv4 address or IPv6 /64) |
 | Forwarding budget | 1,000,000 mac1 checks/s, burst 1 s | `FORWARD_WORK_PER_SEC` | caps CPU spent finding forwarded handshakes' destinations |
 | Registration budget | 200,000 mac1 checks/s (500 attempts), burst 1 s | `REGISTRATION_WORK_PER_SEC` | caps X25519 work on registration attempts from unregistered addresses |
-| Pending quota | 1,024 per listed peer; 262,144 in total | `MAX_PENDING_PER_PEER`, `MAX_PENDING` | a flood at one listed peer evicts only that peer's oldest pending entries; the total bounds memory |
+| Pending quota | 1,024 per listed peer; 262,144 in total | `MAX_PENDING_PER_PEER`, `MAX_PENDING` | a flood at one listed peer evicts only that peer's oldest pending entries; the total leaves room for open sessions |
+| Session quota | 65,536 entries per listed peer; 917,504 in total | `MAX_SESSIONS_PER_PEER`, `MAX_SESSIONS` | one listed peer cannot take the whole table; the total bounds memory at about 135 MB |
 
-The values nest deliberately: a healthy listed peer refreshes its registration about seven times per TTL, and a session that is still in use is refreshed on every packet, long before 200 s, while one replaced by a rekey disappears soon after.
+The values nest deliberately: a healthy listed peer refreshes its registration about seven times per TTL, and a session in use is replaced by a rekey every 2 minutes, so its entries are idle well before they expire 200 s after their handshake. WireGuard stops using a session's keys at 180 s at the latest, which is why the relay can expire entries on a fixed schedule instead of watching traffic.
 
 ```mermaid
 gantt
@@ -558,10 +576,10 @@ gantt
     registered, keepalive every 25 s     :0, 300
     section Session 1
     traffic                              :done, 0, 120
-    idle until expiry at 320 s           :120, 300
+    replaced, expires at 200 s           :120, 200
     section Session 2
     traffic                              :done, 120, 240
-    idle                                 :240, 300
+    replaced, expires at 320 s           :240, 300
     section Session 3
     traffic                              :done, 240, 300
 ```
@@ -637,9 +655,14 @@ flowchart LR
 | Redirecting a listed peer's traffic | Registration requires a full WireGuard handshake with that peer's key; replays fail WireGuard's timestamp and counter checks |
 | Handshake floods | Per-source token buckets, then separate work budgets for forwarding scans and registration attempts, checked before the mac1 scan or key exchange: floods are shed cheaply, forwarding continues, a flood on one path does not starve the other, and registered peers re-handshake with the relay without touching the registration budget |
 | Crowding out pending handshakes | Each listed peer has its own quota of 1,024 pending entries, evicting its oldest first, so a flood aimed at one listed peer cannot refuse handshakes to the others |
-| Exhausting memory with spoofed sources | The rate limiter is a fixed array, pending sessions are capped at 262,144 in total, and tables shrink after a flood |
+| A listed peer filling the session table by answering spoofed initiations | Each listed peer may hold at most 65,536 entries, pending and open, so it can only refuse new sessions to itself |
+| Exhausting memory with spoofed sources | The rate limiter is a fixed array; the session table is capped at 917,504 entries (about 135 MB), of which at most 262,144 pending; tables shrink after a flood |
+| Keeping a session alive with junk, e.g. a client the server has removed | Entries live a fixed time from their handshake (200 s open, 10 s pending); neither data nor cookie replies extend them, and an open entry cannot be reset by re-sending its initiation |
+| Spoofed sources that cannot receive replies | Datagrams from port 0, unspecified, multicast or broadcast addresses are dropped first (`invalid_source`) |
 | A removed listed peer lingering | SIGHUP drops its registration and sessions immediately |
 | Unapproved peers using the relay's bandwidth | Not prevented: a listed peer can accept any number of unlisted peers; only handshakes are rate-limited |
+
+**Known residual risks**, detailed in the [reference's limitations](reference.md#limitations): a flood from sources spread over all 65,536 rate-limit buckets, at roughly 65,536 × `handshake_rate_per_ip` initiations per second, empties every bucket, registered listed peers' included, and blocks their re-handshakes until it ends; and packets spoofed from a listed peer's registered `ip:port` are trusted as that peer on the forwarding path (the source address is the only check), so they can open sessions for pending initiations. The quotas bound the memory this can take, but it remains a denial-of-service lever against that one peer.
 
 **What the relay's private key is worth to an attacker:** it opens only the registration tunnels, which carry nothing but keepalives and pings to `10.99.0.254/32`. With it, an attacker could pose as the relay to listed peers, which gains them the same position as an on-path attacker: they can drop traffic, but not read it.
 
@@ -664,7 +687,7 @@ Following one data packet through the code:
 
 1. `app.rs` `serve()` receives it with `recv_from` and calls `relay.handle(src, bytes, now)`.
 2. `handle()` calls `route()`, which calls `packet::parse()` and gets `Packet::Data { receiver }`.
-3. `relay_tunnel(receiver)` finds no relay prefix, so `forward_indexed()` looks up `sessions.get(receiver)`, checks `expected_src` and the state, and refreshes `last_seen`.
+3. `relay_tunnel(receiver)` finds no relay prefix, so `forward_indexed()` looks up `sessions.get(receiver)`, checks `expected_src` and the state, and writes nothing: the entry's lifetime is fixed.
 4. It returns `Ok(dest)`; `handle()` records `Verdict::Forward(dest)` in the metrics.
 5. `serve()` calls `send_to(bytes, dest)` with the original, unmodified bytes.
 
@@ -672,10 +695,10 @@ Following one data packet through the code:
 
 | Layer | What | Where |
 |---|---|---|
-| Unit | session table and per-peer pending eviction, registry, rate limiter, handshake budgets and their independence, `Rate` parsing, ICMP reply | `#[cfg(test)]` modules in `src/` |
+| Unit | session table: fixed lifetimes, per-peer pending eviction, per-peer quota, global cap and exact counts; read-only forwarding, source validation, eviction counter; registry, rate limiter, handshake budgets and their independence, `Rate` parsing, ICMP reply | `#[cfg(test)]` modules in `src/` |
 | Packet | parsing, size checks, mac1 matching and batched search on real packets made by boringtun | `tests/packet.rs` |
 | Config | defaults, exact `ConfigError` for each bad input, `--check-config` | `tests/config.rs` |
-| Relay, in-process | full handshakes between boringtun peers through `Relay::handle` (unlisted to listed, listed to listed, listed to unlisted refused), reload, roaming, reserved indexes, index takeover, rate limits, registration and pending floods, 10 000 mutated packets | `tests/relay.rs` |
+| Relay, in-process | full handshakes between boringtun peers through `Relay::handle` (unlisted to listed, listed to listed, listed to unlisted refused), reload, roaming, reserved indexes, index takeover, re-sent initiations, fixed session lifetimes under traffic, IPv4-mapped sources, rate limits, registration and pending floods, 10 000 mutated packets | `tests/relay.rs` |
 | End-to-end | real kernel WireGuard in network namespaces behind real NATs | `tests/netns.sh` |
 
 The end-to-end topology:

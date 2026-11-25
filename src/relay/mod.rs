@@ -4,7 +4,7 @@
 //! queues the relay's own tunnel output for `take_outbox`.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use boringtun::noise::{Tunn, TunnResult};
@@ -15,7 +15,8 @@ use crate::config::Config;
 use crate::key::PeerKey;
 use crate::packet::{self, IdxPrefix, Mac1Key, Packet, SessionIdx};
 use crate::tables::{
-    PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, SessionTable, WorkBudget,
+    PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, SessionLimits, SessionTable,
+    WorkBudget,
 };
 
 mod forward;
@@ -42,9 +43,17 @@ const REGISTRATION_WORK: usize = 400;
 /// Most handshakes one listed peer may have awaiting a response; a new one
 /// evicts its oldest, so a flood aimed at one peer only disturbs that peer.
 const MAX_PENDING_PER_PEER: usize = 1_024;
-/// Most handshakes awaiting a response at once (about 70 MB of table), a
-/// memory backstop; the forwarding budget keeps floods well below it.
+/// Most handshakes awaiting a response at once, so a flood of initiations
+/// leaves most of the table to open sessions; the forwarding budget keeps
+/// floods well below it.
 const MAX_PENDING: usize = 262_144;
+/// Most entries, pending or open, routed to one listed peer: room for about
+/// 16,000 busy sessions (4 entries each), so a listed peer answering spoofed
+/// initiations cannot take the whole table.
+const MAX_SESSIONS_PER_PEER: usize = 65_536;
+/// Most entries in the session table, a memory backstop: 7 × 2^17 is the
+/// most a `HashMap` holds in 2^20 buckets of 129 bytes, about 135 MB.
+const MAX_SESSIONS: usize = 917_504;
 
 /// What the relay holds for each listed peer.
 struct PeerState {
@@ -96,7 +105,15 @@ impl Relay {
             mac1: Mac1Index::default(),
             tunn_by_prefix: HashMap::new(),
             registry: Registry::new(REGISTRY_TTL),
-            sessions: SessionTable::new(SESSION_TTL, PENDING_TTL, MAX_PENDING_PER_PEER),
+            sessions: SessionTable::new(
+                SESSION_TTL,
+                PENDING_TTL,
+                SessionLimits {
+                    pending_per_peer: MAX_PENDING_PER_PEER,
+                    per_peer: MAX_SESSIONS_PER_PEER,
+                    total: MAX_SESSIONS,
+                },
+            ),
             limiter: RateLimiter::new(cfg.handshake_rate.per_sec()),
             forward_budget: WorkBudget::new(FORWARD_WORK_PER_SEC),
             registration_budget: WorkBudget::new(REGISTRATION_WORK_PER_SEC),
@@ -142,6 +159,11 @@ impl Relay {
         self.metrics.send_errors += 1;
     }
 
+    /// Count a failed receive on the caller's socket.
+    pub fn record_recv_error(&mut self) {
+        self.metrics.recv_errors += 1;
+    }
+
     /// Process one datagram, counting and logging the outcome.
     pub fn handle(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
         let verdict = self.route(src, pkt, now);
@@ -153,6 +175,9 @@ impl Relay {
     }
 
     fn route(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
+        if !replyable(src) {
+            return Verdict::Drop(Reason::InvalidSource);
+        }
         let Ok(p) = packet::parse(pkt) else { return Verdict::Drop(Reason::Malformed) };
         match p {
             Packet::Init { .. } if !self.limiter.allow(src.ip(), now) => {
@@ -244,9 +269,19 @@ impl Relay {
     }
 }
 
+/// Can `src` ever be a reply destination? Spoofed sources such as port 0 or a
+/// broadcast address would otherwise be stored as a session's `dest`.
+fn replyable(src: SocketAddr) -> bool {
+    let ip = src.ip().to_canonical();
+    let bad_ip =
+        ip.is_unspecified() || ip.is_multicast() || matches!(ip, IpAddr::V4(a) if a.is_broadcast());
+    src.port() != 0 && !bad_ip
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tables::SessionState;
     use base64::Engine;
     use rand_core::OsRng;
 
@@ -365,7 +400,7 @@ mod tests {
             let mut key = [0; 32];
             key[..4].copy_from_slice(&(i / MAX_PENDING_PER_PEER as u32).to_le_bytes());
             let s = crate::tables::Session::pending(a, b, PeerKey::from(key), now);
-            assert!(relay.sessions.insert(i.into(), s));
+            assert!(relay.sessions.insert(i.into(), s).is_ok());
         }
         assert_eq!(relay.sessions.pending(), MAX_PENDING);
         let mut junk = junk();
@@ -377,5 +412,189 @@ mod tests {
         assert_eq!(relay.sessions.pending(), 0);
         let later = now + PENDING_TTL + SWEEP_INTERVAL;
         assert_eq!(relay.handle(a, &junk, later), Verdict::Drop(Reason::NoMac1Match));
+    }
+
+    /// `relay()` with these table limits and listed peers 0 and 1 registered.
+    fn limited(limits: SessionLimits, t0: Instant) -> Relay {
+        let mut relay = relay();
+        relay.sessions = SessionTable::new(SESSION_TTL, PENDING_TTL, limits);
+        for (i, peer) in relay.mac1.peers.clone().into_iter().take(2).enumerate() {
+            relay.registry.update(peer, listed(i), t0);
+        }
+        relay
+    }
+
+    /// Where listed peer `i` is registered.
+    fn listed(i: usize) -> SocketAddr {
+        SocketAddr::from(([203, 0, 113, i as u8 + 1], 51820))
+    }
+
+    /// An initiation for listed peer `i`, announcing `sender`.
+    fn init_for(relay: &Relay, i: usize, sender: u32) -> Vec<u8> {
+        let mut p = junk();
+        p[4..8].copy_from_slice(&sender.to_le_bytes());
+        let mac = relay.mac1.keys[i].mac(&p[..116]);
+        p[116..132].copy_from_slice(&mac);
+        p
+    }
+
+    /// A response-shaped datagram; the relay never checks its contents.
+    fn response(sender: u32, receiver: u32) -> Vec<u8> {
+        let mut p = vec![0u8; 92];
+        p[0] = 2;
+        p[4..8].copy_from_slice(&sender.to_le_bytes());
+        p[8..12].copy_from_slice(&receiver.to_le_bytes());
+        p
+    }
+
+    /// A data packet for `receiver`.
+    fn data(receiver: u32) -> Vec<u8> {
+        let mut p = vec![0u8; 48];
+        p[0] = 4;
+        p[4..8].copy_from_slice(&receiver.to_le_bytes());
+        p
+    }
+
+    #[test]
+    fn peer_at_quota_is_refused_without_blocking_other_peers() {
+        let t0 = Instant::now();
+        let limits = SessionLimits { pending_per_peer: 4, per_peer: 6, total: 100 };
+        let mut relay = limited(limits, t0);
+        let fwd = Verdict::Forward;
+        // Listed peer 0 answers two spoofed initiations aimed at itself: 4 open entries.
+        for i in 0..2 {
+            let init = init_for(&relay, 0, 0x100 + i);
+            assert_eq!(relay.handle(src(i as u8), &init, t0), fwd(listed(0)));
+            let resp = response(0x200 + i, 0x100 + i);
+            assert_eq!(relay.handle(listed(0), &resp, t0), fwd(src(i as u8)));
+        }
+        // Two more pending entries bring it to its quota.
+        for i in 2..4 {
+            let init = init_for(&relay, 0, 0x100 + i);
+            assert_eq!(relay.handle(src(i as u8), &init, t0), fwd(listed(0)));
+        }
+        let quota = Verdict::Drop(Reason::PeerQuota);
+        assert_eq!(relay.handle(src(9), &init_for(&relay, 0, 0x109), t0), quota);
+        // A response would add the responder's entry, so it is refused too and
+        // the initiator's entry stays pending.
+        assert_eq!(relay.handle(listed(0), &response(0x202, 0x102), t0), quota);
+        assert_eq!(
+            relay.sessions.get(0x102.into(), t0).map(|s| s.state),
+            Some(SessionState::Pending)
+        );
+        // Another listed peer is unaffected.
+        assert_eq!(relay.handle(src(10), &init_for(&relay, 1, 0x110), t0), fwd(listed(1)));
+        assert_eq!(relay.handle(listed(1), &response(0x210, 0x110), t0), fwd(src(10)));
+        // Once the sweep removes the expired pending entries, peer 0 has room again.
+        let later = t0 + PENDING_TTL;
+        relay.tick(later);
+        assert_eq!(relay.handle(src(11), &init_for(&relay, 0, 0x111), later), fwd(listed(0)));
+        assert_eq!(relay.metrics().rejected(Reason::PeerQuota), 2);
+        assert_eq!(relay.sessions.len(), 4 + 2 + 1);
+    }
+
+    #[test]
+    fn full_table_refuses_initiations_before_the_scan() {
+        let t0 = Instant::now();
+        let limits = SessionLimits { pending_per_peer: 4, per_peer: 100, total: 3 };
+        let mut relay = limited(limits, t0);
+        for i in 0..3u8 {
+            let init = init_for(&relay, usize::from(i % 2), 0x100 + u32::from(i));
+            assert_eq!(
+                relay.handle(src(i), &init, t0),
+                Verdict::Forward(listed(usize::from(i % 2)))
+            );
+        }
+        relay.forward_budget = WorkBudget::new(3.0);
+        let full = Verdict::Drop(Reason::TooManySessions);
+        let verdicts: Vec<Verdict> =
+            (0..5).map(|i| relay.handle(src(10 + i), &init_for(&relay, 1, 0x200), t0)).collect();
+        assert_eq!(verdicts, [full; 5]);
+        assert!(relay.forward_budget.available(t0), "one scan would have spent it all");
+        // A response needs a new entry too.
+        assert_eq!(relay.handle(listed(0), &response(0x300, 0x100), t0), full);
+        relay.tick(t0 + PENDING_TTL);
+        let later = t0 + PENDING_TTL;
+        assert_eq!(
+            relay.handle(src(20), &init_for(&relay, 1, 0x200), later),
+            Verdict::Forward(listed(1))
+        );
+    }
+
+    #[test]
+    fn forwarding_never_writes_to_the_session_entry() {
+        let t0 = Instant::now();
+        let limits = SessionLimits { pending_per_peer: 4, per_peer: 100, total: 100 };
+        let mut relay = limited(limits, t0);
+        assert_eq!(
+            relay.handle(src(1), &init_for(&relay, 0, 0x10), t0),
+            Verdict::Forward(listed(0))
+        );
+        let mut cookie = vec![3u8; 64];
+        cookie[1..4].fill(0);
+        cookie[4..8].copy_from_slice(&0x10u32.to_le_bytes());
+        let pending = relay.sessions.get(0x10.into(), t0);
+        for s in 1..10 {
+            let t = t0 + Duration::from_secs(s);
+            assert_eq!(relay.handle(listed(0), &cookie, t), Verdict::Forward(src(1)));
+            assert_eq!(relay.sessions.get(0x10.into(), t), pending, "cookie at {s} s");
+        }
+        assert_eq!(
+            relay.handle(listed(0), &cookie, t0 + PENDING_TTL),
+            Verdict::Drop(Reason::UnknownIndex)
+        );
+
+        assert_eq!(
+            relay.handle(src(2), &init_for(&relay, 0, 0x20), t0),
+            Verdict::Forward(listed(0))
+        );
+        assert_eq!(relay.handle(listed(0), &response(0x21, 0x20), t0), Verdict::Forward(src(2)));
+        let open = (relay.sessions.get(0x20.into(), t0), relay.sessions.get(0x21.into(), t0));
+        for s in (10..200).step_by(10) {
+            let t = t0 + Duration::from_secs(s);
+            assert_eq!(relay.handle(listed(0), &data(0x20), t), Verdict::Forward(src(2)));
+            assert_eq!(relay.handle(src(2), &data(0x21), t), Verdict::Forward(listed(0)));
+            let now = (relay.sessions.get(0x20.into(), t), relay.sessions.get(0x21.into(), t));
+            assert_eq!(now, open, "data at {s} s");
+        }
+        let expired = Verdict::Drop(Reason::UnknownIndex);
+        assert_eq!(relay.handle(listed(0), &data(0x20), t0 + SESSION_TTL), expired);
+    }
+
+    #[test]
+    fn pending_evictions_are_counted_and_logged() {
+        let t0 = Instant::now();
+        let limits = SessionLimits { pending_per_peer: 2, per_peer: 100, total: 100 };
+        let mut relay = limited(limits, t0);
+        for i in 0..5u8 {
+            let init = init_for(&relay, 0, 0x100 + u32::from(i));
+            assert_eq!(relay.handle(src(i), &init, t0), Verdict::Forward(listed(0)));
+        }
+        assert_eq!(relay.metrics().pending_evicted, 3);
+        assert!(relay.metrics().to_string().contains(" pending_evicted=3"), "{}", relay.metrics());
+    }
+
+    #[test]
+    fn unreplyable_sources_are_dropped_before_parsing() {
+        let t0 = Instant::now();
+        let mut relay = relay();
+        let bad = [
+            "192.0.2.1:0",
+            "0.0.0.0:1",
+            "[::]:1",
+            "224.0.0.1:1",
+            "[ff02::1]:1",
+            "255.255.255.255:1",
+            "[::ffff:0.0.0.0]:1",
+            "[::ffff:239.1.2.3]:1",
+            "[::ffff:255.255.255.255]:1",
+        ];
+        for a in bad {
+            let a: SocketAddr = a.parse().unwrap();
+            assert_eq!(relay.handle(a, &[0xff], t0), Verdict::Drop(Reason::InvalidSource), "{a}");
+        }
+        let fine: SocketAddr = "[::ffff:192.0.2.1]:1".parse().unwrap();
+        assert_eq!(relay.handle(fine, &[0xff], t0), Verdict::Drop(Reason::Malformed));
+        assert_eq!(relay.metrics().rejected(Reason::InvalidSource), bad.len() as u64);
     }
 }

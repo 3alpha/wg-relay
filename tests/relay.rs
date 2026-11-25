@@ -71,7 +71,12 @@ impl W {
 
     /// Where the relay forwarded the datagram, if anywhere.
     fn fwd(&mut self, src: &str, pkt: &[u8]) -> Option<SocketAddr> {
-        match self.relay.handle(addr(src), pkt, Instant::now()) {
+        self.fwd_at(src, pkt, Instant::now())
+    }
+
+    /// `fwd`, with the datagram arriving at `now`.
+    fn fwd_at(&mut self, src: &str, pkt: &[u8], now: Instant) -> Option<SocketAddr> {
+        match self.relay.handle(addr(src), pkt, now) {
             Verdict::Forward(dst) => Some(dst),
             Verdict::Consumed | Verdict::Drop(_) => None,
         }
@@ -99,10 +104,21 @@ fn hs(w: &mut W, it: &mut Tunn, ia: &str, rt: &mut Tunn, ra: &str) -> [Option<So
 
 /// Send a ping through the relay; returns where it went (and checks it decrypts).
 fn data(w: &mut W, from: &mut Tunn, fa: &str, to: &mut Tunn) -> Option<SocketAddr> {
+    data_at(w, from, fa, to, Instant::now())
+}
+
+/// `data`, with the packet arriving at the relay at `now`.
+fn data_at(
+    w: &mut W,
+    from: &mut Tunn,
+    fa: &str,
+    to: &mut Tunn,
+    now: Instant,
+) -> Option<SocketAddr> {
     let p = ping([10, 99, 0, 11], [10, 99, 0, 1]);
     let pkt = encrypt(from, &p);
     assert_eq!(pkt[0], 4, "sender has no session");
-    let dst = w.fwd(fa, &pkt)?;
+    let dst = w.fwd_at(fa, &pkt, now)?;
     let mut buf = vec![0u8; 2048];
     match to.decapsulate(None, &pkt, &mut buf) {
         TunnResult::WriteToTunnelV4(got, _) => assert_eq!(got, &p[..]),
@@ -123,6 +139,14 @@ fn spoofed(i: u32) -> SocketAddr {
 /// The index a handshake message announces as its sender.
 fn sender_idx(pkt: &[u8]) -> u32 {
     u32::from_le_bytes(pkt[4..8].try_into().unwrap())
+}
+
+/// A cookie-reply-shaped datagram for `receiver`.
+fn cookie(receiver: u32) -> Vec<u8> {
+    let mut p = vec![0u8; 64];
+    p[0] = 3;
+    p[4..8].copy_from_slice(&receiver.to_le_bytes());
+    p
 }
 
 #[test]
@@ -462,4 +486,73 @@ fn pending_flood_aimed_at_one_peer_evicts_only_its_oldest() {
     assert_eq!(w.fwd(SRV2, &reply(&mut oc2, &c2_init).unwrap()), Some(addr(C2)));
     // c1's earlier session, c2's new one and QUOTA flood entries remain.
     assert_eq!(w.relay.session_count(), 2 + 2 + QUOTA as usize);
+    assert_eq!(w.relay.metrics().pending_evicted, u64::from(QUOTA), "c1's entry and the flood's");
+}
+
+#[test]
+fn open_session_expires_on_time_however_busy() {
+    let mut w = world();
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    let opened = Instant::now();
+    let at = |s: u64| opened + Duration::from_secs(s);
+    for s in (10..200).step_by(10).chain([199]) {
+        assert_eq!(data_at(&mut w, &mut c1s, C1, &mut sc1, at(s)), Some(addr(SRV)), "{s} s");
+        assert_eq!(data_at(&mut w, &mut sc1, SRV, &mut c1s, at(s)), Some(addr(C1)), "{s} s");
+    }
+    // WireGuard has rekeyed by now and never uses this session's keys again.
+    assert_eq!(data_at(&mut w, &mut c1s, C1, &mut sc1, at(200)), None);
+    assert_eq!(data_at(&mut w, &mut sc1, SRV, &mut c1s, at(200)), None);
+    assert_eq!(w.n(Reason::UnknownIndex), 2);
+}
+
+#[test]
+fn cookie_replies_do_not_extend_a_pending_session() {
+    let mut w = world();
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    let t0 = Instant::now();
+    let init = initiation(&mut c1s);
+    assert_eq!(w.fwd_at(C1, &init, t0), Some(addr(SRV)));
+    let reply_cookie = cookie(sender_idx(&init));
+    for s in [1, 5, 9] {
+        let t = t0 + Duration::from_secs(s);
+        assert_eq!(w.fwd_at(SRV, &reply_cookie, t), Some(addr(C1)), "{s} s");
+    }
+    let t = t0 + Duration::from_secs(10);
+    assert_eq!(w.fwd_at(SRV, &reply_cookie, t), None);
+    assert_eq!(w.fwd_at(SRV, &reply(&mut sc1, &init).unwrap(), t), None, "too late to open");
+    assert_eq!(w.n(Reason::UnknownIndex), 2);
+}
+
+#[test]
+fn resent_initiation_cannot_reset_an_open_session() {
+    let mut w = world();
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    let init = initiation(&mut c1s);
+    // While pending, a duplicate initiation is forwarded again.
+    assert_eq!(w.fwd(C1, &init), Some(addr(SRV)));
+    assert_eq!(w.fwd(C1, &init), Some(addr(SRV)));
+    let resp = reply(&mut sc1, &init).unwrap();
+    assert_eq!(w.fwd(SRV, &resp), Some(addr(C1)));
+    let ka = reply(&mut c1s, &resp).unwrap();
+    assert_eq!(w.fwd(C1, &ka), Some(addr(SRV)));
+    reply(&mut sc1, &ka);
+    // Once open, neither a replay of it nor a new initiation reusing its index
+    // may turn the entry back into a pending one or restart its lifetime.
+    let reuse = with_sender(&initiation(&mut c1s), sender_idx(&init), &w.srv.pk);
+    assert_eq!(w.fwd(C1, &init), None);
+    assert_eq!(w.fwd(C1, &reuse), None);
+    assert_eq!(w.n(Reason::IndexInUse), 2);
+    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(C1)));
+}
+
+#[test]
+fn ipv4_mapped_source_is_a_normal_peer() {
+    let mut w = world();
+    let mapped = "[::ffff:198.51.100.11]:40001";
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    assert_eq!(hs(&mut w, &mut c1s, mapped, &mut sc1, SRV), ok3(SRV, mapped));
+    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(mapped)));
+    assert_eq!(w.fwd("[::ffff:255.255.255.255]:40001", &initiation(&mut c1s)), None);
+    assert_eq!(w.n(Reason::InvalidSource), 1);
 }

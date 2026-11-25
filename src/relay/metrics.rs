@@ -10,6 +10,10 @@ pub struct Metrics {
     pub tunnel_rx: u64,
     pub tunnel_tx: u64,
     pub send_errors: u64,
+    pub recv_errors: u64,
+    /// Pending entries evicted by newer initiations to the same listed peer;
+    /// a steady rise means a flood aimed at that peer.
+    pub pending_evicted: u64,
     rejects: [u64; Reason::COUNT],
 }
 
@@ -33,8 +37,15 @@ impl fmt::Display for Metrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "rx={} forwarded={} tunnel_rx={} tunnel_tx={} send_errors={}",
-            self.rx, self.forwarded, self.tunnel_rx, self.tunnel_tx, self.send_errors
+            "rx={} forwarded={} tunnel_rx={} tunnel_tx={} send_errors={} recv_errors={} \
+             pending_evicted={}",
+            self.rx,
+            self.forwarded,
+            self.tunnel_rx,
+            self.tunnel_tx,
+            self.send_errors,
+            self.recv_errors,
+            self.pending_evicted
         )?;
         for r in Reason::ALL.iter().filter(|r| self.rejected(**r) > 0) {
             write!(f, " reject.{r}={}", self.rejected(*r))?;

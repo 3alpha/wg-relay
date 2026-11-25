@@ -21,6 +21,7 @@ macro_rules! reasons {
 }
 
 reasons! {
+    InvalidSource => "invalid_source",
     Malformed => "malformed",
     RateLimited => "rate_limited",
     HandshakeBudget => "handshake_budget",
@@ -30,6 +31,8 @@ reasons! {
     PeerNotRegistered => "peer_not_registered",
     Loop => "loop",
     TooManyPending => "too_many_pending",
+    TooManySessions => "too_many_sessions",
+    PeerQuota => "peer_quota",
     IndexInUse => "index_in_use",
     UnknownIndex => "unknown_index",
     WrongSource => "wrong_source",

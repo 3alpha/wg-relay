@@ -77,7 +77,12 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
                         send(&sock, &mut relay, &buf[..n], dst).await;
                     }
                 }
-                Err(e) => warn!(error = %e, "recv failed"),
+                // Counted and at debug: whether ICMP errors surface here depends on
+                // the platform and socket options, so a remote host may drive it.
+                Err(e) => {
+                    relay.record_recv_error();
+                    debug!(error = %e, "recv failed");
+                }
             },
             _ = timers.tick() => relay.tick(Instant::now()),
             _ = stats.tick() => {
@@ -102,10 +107,11 @@ async fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
     Ok(())
 }
 
-/// Send one datagram; failures are logged and counted, never fatal.
+/// Send one datagram; failures are counted and logged at debug, never fatal,
+/// since a peer can make them happen at packet rate (e.g. an unreachable `dst`).
 async fn send(sock: &UdpSocket, relay: &mut Relay, pkt: &[u8], dst: SocketAddr) {
     if let Err(e) = sock.send_to(pkt, dst).await {
         relay.record_send_error();
-        warn!(%dst, error = %e, "send failed");
+        debug!(%dst, error = %e, "send failed");
     }
 }

@@ -11,7 +11,7 @@ impl fmt::Display for Summary<'_> {
         writeln!(f, "listen       {}", cfg.listen)?;
         writeln!(f, "relay key    {}", cfg.private_key.public_key())?;
         writeln!(f, "tunnel ip    {}", cfg.tunnel_ip)?;
-        writeln!(f, "init rate    {} per source IP", cfg.handshake_rate)?;
+        writeln!(f, "init rate    {} per source (IPv4 address or IPv6 /64)", cfg.handshake_rate)?;
         for p in &cfg.peers {
             writeln!(f, "peer {:<12} {}", p.name, p.pubkey)?;
         }
