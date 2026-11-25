@@ -213,11 +213,31 @@ impl SessionTable {
     }
 }
 
+/// Tokens earned at a steady rate, up to a cap.
+#[derive(Debug, Clone, Copy)]
+struct Bucket {
+    tokens: f64,
+    last: Instant,
+}
+
+impl Bucket {
+    fn full(burst: f64, now: Instant) -> Self {
+        Bucket { tokens: burst, last: now }
+    }
+
+    /// Add the tokens earned since the last refill.
+    fn refill(&mut self, now: Instant, per_sec: f64, burst: f64) {
+        let earned = now.saturating_duration_since(self.last).as_secs_f64() * per_sec;
+        self.tokens = (self.tokens + earned).min(burst);
+        self.last = now;
+    }
+}
+
 /// Token bucket per source IP, for handshake initiations.
 pub struct RateLimiter {
     burst: f64,
     per_sec: f64,
-    buckets: HashMap<IpAddr, (f64, Instant)>,
+    buckets: HashMap<IpAddr, Bucket>,
 }
 
 impl RateLimiter {
@@ -231,13 +251,11 @@ impl RateLimiter {
     }
 
     pub fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
-        let (tokens, last) = self.buckets.entry(ip).or_insert((self.burst, now));
-        let refill = now.saturating_duration_since(*last).as_secs_f64() * self.per_sec;
-        *tokens = (*tokens + refill).min(self.burst);
-        *last = now;
-        let ok = *tokens >= 1.0;
+        let b = self.buckets.entry(ip).or_insert(Bucket::full(self.burst, now));
+        b.refill(now, self.per_sec, self.burst);
+        let ok = b.tokens >= 1.0;
         if ok {
-            *tokens -= 1.0;
+            b.tokens -= 1.0;
         }
         ok
     }
@@ -246,7 +264,35 @@ impl RateLimiter {
     pub fn prune(&mut self, now: Instant) {
         let full_after = self.burst / self.per_sec;
         self.buckets
-            .retain(|_, (_, last)| now.saturating_duration_since(*last).as_secs_f64() < full_after);
+            .retain(|_, b| now.saturating_duration_since(b.last).as_secs_f64() < full_after);
+    }
+}
+
+/// Global budget for CPU work spent on unauthenticated handshakes, so a flood
+/// of them cannot starve forwarding. Work is charged once it is done, so the
+/// budget can go into debt by one handshake; the burst is one second's worth.
+pub struct WorkBudget {
+    per_sec: f64,
+    bucket: Option<Bucket>,
+}
+
+impl WorkBudget {
+    pub fn new(per_sec: f64) -> Self {
+        WorkBudget { per_sec, bucket: None }
+    }
+
+    /// Is there budget left for more work?
+    pub fn available(&mut self, now: Instant) -> bool {
+        let b = self.bucket.get_or_insert(Bucket::full(self.per_sec, now));
+        b.refill(now, self.per_sec, self.per_sec);
+        b.tokens > 0.0
+    }
+
+    /// Charge work already done.
+    pub fn spend(&mut self, work: usize) {
+        if let Some(b) = &mut self.bucket {
+            b.tokens -= work as f64;
+        }
     }
 }
 
@@ -379,6 +425,28 @@ mod tests {
         assert!(r.remove(&key(3)));
         assert!(!r.remove(&key(3)));
         assert_eq!(r.addr(&key(3), t0), None);
+    }
+
+    #[test]
+    fn work_budget_allows_one_overdraft_then_refills() {
+        let t0 = Instant::now();
+        let mut b = WorkBudget::new(10.0);
+        let spent: Vec<bool> = (0..5)
+            .map(|_| {
+                let ok = b.available(t0);
+                if ok {
+                    b.spend(3);
+                }
+                ok
+            })
+            .collect();
+        assert_eq!(spent, [true, true, true, true, false], "10 -> 7 -> 4 -> 1 -> -2");
+        assert!(!b.available(t0 + Duration::from_millis(100)), "-1");
+        assert!(b.available(t0 + Duration::from_millis(300)), "+1");
+        b.spend(1000);
+        assert!(b.available(t0 + secs(200)), "refills up to the burst");
+        b.spend(10);
+        assert!(!b.available(t0 + secs(200)), "burst is one second's worth");
     }
 
     #[test]

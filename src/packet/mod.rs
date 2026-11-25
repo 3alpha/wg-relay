@@ -2,8 +2,8 @@
 
 use std::fmt;
 
-use blake2::digest::{KeyInit, Mac, consts::U16};
-use blake2::{Blake2s256, Blake2sMac, Digest};
+use blake2s_simd::Params;
+use blake2s_simd::many::{HashManyJob, hash_many};
 
 pub mod error;
 pub use error::ParseError;
@@ -15,6 +15,9 @@ pub const DATA_MIN_LEN: usize = 32;
 /// Offset of mac1 = number of bytes the MAC covers.
 const INIT_MAC1_OFF: usize = 116;
 const RESP_MAC1_OFF: usize = 60;
+const MAC1_LEN: usize = 16;
+/// Keys tried per SIMD batch: the widest lane count blake2s_simd uses (AVX2).
+const MAC1_BATCH: usize = 8;
 
 /// A WireGuard session index (`sender_idx` / `receiver_idx`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,27 +104,63 @@ pub fn parse(b: &[u8]) -> Result<Packet, ParseError> {
     }
 }
 
-pub type Mac1Key = [u8; 32];
+/// The mac1 key of one public key, BLAKE2s-256("mac1----" || pubkey), ready
+/// for keyed hashing.
+#[derive(Clone)]
+pub struct Mac1Key(Params);
 
-/// mac1 key = BLAKE2s-256("mac1----" || recipient_pubkey).
-pub fn mac1_key(pubkey: &[u8; 32]) -> Mac1Key {
-    let mut h = Blake2s256::new();
-    h.update(b"mac1----");
-    h.update(pubkey);
-    h.finalize().into()
+impl Mac1Key {
+    pub fn new(pubkey: &[u8; 32]) -> Self {
+        let key = Params::new().to_state().update(b"mac1----").update(pubkey).finalize();
+        Mac1Key(Params::new().hash_length(MAC1_LEN).key(key.as_bytes()).clone())
+    }
+
+    /// The mac1 of a message whose first `covered` bytes the MAC protects.
+    pub fn mac(&self, covered: &[u8]) -> [u8; MAC1_LEN] {
+        let mut out = [0; MAC1_LEN];
+        out.copy_from_slice(self.0.hash(covered).as_bytes());
+        out
+    }
+
+    /// True if `pkt` is an initiation or response whose mac1 was made for the
+    /// holder of this key. Constant-time comparison.
+    pub fn matches(&self, pkt: &[u8]) -> bool {
+        mac1_parts(pkt).is_some_and(|(covered, tag)| self.0.hash(covered) == *tag)
+    }
 }
 
-/// True if `pkt` is an initiation or response whose mac1 was made for the
-/// holder of the pubkey behind `key`. Constant-time comparison.
-pub fn mac1_matches(key: &Mac1Key, pkt: &[u8]) -> bool {
+/// Split a handshake message into the bytes mac1 covers and mac1 itself.
+fn mac1_parts(pkt: &[u8]) -> Option<(&[u8], &[u8])> {
     let off = match (pkt.first(), pkt.len()) {
         (Some(1), INIT_LEN) => INIT_MAC1_OFF,
         (Some(2), RESP_LEN) => RESP_MAC1_OFF,
-        _ => return false,
+        _ => return None,
     };
-    let Ok(mut mac) = <Blake2sMac<U16> as KeyInit>::new_from_slice(key) else {
-        return false;
-    };
-    mac.update(&pkt[..off]);
-    mac.verify_slice(&pkt[off..off + 16]).is_ok()
+    Some((&pkt[..off], &pkt[off..off + MAC1_LEN]))
+}
+
+/// The outcome of searching keys for the one a packet's mac1 was made for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mac1Search {
+    /// Index of the matching key.
+    pub found: Option<usize>,
+    /// How many keys were hashed, the cost of the search.
+    pub tried: usize,
+}
+
+/// Find the key `pkt`'s mac1 was made for, hashing several keys at once with SIMD.
+pub fn find_mac1(keys: &[Mac1Key], pkt: &[u8]) -> Mac1Search {
+    let mut search = Mac1Search { found: None, tried: 0 };
+    let Some((covered, tag)) = mac1_parts(pkt) else { return search };
+    for (n, batch) in keys.chunks(MAC1_BATCH).enumerate() {
+        let mut jobs: [Option<HashManyJob<'_>>; MAC1_BATCH] =
+            std::array::from_fn(|i| batch.get(i).map(|k| HashManyJob::new(&k.0, covered)));
+        hash_many(jobs.iter_mut().flatten());
+        search.tried += batch.len();
+        if let Some(i) = jobs.iter().flatten().position(|j| j.to_hash() == *tag) {
+            search.found = Some(n * MAC1_BATCH + i);
+            break;
+        }
+    }
+    search
 }

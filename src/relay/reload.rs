@@ -3,10 +3,10 @@ use rand_core::{OsRng, RngCore};
 use tracing::{info, warn};
 use x25519_dalek::PublicKey;
 
-use super::{PeerState, Relay};
+use super::{Mac1Index, PeerState, Relay};
 use crate::config::Config;
 use crate::key::PeerKey;
-use crate::packet::{self, IdxPrefix};
+use crate::packet::{IdxPrefix, Mac1Key};
 
 impl Relay {
     /// Apply a (re)loaded config. Removed peers lose their registrations, and
@@ -23,13 +23,12 @@ impl Relay {
                 Some(o) => o.tunn,
                 None => Box::new(self.new_tunn(p.pubkey)),
             };
-            let state = PeerState {
-                name: p.name.clone(),
-                mac1: packet::mac1_key(p.pubkey.as_bytes()),
-                tunn,
-            };
-            self.peers.insert(p.pubkey, state);
+            self.peers.insert(p.pubkey, PeerState { name: p.name.clone(), tunn });
         }
+        self.mac1 = Mac1Index {
+            peers: cfg.peers.iter().map(|p| p.pubkey).collect(),
+            keys: cfg.peers.iter().map(|p| Mac1Key::new(p.pubkey.as_bytes())).collect(),
+        };
         for o in old.values() {
             info!(peer = %o.name, "peer removed from config");
         }

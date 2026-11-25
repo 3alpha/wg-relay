@@ -20,7 +20,7 @@ use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use wg_relay::key::{KeyError, PeerKey, PrivateKey};
-use wg_relay::packet;
+use wg_relay::packet::Mac1Key;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const USAGE: &str = "usage: pcap_check <pcap> <relay_ip:port> <relay_sk_b64> <dest_sk_b64> [marker_hex]\n\
@@ -134,7 +134,7 @@ fn verify(args: &[String]) -> Result<bool, CheckError> {
     let relay: SocketAddrV4 = relay.parse()?;
     let (relay_sk, dest_sk) = (secret("relay", relay_sk)?, secret("destination", dest_sk)?);
     let (relay_pk, dest_pk) = (PublicKey::from(&relay_sk), PublicKey::from(&dest_sk));
-    let relay_mac1 = packet::mac1_key(relay_pk.as_bytes());
+    let relay_mac1 = Mac1Key::new(relay_pk.as_bytes());
     let marker = match rest {
         [] => None,
         [hex] => Some(parse_marker(hex)?),
@@ -152,9 +152,8 @@ fn verify(args: &[String]) -> Result<bool, CheckError> {
         if p.dst == relay {
             inbound.entry(&p.payload).or_default().push(p.src);
         }
-        let is_fwd_init = p.dst == relay
-            && p.payload.first() == Some(&1)
-            && !packet::mac1_matches(&relay_mac1, &p.payload);
+        let is_fwd_init =
+            p.dst == relay && p.payload.first() == Some(&1) && !relay_mac1.matches(&p.payload);
         if let (true, Ok(Packet::HandshakeInit(h))) =
             (is_fwd_init, Tunn::parse_incoming_packet(&p.payload))
         {

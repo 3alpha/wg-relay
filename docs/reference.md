@@ -21,7 +21,7 @@ Each listed peer has the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` 
 
 ### Forwarding rules
 
-Every initiation is rate-limited per source IP first.
+Every initiation is rate-limited per source IP first, then checked against the global handshake budget (below).
 
 **Type 1, initiation** (`sender_idx` must not be in a relay prefix):
 
@@ -37,6 +37,14 @@ The relay does not check who the listed peer accepted. Its own WireGuard peer li
 
 **Types 3 and 4** (cookie reply and data) are forwarded only from `expected_src`. Data requires an `open` session. A cookie reply may also pass on a pending one, so a peer under load can answer an initiation.
 
+### Handshake budget
+
+Initiations are unauthenticated, so their cost must be bounded. Scanning for the destination costs one keyed BLAKE2s per listed key, with eight keys hashed per SIMD batch, and a registration attempt costs an X25519 operation, about as much as 400 key checks, before the sender is known. A global token bucket, `HANDSHAKE_WORK_PER_SEC` = 1,000,000 mac1 checks per second with a one-second burst, is checked before that work and charged after it: a scan costs the number of keys tried, a registration attempt 400. When it is empty, initiations are dropped cheaply (`handshake_budget`), so forwarding continues at full speed during a flood.
+
+Legitimate load is about `sessions × listed peers / 240` checks per second: every session rekeys every 2 minutes, and a scan tries half the keys on average. The default allows, for example, 1,000 listed peers with 240,000 sessions, or 10,000 with 24,000.
+
+### Other rules
+
 The relay never sends cookie replies (or anything else) for forwarded traffic. Datagrams are parsed with explicit size checks: exact sizes for types 1–3, at least 32 B for data, and the reserved bytes must be zero. Nothing on the forwarding path can panic. This is covered by a 10 000-case mutation test.
 
 ## Rejects and metrics
@@ -47,6 +55,7 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 |---|---|
 | `malformed` | wrong size, type or reserved bytes |
 | `rate_limited` | the source IP exceeded `handshake_rate_per_ip` |
+| `handshake_budget` | the global handshake budget is spent; the initiation was dropped before any mac1 or X25519 work |
 | `reserved_index` | a forwarded handshake picked an index in the relay's range |
 | `no_mac1_match` | the initiation is not for any listed peer or the relay |
 | `peer_not_registered` | the target listed peer has no current registration |
@@ -73,12 +82,13 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 * **Each listed peer's own WireGuard peer list is the only authentication**, and strangers' handshakes reach the listed peer (it drops them). The relay learns an unlisted peer's address from the initiation it forwards, so an on-path attacker who replays a peer's fresh initiation from another address first can make that handshake fail. That is a denial of service only.
 * **Unlisted peers cannot receive initiations**: the relay cannot tell which peer such a handshake is for. Clients normally start the handshake, and the side that started a session also does its timed rekeys, so with `PersistentKeepalive` this rarely matters. When the server must send first (e.g. right after it restarts), that traffic waits until the client sends something. List a peer to make it reachable; it then registers like a server.
 * **The relay cannot cap who uses its bandwidth.** A listed peer can accept any number of unlisted peers; only handshakes are rate-limited, per source IP.
-* **WireGuard's cookie defence is weaker behind the relay.** A server under load binds cookies to the sender's address, but it sees every packet coming from the relay, so one cookie obtained through the relay is valid for initiations from any (even spoofed) source. The relay's per-IP rate limit is then the only brake. See [How it works, section 3.5](how-it-works.md#35-under-load-cookies-and-mac2).
+* **WireGuard's cookie defence is weaker behind the relay.** A server under load binds cookies to the sender's address, but it sees every packet coming from the relay, so one cookie obtained through the relay is valid for initiations from any (even spoofed) source. The relay's per-IP rate limit and global handshake budget are then the only brakes. See [How it works, section 3.5](how-it-works.md#35-under-load-cookies-and-mac2).
 * **The per-IP initiation limit is charged before any check**, so someone who can spoof a peer's source IP can use up that peer's budget and delay its handshakes (for a listed peer, including its re-registration).
-* **The per-IP initiation limit is shared** by all hosts behind one NAT address. Many distributed sources can still make the relay do X25519 work on the registration path, and send junk handshakes to listed peers.
+* **The per-IP initiation limit is shared** by all hosts behind one NAT address. Many distributed sources are held back only by the global handshake budget.
+* **A sustained handshake flood delays legitimate handshakes.** They compete with the flood for the global budget: open sessions keep forwarding, but new handshakes and rekeys may be dropped (`handshake_budget`) until the flood ends. The budget is a constant, sized so that a flood keeps the relay well below one core.
 * **Two listed peers cannot register from the same `ip:port`.** The newest claimant wins and a warning is logged.
 * **Index collisions** between independent sessions (probability 2⁻³² per pair) make the newer handshake fail once (`index_in_use`); its retry uses a new index.
-* **Single-threaded**, with a linear mac1 scan over the listed peers per handshake. That is fine for thousands of keys.
+* **Single-threaded**, with a mac1 scan over the listed peers per handshake, eight keys per SIMD batch. That is fine for thousands of keys.
 * The ICMP responder is IPv4-only, and metrics are logged rather than exported.
 
 ## The namespace integration test
@@ -105,7 +115,7 @@ The test runs a server, two clients the server knows and a stranger. `relay.toml
 | File | Purpose |
 |---|---|
 | `src/packet/` | wire-format parsing, size checks, mac1, `SessionIdx` |
-| `src/tables.rs` | registry, session table, per-IP token bucket |
+| `src/tables.rs` | registry, session table, per-IP token bucket, handshake budget |
 | `src/relay/` | `Relay::handle` (no I/O); `forward.rs` forwarding rules, `registration.rs` registration tunnels, `reload.rs`, `reason.rs`, `metrics.rs` |
 | `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
 | `src/main.rs` | parse the CLI, set up logging, report errors |

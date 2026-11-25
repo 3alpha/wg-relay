@@ -6,7 +6,7 @@ use boringtun::noise::rate_limiter::RateLimiter;
 use boringtun::noise::{Tunn, TunnResult};
 use common::*;
 use std::sync::Arc;
-use wg_relay::packet::{self, Packet, ParseError};
+use wg_relay::packet::{self, Mac1Key, Mac1Search, Packet, ParseError, find_mac1};
 
 #[test]
 fn parses_real_handshake_and_data() {
@@ -84,26 +84,44 @@ fn mac1_matches_intended_recipient_only() {
     let (mut ta, mut tb) = (tunn(&a, &b), tunn(&b, &a));
     let (init, resp, ka) = handshake(&mut ta, &mut tb);
     let (ka_key, kb, kc) = (
-        packet::mac1_key(a.pk.as_bytes()),
-        packet::mac1_key(b.pk.as_bytes()),
-        packet::mac1_key(c.pk.as_bytes()),
+        Mac1Key::new(a.pk.as_bytes()),
+        Mac1Key::new(b.pk.as_bytes()),
+        Mac1Key::new(c.pk.as_bytes()),
     );
 
-    assert!(packet::mac1_matches(&kb, &init));
-    assert!(!packet::mac1_matches(&ka_key, &init));
-    assert!(!packet::mac1_matches(&kc, &init));
-    assert!(packet::mac1_matches(&ka_key, &resp));
-    assert!(!packet::mac1_matches(&kb, &resp));
-    assert!(!packet::mac1_matches(&kb, &ka), "data packets have no mac1");
+    assert!(kb.matches(&init));
+    assert!(!ka_key.matches(&init));
+    assert!(!kc.matches(&init));
+    assert!(ka_key.matches(&resp));
+    assert!(!kb.matches(&resp));
+    assert!(!kb.matches(&ka), "data packets have no mac1");
+    assert_eq!(kb.mac(&init[..116]), init[116..132], "mac() computes the same mac1");
 
     for i in [0, 4, 50, 115, 116, 131] {
         let mut t = init.clone();
         t[i] ^= 1;
-        assert!(!packet::mac1_matches(&kb, &t), "tamper at byte {i}");
+        assert!(!kb.matches(&t), "tamper at byte {i}");
     }
     // mac2 is outside the mac1 coverage.
     let mut t = init.clone();
     t[140] ^= 1;
-    assert!(packet::mac1_matches(&kb, &t));
-    assert!(!packet::mac1_matches(&kb, &init[..147]));
+    assert!(kb.matches(&t));
+    assert!(!kb.matches(&init[..147]));
+}
+
+#[test]
+fn find_mac1_searches_in_batches_and_counts_work() {
+    let target = key();
+    let mut t = tunn(&key(), &target);
+    let init = initiation(&mut t);
+    let mut keys: Vec<Mac1Key> = (0..20).map(|_| Mac1Key::new(key().pk.as_bytes())).collect();
+    assert_eq!(find_mac1(&keys, &init), Mac1Search { found: None, tried: 20 });
+    // Second batch of 8: the whole batch is hashed.
+    keys[13] = Mac1Key::new(target.pk.as_bytes());
+    assert_eq!(find_mac1(&keys, &init), Mac1Search { found: Some(13), tried: 16 });
+    keys.swap(13, 2);
+    assert_eq!(find_mac1(&keys, &init), Mac1Search { found: Some(2), tried: 8 });
+    assert_eq!(find_mac1(&keys[..3], &init), Mac1Search { found: Some(2), tried: 3 });
+    assert_eq!(find_mac1(&keys, &init[..100]), Mac1Search { found: None, tried: 0 });
+    assert_eq!(find_mac1(&[], &init), Mac1Search { found: None, tried: 0 });
 }

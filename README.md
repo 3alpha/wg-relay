@@ -20,8 +20,8 @@ The relay is configured with nothing more than the public keys of the peers that
 - **End-to-end encryption is preserved.** The relay holds no session keys and forwards datagrams byte for byte. A compromised relay can drop traffic, but cannot read or modify it, and cannot add peers.
 - **Many networks on one relay.** Adding a network means adding its server's public key. Networks are isolated from one another by their own WireGuard peer lists.
 - **Minimal configuration.** The relay lists only the peers that must be reachable. Who may connect to them is decided where it always is in WireGuard: in each peer's own config.
-- **Abuse resistance.** Only listed peers can register, and a session opens only when a listed peer answers. Handshakes are rate-limited per source IP, and the relay cannot be used as a reflector.
-- **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 1,500 lines of Rust.
+- **Abuse resistance.** Only listed peers can register, and a session opens only when a listed peer answers. Handshakes are rate-limited per source IP and by a global CPU budget, so a flood cannot stall forwarding, and the relay cannot be used as a reflector.
+- **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 1,600 lines of Rust.
 
 ## How it works
 
@@ -51,7 +51,7 @@ pubkey = "<bob's server public key>"
 - **Clients are not listed.** Each network's owner adds and removes their own clients in their server's WireGuard config, without involving the relay operator.
 - **Private keys stay private.** The relay operator never sees any network's private keys, and cannot read or join any network's traffic.
 - **Independent addressing.** The relay never sees the addresses inside the tunnels, so networks may use overlapping subnets. The only shared address is the relay's own `tunnel_ip` (`10.99.0.254` by default), which no network should assign to a peer.
-- **Scale.** The relay tests each handshake against the listed keys in turn, which is fast enough for thousands of keys.
+- **Scale.** The relay tests each handshake against the listed keys, eight at a time with SIMD, which is fast enough for thousands of keys.
 
 Changes take effect on `SIGHUP`, without a restart and without disturbing other networks.
 
@@ -153,7 +153,8 @@ The relay's own private key opens only the registration tunnels, which carry kee
 - **A single relay is a single point of failure.** There is no failover.
 - **A listed peer cannot initiate a handshake to an unlisted peer.** Clients normally initiate handshakes themselves, so this rarely matters; a peer that must be reachable can be listed.
 - **The relay cannot cap who uses its bandwidth.** A listed peer can accept any number of unlisted peers; only handshakes are rate-limited.
-- **WireGuard's handshake flood protection is weaker behind the relay.** The relay's per-IP rate limit compensates in part; see [section 3.5 of the guide](docs/how-it-works.md#35-under-load-cookies-and-mac2).
+- **WireGuard's handshake flood protection is weaker behind the relay.** The relay's per-IP rate limit and global handshake budget compensate in part; see [section 3.5 of the guide](docs/how-it-works.md#35-under-load-cookies-and-mac2).
+- **A sustained handshake flood delays new sessions.** Existing sessions keep forwarding, but legitimate handshakes compete with the flood for the global budget.
 - **The relay is single-threaded.** Ping replies are IPv4-only, and metrics are written to the log rather than exported.
 
 The [reference](docs/reference.md#limitations) gives the complete list with the reasoning behind each item, and the [guide's security model](docs/how-it-works.md#15-security-model) covers threats and defences.
