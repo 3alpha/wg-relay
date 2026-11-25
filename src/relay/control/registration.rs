@@ -5,8 +5,9 @@ use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::{Tunn, TunnResult};
 use tracing::{debug, info};
 
-use super::{Accepted, Control, PeerState, REGISTRATION_WORK, Reason};
+use super::{Control, PeerState, REGISTRATION_WORK};
 use crate::key::PeerKey;
+use crate::relay::{Accepted, Reason};
 
 /// Whether a datagram on a registration tunnel proved its peer live at the source address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

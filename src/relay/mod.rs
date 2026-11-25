@@ -19,7 +19,7 @@ mod metrics;
 mod reason;
 
 use control::Control;
-use forwarder::Lookup;
+use forwarder::Triage;
 pub use metrics::Metrics;
 use reason::Accepted;
 pub use reason::{Reason, Verdict};
@@ -78,14 +78,11 @@ impl Relay {
     /// Decide one datagram, counting and logging the outcome: the forwarding
     /// half first, then the control half for what the forwarding half hands over.
     pub fn handle(&mut self, src: SocketAddr, datagram: &[u8], now: Instant) -> Verdict {
-        let outcome = match self.control.forwarder().lookup(src, datagram, now) {
-            Ok(Lookup::ToControl(message)) => {
-                return self.control.handle(src, datagram, message, now);
-            }
-            Ok(Lookup::Forward(dst)) => Ok(Accepted::Forward(dst)),
-            Err(reason) => Err(reason),
-        };
-        settle(&mut self.counters, src, outcome)
+        match self.control.forwarder().triage(src, datagram, now) {
+            Triage::Forward(dst) => settle(&mut self.counters, src, Ok(Accepted::Forward(dst))),
+            Triage::Drop(reason) => settle(&mut self.counters, src, Err(reason)),
+            Triage::ToControl(message) => self.control.handle(src, datagram, message, now),
+        }
     }
 
     /// Run the registration tunnels' timers and expire soft state. Call a few times a second.

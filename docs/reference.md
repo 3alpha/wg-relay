@@ -81,7 +81,7 @@ The loop handles one batch per wake-up and charges the runtime's cooperative bud
 
 ## Rejects and metrics
 
-Every rejected datagram increments a per-reason counter and logs `reject reason=<reason> src=<addr>` at `debug` level. Per-packet logs are kept at debug because otherwise anyone could flood the log. Counters are logged every 60 s and at shutdown, for example `rx=74 forwarded=60 … pending_evicted=0 reject.peer_not_registered=1 reject.unknown_index=4`. Besides the rejects, `send_errors` and `recv_errors` count socket failures (logged individually only at `debug`, since a remote host can cause them at packet rate), and `pending_evicted` counts pending entries evicted by a newer initiation to the same listed peer: a steady rise means a flood aimed at one peer, which otherwise shows up only as later `unknown_index` drops.
+Every rejected datagram increments a per-reason counter and logs `reject reason=<reason> src=<addr>` at `debug` level. Per-packet logs are kept at debug because otherwise anyone could flood the log. Counters are logged every 60 s and at shutdown, for example `rx=74 forwarded=60 … pending_evicted=0 reject.peer_not_registered=1 reject.unknown_index=4`. Besides the rejects, `forwarded` counts datagrams forwarded, `tunnel_rx` and `tunnel_tx` count datagrams taken and sent by the registration tunnels, `send_errors` and `recv_errors` count socket failures (logged individually only at `debug`, since a remote host can cause them at packet rate), and `pending_evicted` counts pending entries evicted by a newer initiation to the same listed peer: a steady rise means a flood aimed at one peer, which otherwise shows up only as later `unknown_index` drops.
 
 | Reason | Meaning |
 |---|---|
@@ -175,8 +175,8 @@ What it can show is the relay's cost per datagram and per send, compared between
 | `src/packet/` | wire-format parsing, size checks, mac1, `SessionIdx` |
 | `src/tables/` | soft state: `registry.rs`; `sessions.rs` the session table with fixed lifetimes (`entry.rs`), per-peer quotas and a global cap, its per-peer and pending accounts in `ledger.rs`, and the open-session view it keeps for the forwarding half in `open.rs`; `rate_limit.rs` per-source token buckets; `budget.rs` work budgets |
 | `src/relay/mod.rs` | `Relay` (no I/O): `handle` asks the forwarding half, then the control half; `settle` turns an outcome into a `Verdict` and counts it |
-| `src/relay/forwarder.rs` | the forwarding half: `Forwarder::lookup`, read only |
-| `src/relay/control/` | the control half: `Control` and its dispatch; `forward.rs` forwarding rules, `registration.rs` registration tunnels, `reload.rs`, `timers.rs` tunnel timers and the expiry sweep |
+| `src/relay/forwarder.rs` | the forwarding half: `Forwarder::triage` forwards, drops or hands a datagram to the control half, read only |
+| `src/relay/control/` | the control half: `Control` and its state; `dispatch.rs` the per-source limit, `classify` into one `Class` per case and one `match` over the handlers; `forward.rs` forwarded handshakes and sessions, `registration.rs` registration tunnels, `reload.rs`, `timers.rs` registration tunnel timers and the expiry sweep |
 | `src/relay/reason.rs`, `metrics.rs` | `Reason`, `Verdict` and the counters each half keeps |
 | `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
 | `src/main.rs` | parse the CLI, set up logging, report errors |

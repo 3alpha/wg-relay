@@ -22,11 +22,12 @@ const _: () = {
     shareable::<Forwarder>();
 };
 
-/// What the forwarding half makes of a datagram it does not drop.
+/// The forwarding half's decision on one datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Lookup {
+pub(super) enum Triage {
     /// Send it, unchanged, to this address.
     Forward(SocketAddr),
+    Drop(Reason),
     /// Only the control half can decide: a handshake message, a message to a
     /// registration tunnel, or an index that is not a live open session.
     ToControl(Message),
@@ -37,24 +38,22 @@ impl Forwarder {
         Forwarder { open, reserved: HashSet::new() }
     }
 
-    /// Decide a datagram if open sessions alone can.
-    pub(super) fn lookup(
-        &self,
-        src: SocketAddr,
-        datagram: &[u8],
-        now: Instant,
-    ) -> Result<Lookup, Reason> {
+    /// Forward or drop a datagram if open sessions alone can decide, else hand it on.
+    pub(super) fn triage(&self, src: SocketAddr, datagram: &[u8], now: Instant) -> Triage {
         if !replyable(src) {
-            return Err(Reason::InvalidSource);
+            return Triage::Drop(Reason::InvalidSource);
         }
-        let message = packet::parse(datagram)?;
+        let message = match packet::parse(datagram) {
+            Ok(message) => message,
+            Err(e) => return Triage::Drop(Reason::from(e)),
+        };
         let Some(route) = self.open_route(message, now) else {
-            return Ok(Lookup::ToControl(message));
+            return Triage::ToControl(message);
         };
         if src != route.expected_src {
-            return Err(Reason::WrongSource);
+            return Triage::Drop(Reason::WrongSource);
         }
-        Ok(Lookup::Forward(route.dest))
+        Triage::Forward(route.dest)
     }
 
     /// Find the live open session a transport data message or cookie reply
@@ -147,10 +146,14 @@ mod tests {
         let fwd = setup(t0);
         let later = t0 + SESSION_TTL - Duration::from_secs(1);
         for datagram in [data(OPEN), cookie(OPEN)] {
-            assert_eq!(fwd.lookup(addr(1), &datagram, t0), Ok(Lookup::Forward(addr(2))));
-            assert_eq!(fwd.lookup(addr(1), &datagram, later), Ok(Lookup::Forward(addr(2))));
-            assert_eq!(fwd.lookup(addr(3), &datagram, t0), Err(Reason::WrongSource));
-            assert_eq!(fwd.lookup(addr(2), &datagram, t0), Err(Reason::WrongSource), "reflected");
+            assert_eq!(fwd.triage(addr(1), &datagram, t0), Triage::Forward(addr(2)));
+            assert_eq!(fwd.triage(addr(1), &datagram, later), Triage::Forward(addr(2)));
+            assert_eq!(fwd.triage(addr(3), &datagram, t0), Triage::Drop(Reason::WrongSource));
+            assert_eq!(
+                fwd.triage(addr(2), &datagram, t0),
+                Triage::Drop(Reason::WrongSource),
+                "reflected"
+            );
         }
     }
 
@@ -172,11 +175,7 @@ mod tests {
         ];
         for (datagram, now, what) in cases {
             let message = packet::parse(&datagram).unwrap();
-            assert_eq!(
-                fwd.lookup(addr(1), &datagram, now),
-                Ok(Lookup::ToControl(message)),
-                "{what}"
-            );
+            assert_eq!(fwd.triage(addr(1), &datagram, now), Triage::ToControl(message), "{what}");
         }
     }
 
@@ -185,7 +184,7 @@ mod tests {
         let t0 = Instant::now();
         let fwd = setup(t0);
         let broadcast = SocketAddr::from(([255, 255, 255, 255], 1));
-        assert_eq!(fwd.lookup(broadcast, &data(OPEN), t0), Err(Reason::InvalidSource));
-        assert_eq!(fwd.lookup(addr(1), &data(OPEN)[..20], t0), Err(Reason::Malformed));
+        assert_eq!(fwd.triage(broadcast, &data(OPEN), t0), Triage::Drop(Reason::InvalidSource));
+        assert_eq!(fwd.triage(addr(1), &data(OPEN)[..20], t0), Triage::Drop(Reason::Malformed));
     }
 }

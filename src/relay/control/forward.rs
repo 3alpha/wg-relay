@@ -1,22 +1,11 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use super::{Control, MAX_PENDING, Reason};
+use super::{Control, MAX_PENDING};
 use crate::key::PeerKey;
 use crate::packet::{self, SessionIdx};
+use crate::relay::{Accepted, Reason};
 use crate::tables::{Session, SessionState};
-
-/// The messages routed along a forwarded session by their receiver index,
-/// and what each needs from it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum OnSession {
-    /// Opens a pending session, announcing the responder's index.
-    HandshakeResponse { sender: SessionIdx },
-    /// Passes on a pending or open session.
-    CookieReply,
-    /// Passes on an open session only.
-    TransportData,
-}
 
 impl Control {
     /// Forward a handshake initiation to the registered listed peer its mac1
@@ -27,7 +16,7 @@ impl Control {
         datagram: &[u8],
         sender: SessionIdx,
         now: Instant,
-    ) -> Result<SocketAddr, Reason> {
+    ) -> Result<Accepted, Reason> {
         if self.is_reserved(sender) {
             return Err(Reason::ReservedIndex);
         }
@@ -47,7 +36,74 @@ impl Control {
         if dst == src {
             return Err(Reason::Loop);
         }
-        self.insert_session(sender, Session::pending(src, dst, peer, now))
+        self.insert_session(sender, Session::pending(src, dst, peer, now))?;
+        Ok(Accepted::Forward(dst))
+    }
+
+    /// Forward a handshake response from the listed peer, opening the pending
+    /// session it answers. One response per initiation.
+    pub(super) fn forward_response(
+        &mut self,
+        src: SocketAddr,
+        sender: SessionIdx,
+        receiver: SessionIdx,
+        now: Instant,
+    ) -> Result<Accepted, Reason> {
+        // The expected source is the listed peer's registered address, so only
+        // that peer can open the session.
+        let initiator = self.session_from(src, receiver, now)?;
+        match initiator.state {
+            SessionState::Pending => {}
+            // An open session could otherwise mint new entries.
+            SessionState::Open => return Err(Reason::SessionNotPending),
+        }
+        if self.is_reserved(sender) {
+            return Err(Reason::ReservedIndex);
+        }
+        let responder = Session::open(initiator.expected_src, initiator.dest, initiator.peer, now);
+        self.insert_session(sender, responder)?;
+        self.sessions.open(receiver, now, &mut self.forwarder.open);
+        Ok(Accepted::Forward(initiator.dest))
+    }
+
+    /// Forward a cookie reply. A pending session passes it too, so a peer
+    /// under load can still answer an initiation.
+    pub(super) fn forward_cookie_reply(
+        &self,
+        src: SocketAddr,
+        receiver: SessionIdx,
+        now: Instant,
+    ) -> Result<Accepted, Reason> {
+        let session = self.session_from(src, receiver, now)?;
+        Ok(Accepted::Forward(session.dest))
+    }
+
+    /// Forward transport data on an open session.
+    pub(super) fn forward_data(
+        &self,
+        src: SocketAddr,
+        receiver: SessionIdx,
+        now: Instant,
+    ) -> Result<Accepted, Reason> {
+        let session = self.session_from(src, receiver, now)?;
+        match session.state {
+            SessionState::Pending => Err(Reason::SessionNotOpen),
+            SessionState::Open => Ok(Accepted::Forward(session.dest)),
+        }
+    }
+
+    /// Find the live session `receiver` names, if `src` may send on it.
+    fn session_from(
+        &self,
+        src: SocketAddr,
+        receiver: SessionIdx,
+        now: Instant,
+    ) -> Result<Session, Reason> {
+        let session = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
+        if src != session.expected_src {
+            return Err(Reason::WrongSource);
+        }
+        Ok(session)
     }
 
     /// Is `idx` in a reserved prefix, where forwarded sessions may not go?
@@ -66,60 +122,10 @@ impl Control {
         search.found.map(|i| self.mac1.peers[i]).ok_or(Reason::NoMac1Match)
     }
 
-    /// Store a session and return its counterpart's address, where the
-    /// handshake message that created it goes.
-    fn insert_session(&mut self, idx: SessionIdx, s: Session) -> Result<SocketAddr, Reason> {
+    /// Store a session, counting the pending session it evicts, if any.
+    fn insert_session(&mut self, idx: SessionIdx, s: Session) -> Result<(), Reason> {
         let evicted = self.sessions.insert(idx, s, &mut self.forwarder.open)?;
         self.metrics.pending_evicted += u64::from(evicted.is_some());
-        Ok(s.expected_src)
-    }
-
-    /// Forward along the session `receiver` names: only from its expected
-    /// source, transport data only once it is open, one response per initiation.
-    pub(super) fn forward_on_session(
-        &mut self,
-        src: SocketAddr,
-        receiver: SessionIdx,
-        kind: OnSession,
-        now: Instant,
-    ) -> Result<SocketAddr, Reason> {
-        let session = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
-        // For a handshake response this is the listed peer's registered address,
-        // so only that peer can open the session.
-        if src != session.expected_src {
-            return Err(Reason::WrongSource);
-        }
-        match (kind, session.state) {
-            (OnSession::HandshakeResponse { sender }, SessionState::Pending) => {
-                self.accept_response(receiver, sender, session, now)
-            }
-            // An open session could otherwise mint new entries.
-            (OnSession::HandshakeResponse { .. }, SessionState::Open) => {
-                Err(Reason::SessionNotPending)
-            }
-            (OnSession::TransportData, SessionState::Pending) => Err(Reason::SessionNotOpen),
-            (OnSession::TransportData, SessionState::Open)
-            | (OnSession::CookieReply, SessionState::Pending | SessionState::Open) => {
-                Ok(session.dest)
-            }
-        }
-    }
-
-    /// Open the session a handshake response answers: the responder's index
-    /// gets an open session and the initiator's opens, both living from now.
-    fn accept_response(
-        &mut self,
-        receiver: SessionIdx,
-        sender: SessionIdx,
-        initiator: Session,
-        now: Instant,
-    ) -> Result<SocketAddr, Reason> {
-        if self.is_reserved(sender) {
-            return Err(Reason::ReservedIndex);
-        }
-        let responder = Session::open(initiator.expected_src, initiator.dest, initiator.peer, now);
-        self.insert_session(sender, responder)?;
-        self.sessions.open(receiver, now, &mut self.forwarder.open);
-        Ok(initiator.dest)
+        Ok(())
     }
 }

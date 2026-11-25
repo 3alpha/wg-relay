@@ -5,24 +5,23 @@ use std::time::{Duration, Instant};
 use boringtun::noise::Tunn;
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use super::Metrics;
 use super::forwarder::Forwarder;
-use super::{Accepted, Metrics, Reason, Verdict, settle};
 use crate::config::Config;
 use crate::key::PeerKey;
-use crate::packet::{IdxPrefix, Mac1Key, Message, SessionIdx};
+use crate::packet::{IdxPrefix, Mac1Key};
 use crate::tables::{
     PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, SessionLimits, SessionTable,
     WorkBudget,
 };
 
+mod dispatch;
 mod forward;
 mod registration;
 mod reload;
 #[cfg(test)]
 mod tests;
 mod timers;
-
-use forward::OnSession;
 
 const SCRATCH_LEN: usize = 65536 + 256;
 /// Expiry scans every table, so it runs less often than the registration tunnels' timers.
@@ -161,84 +160,6 @@ impl Control {
         let out = std::mem::take(&mut self.outbox);
         self.metrics.tunnel_tx += out.len() as u64;
         out
-    }
-
-    /// Decide a datagram the forwarding half handed over, counting and logging the outcome.
-    pub(super) fn handle(
-        &mut self,
-        src: SocketAddr,
-        datagram: &[u8],
-        message: Message,
-        now: Instant,
-    ) -> Verdict {
-        let outcome = self.decide(src, datagram, message, now);
-        settle(&mut self.metrics, src, outcome)
-    }
-
-    fn decide(
-        &mut self,
-        src: SocketAddr,
-        datagram: &[u8],
-        message: Message,
-        now: Instant,
-    ) -> Result<Accepted, Reason> {
-        match message {
-            Message::HandshakeInitiation { sender } => {
-                self.route_initiation(src, datagram, sender, now)
-            }
-            Message::HandshakeResponse { sender, receiver } => self.route_by_receiver(
-                src,
-                datagram,
-                receiver,
-                OnSession::HandshakeResponse { sender },
-                now,
-            ),
-            Message::CookieReply { receiver } => {
-                self.route_by_receiver(src, datagram, receiver, OnSession::CookieReply, now)
-            }
-            Message::TransportData { receiver } => {
-                self.route_by_receiver(src, datagram, receiver, OnSession::TransportData, now)
-            }
-        }
-    }
-
-    /// Route a handshake initiation: to a registration tunnel if its mac1 is
-    /// for the relay, otherwise to the listed peer its mac1 names.
-    fn route_initiation(
-        &mut self,
-        src: SocketAddr,
-        datagram: &[u8],
-        sender: SessionIdx,
-        now: Instant,
-    ) -> Result<Accepted, Reason> {
-        if !self.limiter.allow(src.ip(), now) {
-            return Err(Reason::RateLimited);
-        }
-        if !self.relay_mac1.matches(datagram) {
-            return self.forward_initiation(src, datagram, sender, now).map(Accepted::Forward);
-        }
-        self.start_registration_handshake(src, datagram, now)
-    }
-
-    /// Route a message by its receiver index: to the registration tunnel that
-    /// owns the index, otherwise along the session it names.
-    fn route_by_receiver(
-        &mut self,
-        src: SocketAddr,
-        datagram: &[u8],
-        receiver: SessionIdx,
-        kind: OnSession,
-        now: Instant,
-    ) -> Result<Accepted, Reason> {
-        match self.tunnel_owner(receiver) {
-            Some(peer) => self.feed_tunnel(peer, src, datagram, now),
-            None => self.forward_on_session(src, receiver, kind, now).map(Accepted::Forward),
-        }
-    }
-
-    /// Find the listed peer whose registration tunnel owns this index.
-    fn tunnel_owner(&self, idx: SessionIdx) -> Option<PeerKey> {
-        self.reserved.get(&idx.prefix()).copied()
     }
 
     /// Panic unless the session table's accounts are exact and the forwarding
