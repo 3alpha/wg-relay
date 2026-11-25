@@ -1,6 +1,9 @@
 use std::fmt;
 use std::net::SocketAddr;
 
+use crate::packet::ParseError;
+use crate::tables::Refusal;
+
 // Generates the enum, its `ALL` list and its `Display` names from one table,
 // so a new reason cannot be added without a counter name.
 macro_rules! reasons {
@@ -52,11 +55,37 @@ pub enum Verdict {
     Drop(Reason),
 }
 
-impl From<Result<SocketAddr, Reason>> for Verdict {
-    fn from(r: Result<SocketAddr, Reason>) -> Self {
-        match r {
-            Ok(dst) => Verdict::Forward(dst),
+/// What became of a datagram that was not dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Accepted {
+    /// Send it, unchanged, to this address.
+    Forward(SocketAddr),
+    /// Handled by the relay's own registration tunnel.
+    Consumed,
+}
+
+impl From<Result<Accepted, Reason>> for Verdict {
+    fn from(outcome: Result<Accepted, Reason>) -> Self {
+        match outcome {
+            Ok(Accepted::Forward(dst)) => Verdict::Forward(dst),
+            Ok(Accepted::Consumed) => Verdict::Consumed,
             Err(reason) => Verdict::Drop(reason),
+        }
+    }
+}
+
+impl From<ParseError> for Reason {
+    fn from(_: ParseError) -> Self {
+        Reason::Malformed
+    }
+}
+
+impl From<Refusal> for Reason {
+    fn from(refusal: Refusal) -> Self {
+        match refusal {
+            Refusal::IndexInUse => Reason::IndexInUse,
+            Refusal::PeerQuota => Reason::PeerQuota,
+            Refusal::Full => Reason::TooManySessions,
         }
     }
 }

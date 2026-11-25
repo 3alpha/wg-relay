@@ -6,6 +6,8 @@ The exact rules wg-relay follows and its known limitations. For a guided tour wi
 
 `relay.toml` lists the peers that must be reachable, by public key: usually the servers. Listed peers register with the relay; everyone else is unlisted and needs no relay config. One UDP socket carries two kinds of traffic: registration tunnels with listed peers, and forwarded traffic between peers.
 
+Inside, the relay is split into two halves. The **forwarding half** (`Forwarder`) holds only the open sessions (index to destination, expected source and opening time) and the index prefixes of the relay's own tunnels; it forwards data packets and cookie replies on live open sessions, drops what it can judge alone (`invalid_source`, `malformed`, `wrong_source`), never writes, and hands everything else to the control half: handshakes, packets in a relay tunnel's prefix, and indexes that are not a live open session. The **control half** (`Control`) owns everything that changes: listed peers and their tunnels, the registry, the rate limiter, the budgets, the session table with its quotas and lifetimes, reload. It is the forwarding half's only writer: the session table publishes or withdraws an open entry in the same call that changes it, and reload replaces the reserved prefixes, so the two never disagree. Both halves run on the one thread; the split prepares for forwarding on several.
+
 ### Registration (listed peers only)
 
 Each listed peer has the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` and `PersistentKeepalive = 25`. The relay runs one `boringtun::noise::Tunn` per listed peer.
@@ -19,7 +21,7 @@ Each listed peer has the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` 
 
 `receiver_idx → { dest_addr, expected_src_addr, open, since, peer }`, where `since` is when the entry entered its current state and `peer` is the listed peer the session was routed to, used to revoke sessions on reload. **Every type 2, 3 and 4 packet must arrive from `expected_src_addr`.**
 
-Lifetimes are fixed and never extended by traffic. An open entry expires 200 s after its handshake was accepted (`SESSION_TTL`), however busy it is: WireGuard never uses a key older than 180 s (`REJECT_AFTER_TIME`) and has moved to a newer session's indexes by then, so the extra 20 s only cover the round trip. A pending entry (an initiation without an accepted response) expires 10 s after the initiation (`PENDING_TTL`), whatever cookie replies pass through it. The forwarding path for types 3 and 4 only reads the table. Expired entries are removed by a sweep every second.
+Lifetimes are fixed and never extended by traffic. An open entry expires 200 s after its handshake was accepted (`SESSION_TTL`), however busy it is: WireGuard never uses a key older than 180 s (`REJECT_AFTER_TIME`) and has moved to a newer session's indexes by then, so the extra 20 s only cover the round trip. A pending entry (an initiation without an accepted response) expires 10 s after the initiation (`PENDING_TTL`), whatever cookie replies pass through it. Types 3 and 4 are forwarded by the forwarding half, which only reads its copy of the open entries, or, on a pending or unknown index, by the control half, which only reads the table. Expired entries are removed by a sweep every second.
 
 Quotas bound the table:
 
@@ -128,7 +130,7 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 * **A listed peer can fill its own quota.** A malicious or compromised listed peer can answer spoofed initiations aimed at itself with fabricated responses, each creating two open entries for 200 s, until it holds 65,536 entries. That denies new sessions only to itself; other peers have their own quotas, and the global cap needs 14 such peers. Conversely, a listed peer that genuinely carries more than about 16,000 busy sessions reaches its quota (`peer_quota`) and needs `MAX_SESSIONS_PER_PEER` raised.
 * **Two listed peers cannot register from the same `ip:port`.** The newest claimant wins and a warning is logged.
 * **Index collisions** between independent sessions (probability 2⁻³² per pair) make the newer handshake fail once (`index_in_use`); its retry uses a new index.
-* **Single-threaded.** One thread receives, routes and sends, in batches, so one core bounds the forwarding rate. Each handshake also costs a mac1 scan over the listed peers, eight keys per SIMD batch, which is fine for thousands of keys.
+* **Single-threaded.** One thread receives, routes and sends, in batches, so one core bounds the forwarding rate. The split into a read-only forwarding half and a control half prepares for forwarding on several threads. Each handshake also costs a mac1 scan over the listed peers, eight keys per SIMD batch, which is fine for thousands of keys.
 * **Failed GSO sends cost extra sends.** After `EIO` or `EINVAL` from a GSO send (a driver without UDP segmentation offload, for example), GSO stays off until a restart and forwarding continues with one send per datagram. Other failures leave GSO on: to a destination whose path MTU is smaller than the forwarded datagrams, every run first fails as a GSO send (`EMSGSIZE`) and then goes one datagram at a time, fragmented. If the kernel rejects the ECN control message itself (very old kernels), `quinn-udp` stops setting it and forwarded IPv4 datagrams lose their ECN bits.
 * The ICMP responder is IPv4-only, and metrics are logged rather than exported.
 
@@ -171,8 +173,11 @@ What it can show is the relay's cost per datagram and per send, compared between
 | File | Purpose |
 |---|---|
 | `src/packet/` | wire-format parsing, size checks, mac1, `SessionIdx` |
-| `src/tables.rs` | registry, session table with fixed lifetimes, per-peer quotas and a global cap, per-source token buckets, work budgets |
-| `src/relay/` | `Relay::handle` (no I/O); `forward.rs` forwarding rules, `registration.rs` registration tunnels, `reload.rs`, `reason.rs`, `metrics.rs` |
+| `src/tables/` | soft state: `registry.rs`; `sessions.rs` the session table with fixed lifetimes (`entry.rs`), per-peer quotas and a global cap, its per-peer and pending accounts in `ledger.rs`, and the open-session view it keeps for the forwarding half in `open.rs`; `rate_limit.rs` per-source token buckets; `budget.rs` work budgets |
+| `src/relay/mod.rs` | `Relay` (no I/O): `handle` asks the forwarding half, then the control half; `settle` turns an outcome into a `Verdict` and counts it |
+| `src/relay/forwarder.rs` | the forwarding half: `Forwarder::lookup`, read only |
+| `src/relay/control/` | the control half: `Control` and its dispatch; `forward.rs` forwarding rules, `registration.rs` registration tunnels, `reload.rs`, `timers.rs` tunnel timers and the expiry sweep |
+| `src/relay/reason.rs`, `metrics.rs` | `Reason`, `Verdict` and the counters each half keeps |
 | `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
 | `src/main.rs` | parse the CLI, set up logging, report errors |
 | `src/app.rs` | clap `Cli`, the socket loop (batched receive, forwarding, the relay's own datagrams), timers, SIGHUP/SIGTERM |

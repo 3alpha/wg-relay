@@ -5,77 +5,131 @@ use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::{Tunn, TunnResult};
 use tracing::{debug, info};
 
-use super::{PeerState, Reason, Relay, Verdict};
+use super::{Accepted, Control, PeerState, REGISTRATION_WORK, Reason};
 use crate::key::PeerKey;
 
-impl Relay {
+/// Whether a datagram on a registration tunnel proved its peer live at the source address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Proof {
+    Live,
+    Unproven,
+}
+
+impl Proof {
+    /// A transport data message (type 4) on the tunnel proves it; a handshake
+    /// message (which can be replayed) or a cookie reply does not.
+    fn of_transport(datagram: &[u8]) -> Self {
+        match datagram.first() {
+            Some(4) => Proof::Live,
+            _ => Proof::Unproven,
+        }
+    }
+}
+
+impl Control {
+    /// Decide whether a relay-bound initiation may cost an X25519 operation.
+    /// A registered peer's address skips the registration budget, so a flood from
+    /// elsewhere cannot stop it re-handshaking; its per-source limit still applies.
+    pub(super) fn admit_registration(
+        &mut self,
+        src: SocketAddr,
+        now: Instant,
+    ) -> Result<(), Reason> {
+        if self.registry.is_registered(src, now) {
+            return Ok(());
+        }
+        if !self.registration_budget.available(now) {
+            return Err(Reason::RegistrationBudget);
+        }
+        self.registration_budget.spend(REGISTRATION_WORK);
+        Ok(())
+    }
+
     /// Identify the sender of a relay-bound initiation, then let its
     /// registration tunnel fully authenticate it.
-    pub(super) fn register_init(&mut self, src: SocketAddr, pkt: &[u8], now: Instant) -> Verdict {
+    pub(super) fn register_init(
+        &mut self,
+        src: SocketAddr,
+        pkt: &[u8],
+        now: Instant,
+    ) -> Result<Accepted, Reason> {
         let half = match Tunn::parse_incoming_packet(pkt) {
             Ok(boringtun::noise::Packet::HandshakeInit(h)) => {
                 parse_handshake_anon(&self.secret, &self.public, &h).ok()
             }
             _ => None,
         };
-        let Some(key) = half.map(|h| PeerKey::from(h.peer_static_public)) else {
-            return Verdict::Drop(Reason::TunnelAuth);
-        };
+        let key = half.map(|h| PeerKey::from(h.peer_static_public)).ok_or(Reason::TunnelAuth)?;
         if !self.peers.contains_key(&key) {
             debug!(%src, %key, "registration from unlisted key");
-            return Verdict::Drop(Reason::UnknownKey);
+            return Err(Reason::UnknownKey);
         }
         self.tunnel_rx(key, src, pkt, now)
     }
 
-    /// Feed a datagram to peer `key`'s registration tunnel; on
-    /// authentication, (re-)register the source address.
+    /// Feed a datagram to peer `key`'s registration tunnel; once it proves
+    /// the peer live, (re-)register the source address.
     pub(super) fn tunnel_rx(
         &mut self,
         key: PeerKey,
         src: SocketAddr,
         pkt: &[u8],
         now: Instant,
-    ) -> Verdict {
-        let Some(PeerState { name, tunn, .. }) = self.peers.get_mut(&key) else {
-            return Verdict::Drop(Reason::TunnelAuth);
+    ) -> Result<Accepted, Reason> {
+        match self.decapsulate(key, src, pkt)? {
+            Proof::Live => self.confirm(key, src, now),
+            Proof::Unproven => {}
+        }
+        Ok(Accepted::Consumed)
+    }
+
+    /// Run a datagram through peer `key`'s tunnel and queue whatever the
+    /// tunnel answers, including echo replies to pings for the relay.
+    fn decapsulate(&mut self, key: PeerKey, src: SocketAddr, pkt: &[u8]) -> Result<Proof, Reason> {
+        let Some(PeerState { name, tunn }) = self.peers.get_mut(&key) else {
+            return Err(Reason::TunnelAuth);
         };
-        let (authenticated, reply) = match tunn.decapsulate(Some(src.ip()), pkt, &mut self.scratch)
-        {
+        match tunn.decapsulate(Some(src.ip()), pkt, &mut self.scratch) {
             TunnResult::Err(e) => {
                 debug!(%src, peer = %name, ?e, "registration tunnel rejected packet");
-                return Verdict::Drop(Reason::TunnelAuth);
+                Err(Reason::TunnelAuth)
             }
             TunnResult::WriteToNetwork(out) => {
                 // Only our keepalive, sent once the peer's response checks out, proves
                 // the sender is live. Our response to an initiation does not (an
                 // initiation can be replayed), nor does a cookie reply under load.
-                let auth = out.first() == Some(&4);
+                let proof = Proof::of_transport(out);
                 self.outbox.push((src, out.to_vec()));
                 while let TunnResult::WriteToNetwork(q) =
                     tunn.decapsulate(None, &[], &mut self.scratch)
                 {
                     self.outbox.push((src, q.to_vec()));
                 }
-                (auth, None)
+                Ok(proof)
             }
-            TunnResult::WriteToTunnelV4(ip, _) => (true, icmp_echo_reply(ip, self.tunnel_ip)),
-            TunnResult::WriteToTunnelV6(..) => (true, None),
+            TunnResult::WriteToTunnelV4(ip, _) => {
+                if let Some(reply) = icmp_echo_reply(ip, self.tunnel_ip)
+                    && let TunnResult::WriteToNetwork(out) =
+                        tunn.encapsulate(&reply, &mut self.scratch)
+                {
+                    self.outbox.push((src, out.to_vec()));
+                }
+                Ok(Proof::Live)
+            }
+            TunnResult::WriteToTunnelV6(..) => Ok(Proof::Live),
             // Keepalive (authenticated) or an incoming cookie reply (not).
-            TunnResult::Done => (pkt.first() == Some(&4), None),
-        };
-        if let Some(reply) = reply
-            && let TunnResult::WriteToNetwork(out) = tunn.encapsulate(&reply, &mut self.scratch)
-        {
-            self.outbox.push((src, out.to_vec()));
+            TunnResult::Done => Ok(Proof::of_transport(pkt)),
         }
-        if authenticated && let Some(old) = self.registry.update(key, src, now) {
-            info!(peer = %name, addr = %src, old = ?old, "registered");
-            if let Some(old) = old {
-                self.sessions.migrate(old, src);
-            }
+    }
+
+    /// Record that `key` is live at `src`; if it moved there, its sessions move too.
+    pub(super) fn confirm(&mut self, key: PeerKey, src: SocketAddr, now: Instant) {
+        let Some(old) = self.registry.update(key, src, now) else { return };
+        let name = self.peers.get(&key).map_or("?", |p| &p.name);
+        info!(peer = %name, addr = %src, old = ?old, "registered");
+        if let Some(old) = old {
+            self.sessions.migrate(old, src, &mut self.forwarder.open);
         }
-        Verdict::Consumed
     }
 }
 

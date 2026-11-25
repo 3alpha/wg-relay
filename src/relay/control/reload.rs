@@ -3,15 +3,15 @@ use rand_core::{OsRng, RngCore};
 use tracing::{info, warn};
 use x25519_dalek::PublicKey;
 
-use super::{Mac1Index, PeerState, Relay};
+use super::{Control, Mac1Index, PeerState};
 use crate::config::Config;
 use crate::key::PeerKey;
 use crate::packet::{IdxPrefix, Mac1Key};
 
-impl Relay {
+impl Control {
     /// Apply a (re)loaded config. Removed peers lose their registrations, and
     /// every session routed to them, immediately.
-    pub fn reload(&mut self, cfg: &Config) {
+    pub(in crate::relay) fn reload(&mut self, cfg: &Config) {
         if cfg.private_key.public_key() != self.public_key() {
             warn!("changing private_key requires a restart; keeping the current key");
         }
@@ -34,12 +34,14 @@ impl Relay {
         }
         let peers = &self.peers;
         self.tunn_by_prefix.retain(|_, k| peers.contains_key(k));
+        self.forwarder.set_reserved(self.tunn_by_prefix.keys().copied());
         for k in self.registry.keys() {
             if !peers.contains_key(&k) {
                 self.registry.remove(&k);
             }
         }
-        let dropped = self.sessions.retain(|s| peers.contains_key(&s.peer));
+        let dropped =
+            self.sessions.retain(|s| peers.contains_key(&s.peer), &mut self.forwarder.open);
         info!(peers = peers.len(), dropped_sessions = dropped, "config applied");
     }
 
