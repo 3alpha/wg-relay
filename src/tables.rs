@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 pub const REGISTRY_TTL: Duration = Duration::from_secs(180);
 pub const SESSION_TTL: Duration = Duration::from_secs(200);
+/// A handshake is answered within WireGuard's 5 s retry timer or abandoned.
+pub const PENDING_TTL: Duration = Duration::from_secs(10);
 
 fn live(at: Instant, now: Instant, ttl: Duration) -> bool {
     now.saturating_duration_since(at) < ttl
@@ -134,36 +136,55 @@ impl Session {
     }
 }
 
+/// Idle lifetimes per session state.
+#[derive(Debug, Clone, Copy)]
+struct Ttls {
+    open: Duration,
+    pending: Duration,
+}
+
+impl Ttls {
+    fn live(self, s: &Session, now: Instant) -> bool {
+        let ttl = match s.state {
+            SessionState::Open => self.open,
+            SessionState::Pending => self.pending,
+        };
+        live(s.last_seen, now, ttl)
+    }
+}
+
 pub struct SessionTable {
-    ttl: Duration,
+    ttls: Ttls,
     map: HashMap<SessionIdx, Session>,
 }
 
 impl SessionTable {
-    pub fn new(ttl: Duration) -> Self {
-        SessionTable { ttl, map: HashMap::new() }
+    pub fn new(open_ttl: Duration, pending_ttl: Duration) -> Self {
+        SessionTable { ttls: Ttls { open: open_ttl, pending: pending_ttl }, map: HashMap::new() }
     }
 
-    /// Insert, overwriting any existing entry (newest wins). Returns true on a
-    /// collision with a live entry for a different address pair.
+    /// Insert unless a live entry for a different address pair owns the index,
+    /// so nobody can take over an index someone else is using. Returns whether
+    /// the entry was stored.
     pub fn insert(&mut self, idx: SessionIdx, s: Session) -> bool {
-        let collided = matches!(self.map.insert(idx, s), Some(old)
-            if (old.dest, old.expected_src) != (s.dest, s.expected_src) && live(old.last_seen, s.last_seen, self.ttl));
-        if collided {
-            tracing::warn!(%idx, dest = %s.dest, "session index collision, keeping newest");
+        let ttls = self.ttls;
+        let taken = self.map.get(&idx).is_some_and(|old| {
+            (old.dest, old.expected_src) != (s.dest, s.expected_src) && ttls.live(old, s.last_seen)
+        });
+        if !taken {
+            self.map.insert(idx, s);
         }
-        collided
+        !taken
     }
 
     pub fn get(&self, idx: SessionIdx, now: Instant) -> Option<Session> {
-        self.map.get(&idx).filter(|s| live(s.last_seen, now, self.ttl)).copied()
+        self.map.get(&idx).filter(|s| self.ttls.live(s, now)).copied()
     }
 
-    /// Refresh `last_seen` after forwarding a packet on this index.
-    pub fn touch(&mut self, idx: SessionIdx, now: Instant) {
-        if let Some(s) = self.map.get_mut(&idx) {
-            s.last_seen = now;
-        }
+    /// The live session at `idx`, for checking and refreshing in one lookup.
+    pub fn get_mut(&mut self, idx: SessionIdx, now: Instant) -> Option<&mut Session> {
+        let ttls = self.ttls;
+        self.map.get_mut(&idx).filter(|s| ttls.live(s, now))
     }
 
     /// Mark a pending index open once the response is accepted, recording the
@@ -196,8 +217,8 @@ impl SessionTable {
     }
 
     pub fn expire(&mut self, now: Instant) -> usize {
-        let ttl = self.ttl;
-        self.retain(|s| live(s.last_seen, now, ttl))
+        let ttls = self.ttls;
+        self.retain(|s| ttls.live(s, now))
     }
 
     /// Is any index with these upper 24 bits in use?
@@ -275,14 +296,22 @@ mod tests {
         Session::pending(addr(dest), addr(src), key(1), None, t)
     }
 
+    fn open(dest: &str, src: &str, t: Instant) -> Session {
+        Session::open(addr(dest), addr(src), key(1), None, t)
+    }
+
+    fn table() -> SessionTable {
+        SessionTable::new(SESSION_TTL, PENDING_TTL)
+    }
+
     #[test]
     fn session_expires_after_ttl_unless_touched() {
         let t0 = Instant::now();
-        let mut t = SessionTable::new(SESSION_TTL);
-        t.insert(idx(42), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        let mut t = table();
+        t.insert(idx(42), open("192.0.2.1:1", "192.0.2.2:2", t0));
         assert!(t.get(idx(42), t0 + secs(199)).is_some());
         assert_eq!(t.get(idx(42), t0 + secs(200)), None);
-        t.touch(idx(42), t0 + secs(150));
+        t.get_mut(idx(42), t0 + secs(150)).unwrap().last_seen = t0 + secs(150);
         assert!(t.get(idx(42), t0 + secs(300)).is_some());
         assert_eq!(t.expire(t0 + secs(349)), 0);
         assert_eq!(t.expire(t0 + secs(351)), 1);
@@ -290,9 +319,22 @@ mod tests {
     }
 
     #[test]
+    fn pending_session_expires_sooner_than_open() {
+        let t0 = Instant::now();
+        let mut t = table();
+        t.insert(idx(1), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        t.insert(idx(2), open("192.0.2.1:1", "192.0.2.2:2", t0));
+        assert!(t.get(idx(1), t0 + secs(9)).is_some());
+        assert_eq!(t.get(idx(1), t0 + secs(10)), None);
+        assert!(t.get_mut(idx(1), t0 + secs(10)).is_none());
+        assert_eq!(t.expire(t0 + secs(10)), 1);
+        assert!(t.get(idx(2), t0 + secs(10)).is_some());
+    }
+
+    #[test]
     fn open_marks_session_open_and_records_client() {
         let t0 = Instant::now();
-        let mut t = SessionTable::new(SESSION_TTL);
+        let mut t = table();
         t.insert(idx(42), pending("192.0.2.1:1", "192.0.2.2:2", t0));
         t.open(idx(42), t0 + secs(1), Some(key(7)));
         let expected = Session {
@@ -306,27 +348,25 @@ mod tests {
     }
 
     #[test]
-    fn session_collision_keeps_newest_and_ignores_same_pair_or_stale() {
+    fn insert_refuses_live_index_of_another_pair_but_replaces_same_pair_or_stale() {
         let t0 = Instant::now();
-        let mut t = SessionTable::new(SESSION_TTL);
-        assert!(!t.insert(idx(7), pending("192.0.2.1:1", "192.0.2.2:2", t0)));
-        assert!(
-            !t.insert(idx(7), pending("192.0.2.1:1", "192.0.2.2:2", t0 + secs(1))),
-            "same pair"
+        let mut t = table();
+        assert!(t.insert(idx(7), open("192.0.2.1:1", "192.0.2.2:2", t0)));
+        assert!(t.insert(idx(7), open("192.0.2.1:1", "192.0.2.2:2", t0 + secs(1))), "same pair");
+        assert!(!t.insert(idx(7), pending("192.0.2.3:3", "192.0.2.4:4", t0 + secs(2))));
+        assert_eq!(
+            t.get(idx(7), t0 + secs(2)),
+            Some(open("192.0.2.1:1", "192.0.2.2:2", t0 + secs(1)))
         );
-        assert!(t.insert(idx(7), pending("192.0.2.3:3", "192.0.2.4:4", t0 + secs(2))));
-        assert_eq!(t.get(idx(7), t0 + secs(2)).map(|s| s.dest), Some(addr("192.0.2.3:3")));
-        assert!(
-            !t.insert(idx(7), pending("192.0.2.5:5", "192.0.2.6:6", t0 + secs(500))),
-            "stale entry"
-        );
+        assert!(t.insert(idx(7), pending("192.0.2.5:5", "192.0.2.6:6", t0 + secs(500))), "stale");
+        assert_eq!(t.get(idx(7), t0 + secs(500)).map(|s| s.dest), Some(addr("192.0.2.5:5")));
         assert_eq!(t.len(), 1);
     }
 
     #[test]
     fn session_migrate_rewrites_both_directions() {
         let t0 = Instant::now();
-        let mut t = SessionTable::new(SESSION_TTL);
+        let mut t = table();
         t.insert(idx(0x00ab_cd01), pending("192.0.2.1:1", "192.0.2.2:2", t0));
         t.insert(idx(0x0011_2201), pending("192.0.2.2:2", "192.0.2.1:1", t0));
         t.migrate(addr("192.0.2.1:1"), addr("192.0.2.9:9"));
@@ -337,7 +377,7 @@ mod tests {
 
     #[test]
     fn has_prefix_matches_upper_24_bits_only() {
-        let mut t = SessionTable::new(SESSION_TTL);
+        let mut t = table();
         t.insert(idx(0x00ab_cd01), pending("192.0.2.1:1", "192.0.2.2:2", Instant::now()));
         assert!(t.has_prefix(idx(0x00ab_cdff).prefix()));
         assert!(!t.has_prefix(idx(0x00ab_ce01).prefix()));

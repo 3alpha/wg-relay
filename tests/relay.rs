@@ -270,6 +270,71 @@ fn relay_indexes_are_reserved() {
     assert_eq!(w.fwd(C1, &fine), Some(addr(SRV)));
 }
 
+/// The index a handshake message announces as its sender.
+fn sender_idx(pkt: &[u8]) -> u32 {
+    u32::from_le_bytes(pkt[4..8].try_into().unwrap())
+}
+
+#[test]
+fn open_session_cannot_mint_or_take_over_indexes() {
+    let mut w = world("response");
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    let (mut c3s, mut sc3) = (tunn(&w.c3, &w.srv), tunn(&w.srv, &w.c3));
+    let c1_init = initiation(&mut c1s);
+    w.fwd(C1, &c1_init);
+    let c1_resp = reply(&mut sc1, &c1_init).unwrap();
+    assert_eq!(w.fwd(SRV, &c1_resp), Some(addr(C1)));
+    let c3_init = initiation(&mut c3s);
+    w.fwd(C3, &c3_init);
+    let c3_resp = reply(&mut sc3, &c3_init).unwrap();
+    assert_eq!(w.fwd(SRV, &c3_resp), Some(addr(C3)));
+    reply(&mut c3s, &c3_resp);
+    let sessions = w.relay.session_count();
+
+    // c1 forges a response on its own, already open, session.
+    let forged = forged_response(0x7000_0001, sender_idx(&c1_resp), &w.srv.pk);
+    assert_eq!(w.fwd(C1, &forged), None);
+    assert_eq!(w.n(Reason::SessionNotPending), 1);
+    // A duplicate of the server's real response is refused the same way.
+    assert_eq!(w.fwd(SRV, &c1_resp), None);
+    assert_eq!(w.n(Reason::SessionNotPending), 2);
+
+    // c1 starts handshakes that claim c3's two live indexes.
+    for idx in [sender_idx(&c3_init), sender_idx(&c3_resp)] {
+        let init = with_sender(&initiation(&mut c1s), idx, &w.srv.pk);
+        assert_eq!(w.fwd(C1, &init), None);
+    }
+    assert_eq!(w.n(Reason::IndexInUse), 2);
+    assert_eq!(w.relay.session_count(), sessions);
+    assert_eq!(data(&mut w, &mut c3s, C3, &mut sc3), Some(addr(SRV)));
+    assert_eq!(data(&mut w, &mut sc3, SRV, &mut c3s), Some(addr(C3)));
+}
+
+#[test]
+fn registration_needs_key_confirmation() {
+    let mut w = world("response");
+    let srv = w.srv.clone();
+    let moved = "203.0.113.9:1234";
+    let mut t = tunn(&srv, &w.r);
+    // An initiation alone (which could be a replay) does not move the registration.
+    assert_eq!(w.fwd(moved, &initiation(&mut t)), None);
+    let resp = w.relay.take_outbox().pop().unwrap().1;
+    assert_eq!(w.relay.registered_addr(&srv.id(), Instant::now()), Some(addr(SRV)));
+    let ka = reply(&mut t, &resp).unwrap();
+    assert_eq!(w.fwd(moved, &ka), None);
+    assert_eq!(w.relay.registered_addr(&srv.id(), Instant::now()), Some(addr(moved)));
+}
+
+#[test]
+fn pending_session_expires_quickly() {
+    let mut w = world("none");
+    let mut c1s = tunn(&w.c1, &w.srv);
+    assert_eq!(w.fwd(C1, &initiation(&mut c1s)), Some(addr(SRV)));
+    assert_eq!(w.relay.session_count(), 1);
+    w.relay.tick(Instant::now() + Duration::from_secs(11));
+    assert_eq!(w.relay.session_count(), 0);
+}
+
 #[test]
 fn server_roaming_migrates_sessions() {
     let mut w = world("response");

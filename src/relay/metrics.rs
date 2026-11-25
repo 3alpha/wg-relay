@@ -10,7 +10,6 @@ pub struct Metrics {
     pub tunnel_rx: u64,
     pub tunnel_tx: u64,
     pub send_errors: u64,
-    pub idx_collisions: u64,
     rejects: [u64; Reason::COUNT],
 }
 
@@ -34,13 +33,8 @@ impl fmt::Display for Metrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "rx={} forwarded={} tunnel_rx={} tunnel_tx={} send_errors={} idx_collisions={}",
-            self.rx,
-            self.forwarded,
-            self.tunnel_rx,
-            self.tunnel_tx,
-            self.send_errors,
-            self.idx_collisions
+            "rx={} forwarded={} tunnel_rx={} tunnel_tx={} send_errors={}",
+            self.rx, self.forwarded, self.tunnel_rx, self.tunnel_tx, self.send_errors
         )?;
         for r in Reason::ALL.iter().filter(|r| self.rejected(**r) > 0) {
             write!(f, " reject.{r}={}", self.rejected(*r))?;

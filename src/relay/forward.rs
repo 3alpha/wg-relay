@@ -32,28 +32,24 @@ impl Relay {
                 return Err(Reason::Loop);
             }
             let s = Session::pending(src, dst, server, None, now);
-            return Ok(self.insert_session(sender, s));
+            return self.insert_session(sender, s);
         }
-        if let Some(client) = self.mac1_peer(pkt, PeerKind::is_client) {
-            // A server re-keying towards a client.
-            let server = self.server_at(src, now).ok_or(Reason::RekeyNotFromServer)?;
-            if !self.may_reach(&client, &server) {
-                return Err(Reason::Acl);
-            }
-            let dst = self.learned.get(&client).copied().ok_or(Reason::ClientAddrUnknown)?;
-            let s = Session::pending(src, dst, server, Some(client), now);
-            return Ok(self.insert_session(sender, s));
+        // Only a registered server re-keys towards a client. Checking the source
+        // first spares junk from anyone else the mac1 scan over every client.
+        let server = self.server_at(src, now).ok_or(Reason::NoMac1Match)?;
+        let client = self.mac1_peer(pkt, PeerKind::is_client).ok_or(Reason::NoMac1Match)?;
+        if !self.may_reach(&client, &server) {
+            return Err(Reason::Acl);
         }
-        Err(Reason::NoMac1Match)
+        let dst = self.learned.get(&client).copied().ok_or(Reason::ClientAddrUnknown)?;
+        let s = Session::pending(src, dst, server, Some(client), now);
+        self.insert_session(sender, s)
     }
 
     /// Store a session and return its counterpart's address, where the
     /// handshake message that created it goes.
-    fn insert_session(&mut self, idx: SessionIdx, s: Session) -> SocketAddr {
-        if self.sessions.insert(idx, s) {
-            self.metrics.idx_collisions += 1;
-        }
-        s.expected_src
+    fn insert_session(&mut self, idx: SessionIdx, s: Session) -> Result<SocketAddr, Reason> {
+        if self.sessions.insert(idx, s) { Ok(s.expected_src) } else { Err(Reason::IndexInUse) }
     }
 
     /// Route a handshake response back to its initiator, applying the client gate.
@@ -68,6 +64,10 @@ impl Relay {
         let init = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
         if src != init.expected_src {
             return Err(Reason::WrongSource);
+        }
+        // One response per initiation, or an open session could mint new ones.
+        if init.state != SessionState::Pending {
+            return Err(Reason::SessionNotPending);
         }
         if self.reserved(sender) {
             return Err(Reason::ReservedIndex);
@@ -96,9 +96,9 @@ impl Relay {
                 init.client
             }
         };
-        self.sessions.open(receiver, now, client);
         let s = Session::open(src, init.dest, init.server, client, now);
-        self.insert_session(sender, s);
+        self.insert_session(sender, s)?;
+        self.sessions.open(receiver, now, client);
         Ok(init.dest)
     }
 
@@ -110,14 +110,14 @@ impl Relay {
         receiver: SessionIdx,
         now: Instant,
     ) -> Result<SocketAddr, Reason> {
-        let s = self.sessions.get(receiver, now).ok_or(Reason::UnknownIndex)?;
+        let s = self.sessions.get_mut(receiver, now).ok_or(Reason::UnknownIndex)?;
         if src != s.expected_src {
             return Err(Reason::WrongSource);
         }
         match (kind, s.state) {
             (Indexed::Data, SessionState::Pending) => Err(Reason::SessionNotOpen),
             (Indexed::Data, SessionState::Open) | (Indexed::Cookie, _) => {
-                self.sessions.touch(receiver, now);
+                s.last_seen = now;
                 Ok(s.dest)
             }
         }

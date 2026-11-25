@@ -52,8 +52,10 @@ impl Relay {
                 return Verdict::Drop(Reason::TunnelAuth);
             }
             TunnResult::WriteToNetwork(out) => {
-                // A cookie reply we emit under load proves nothing about the sender.
-                let auth = out.first() != Some(&3);
+                // Only our keepalive, sent once the peer's response checks out, proves
+                // the sender is live. Our response to an initiation does not (an
+                // initiation can be replayed), nor does a cookie reply under load.
+                let auth = out.first() == Some(&4);
                 self.outbox.push((src, out.to_vec()));
                 while let TunnResult::WriteToNetwork(q) =
                     tunn.decapsulate(None, &[], &mut self.scratch)
@@ -90,6 +92,10 @@ fn icmp_echo_reply(ip: &[u8], me: Ipv4Addr) -> Option<Vec<u8>> {
         return None;
     }
     if ip[9] != 1 || ip[16..20] != me.octets() || ip[ihl] != 8 {
+        return None;
+    }
+    // A fragment (more-fragments flag or a non-zero offset) is not a whole echo request.
+    if ip[6] & 0x3f != 0 || ip[7] != 0 {
         return None;
     }
     let mut r = ip[..total].to_vec();
@@ -134,6 +140,9 @@ mod tests {
         assert_eq!(checksum(&r[..20]), 0);
         assert_eq!(checksum(&r[20..]), 0);
         assert!(icmp_echo_reply(&req[..10], me).is_none());
+        let mut fragment = req.clone();
+        fragment[6] = 0x20;
+        assert!(icmp_echo_reply(&fragment, me).is_none());
         assert!(icmp_echo_reply(&req, Ipv4Addr::new(1, 2, 3, 4)).is_none());
     }
 }

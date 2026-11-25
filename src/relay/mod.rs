@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use boringtun::noise::{Tunn, TunnResult};
 use tracing::{debug, info};
@@ -14,7 +14,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use crate::config::{Config, Gate};
 use crate::key::PeerKey;
 use crate::packet::{self, IdxPrefix, Mac1Key, Packet, SessionIdx};
-use crate::tables::{REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, SessionTable};
+use crate::tables::{PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, SessionTable};
 
 mod forward;
 mod metrics;
@@ -27,6 +27,8 @@ pub use metrics::Metrics;
 pub use reason::{Reason, Verdict};
 
 const SCRATCH_LEN: usize = 65536 + 256;
+/// Expiry scans every table, so it runs less often than the tunnel timers.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What the relay holds for each allowlisted key.
 enum PeerKind {
@@ -83,6 +85,7 @@ pub struct Relay {
     /// Datagrams produced by the relay's own tunnels, to be sent by the caller.
     outbox: Vec<(SocketAddr, Vec<u8>)>,
     scratch: Vec<u8>,
+    last_sweep: Option<Instant>,
 }
 
 impl Relay {
@@ -99,11 +102,12 @@ impl Relay {
             tunn_by_prefix: HashMap::new(),
             registry: Registry::new(REGISTRY_TTL),
             learned: HashMap::new(),
-            sessions: SessionTable::new(SESSION_TTL),
+            sessions: SessionTable::new(SESSION_TTL, PENDING_TTL),
             limiter: RateLimiter::new(cfg.handshake_rate.per_sec()),
             metrics: Metrics::default(),
             outbox: Vec::new(),
             scratch: vec![0; SCRATCH_LEN],
+            last_sweep: None,
         };
         relay.reload(cfg);
         relay
@@ -192,6 +196,12 @@ impl Relay {
                 self.outbox.push((addr, out.to_vec()));
             }
         }
+        let swept_recently =
+            self.last_sweep.is_some_and(|t| now.saturating_duration_since(t) < SWEEP_INTERVAL);
+        if swept_recently {
+            return;
+        }
+        self.last_sweep = Some(now);
         for k in self.registry.expire(now) {
             info!(peer = %self.peers.get(&k).map_or("?", |p| &p.name), "registration expired");
         }
