@@ -24,6 +24,7 @@ reasons! {
     Malformed => "malformed",
     RateLimited => "rate_limited",
     HandshakeBudget => "handshake_budget",
+    RegistrationBudget => "registration_budget",
     ReservedIndex => "reserved_index",
     NoMac1Match => "no_mac1_match",
     PeerNotRegistered => "peer_not_registered",

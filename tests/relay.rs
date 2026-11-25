@@ -53,14 +53,19 @@ fn world() -> W {
 impl W {
     /// Register listed peer `k` from `src` via a real handshake with the relay.
     fn register(&mut self, k: &Key, src: &str) -> Tunn {
+        self.register_at(k, src, Instant::now())
+    }
+
+    /// `register`, with every packet arriving at `now`.
+    fn register_at(&mut self, k: &Key, src: &str, now: Instant) -> Tunn {
         let mut t = tunn(k, &self.r);
         let init = initiation(&mut t);
-        assert_eq!(self.fwd(src, &init), None);
+        assert_eq!(self.relay.handle(addr(src), &init, now), Verdict::Consumed);
         let out = self.relay.take_outbox();
         assert_eq!(out.len(), 1, "relay should answer the registration");
         let ka = reply(&mut t, &out[0].1).expect("keepalive to relay");
-        assert_eq!(self.fwd(src, &ka), None);
-        assert_eq!(self.relay.registered_addr(&k.id(), Instant::now()), Some(addr(src)));
+        assert_eq!(self.relay.handle(addr(src), &ka, now), Verdict::Consumed);
+        assert_eq!(self.relay.registered_addr(&k.id(), now), Some(addr(src)));
         t
     }
 
@@ -108,6 +113,11 @@ fn data(w: &mut W, from: &mut Tunn, fa: &str, to: &mut Tunn) -> Option<SocketAdd
 
 fn ok3(a: &str, b: &str) -> [Option<SocketAddr>; 3] {
     [Some(addr(a)), Some(addr(b)), Some(addr(a))]
+}
+
+/// A distinct spoofed source for flood packet `i`, each in its own rate-limit bucket.
+fn spoofed(i: u32) -> SocketAddr {
+    SocketAddr::from(([10, (i >> 16) as u8, (i >> 8) as u8, i as u8], 1))
 }
 
 /// The index a handshake message announces as its sender.
@@ -392,4 +402,64 @@ fn garbage_never_panics() {
         w.relay.take_outbox();
     }
     assert!(w.n(Reason::Malformed) > 500, "{}", w.relay.metrics());
+}
+
+#[test]
+fn registration_flood_does_not_block_registered_peers() {
+    let mut w = world();
+    let now = Instant::now();
+    // Initiations for the relay from unregistered sources, more than its
+    // registration budget's burst. All arrive at `now`, so nothing refills.
+    let junk = with_sender(&initiation(&mut tunn(&w.c1, &w.r)), 0x5000_0000, &w.r.pk);
+    for i in 0..600 {
+        w.relay.handle(spoofed(i), &junk, now);
+    }
+    assert!(w.n(Reason::RegistrationBudget) > 0, "{}", w.relay.metrics());
+    // A listed peer re-handshakes from its registered address all the same.
+    let srv = w.srv.clone();
+    w.register_at(&srv, SRV, now);
+    // Registering from a new address competes with the flood.
+    let mut t = tunn(&srv, &w.r);
+    let moved = addr("203.0.113.9:1234");
+    let shed = Verdict::Drop(Reason::RegistrationBudget);
+    assert_eq!(w.relay.handle(moved, &initiation(&mut t), now), shed);
+    // Forwarding has its own budget.
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+}
+
+#[test]
+fn pending_flood_aimed_at_one_peer_evicts_only_its_oldest() {
+    const QUOTA: u32 = 1024;
+    let mut w = world();
+    let flood = |w: &mut W, from: u32, n: u32| {
+        let template = initiation(&mut tunn(&key(), &w.srv));
+        for i in from..from + n {
+            let init = with_sender(&template, 0x5000_0000 + i, &w.srv.pk);
+            assert_eq!(
+                w.relay.handle(spoofed(i), &init, Instant::now()),
+                Verdict::Forward(addr(SRV))
+            );
+        }
+    };
+    // A handshake answered while the peer is at quota survives.
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    let c1_init = initiation(&mut c1s);
+    assert_eq!(w.fwd(C1, &c1_init), Some(addr(SRV)));
+    flood(&mut w, 0, QUOTA - 1);
+    assert_eq!(w.fwd(SRV, &reply(&mut sc1, &c1_init).unwrap()), Some(addr(C1)));
+
+    // One that is still pending once QUOTA newer ones arrive is evicted, but
+    // only towards the flooded peer.
+    let (mut c2o, mut oc2) = (tunn(&w.c2, &w.srv2), tunn(&w.srv2, &w.c2));
+    let c2_init = initiation(&mut c2o);
+    assert_eq!(w.fwd(C2, &c2_init), Some(addr(SRV2)));
+    let c1_init = initiation(&mut c1s);
+    assert_eq!(w.fwd(C1, &c1_init), Some(addr(SRV)));
+    flood(&mut w, QUOTA, QUOTA);
+    assert_eq!(w.fwd(SRV, &reply(&mut sc1, &c1_init).unwrap()), None);
+    assert_eq!(w.n(Reason::UnknownIndex), 1);
+    assert_eq!(w.fwd(SRV2, &reply(&mut oc2, &c2_init).unwrap()), Some(addr(C2)));
+    // c1's earlier session, c2's new one and QUOTA flood entries remain.
+    assert_eq!(w.relay.session_count(), 2 + 2 + QUOTA as usize);
 }

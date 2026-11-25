@@ -24,12 +24,12 @@ impl Relay {
         if self.reserved(sender) {
             return Err(Reason::ReservedIndex);
         }
-        // Checked before the scan, so a full table also spares the handshake budget.
+        // Checked before the scan, so a full table also spares the forwarding budget.
         if self.sessions.pending() >= MAX_PENDING {
             return Err(Reason::TooManyPending);
         }
         // Anyone may initiate to a listed peer; its own WireGuard peer list decides.
-        let peer = self.mac1_peer(pkt).ok_or(Reason::NoMac1Match)?;
+        let peer = self.mac1_peer(pkt, now)?;
         let dst = self.registry.addr(&peer, now).ok_or(Reason::PeerNotRegistered)?;
         if dst == src {
             return Err(Reason::Loop);

@@ -1,8 +1,8 @@
-//! Soft-state tables: registry, session table, per-IP rate limiter.
+//! Soft-state tables: registry, session table, per-IP rate limiter, work budgets.
 
 use crate::key::PeerKey;
 use crate::packet::{IdxPrefix, SessionIdx};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasher, RandomState};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
@@ -69,6 +69,11 @@ impl Registry {
 
     pub fn addr(&self, k: &PeerKey, now: Instant) -> Option<SocketAddr> {
         self.by_key.get(k).filter(|(_, t)| live(*t, now, self.ttl)).map(|(a, _)| *a)
+    }
+
+    /// Is `addr` where some listed peer is currently registered?
+    pub fn is_registered(&self, addr: SocketAddr, now: Instant) -> bool {
+        self.by_addr.get(&addr).is_some_and(|k| self.addr(k, now) == Some(addr))
     }
 
     pub fn remove(&mut self, k: &PeerKey) -> bool {
@@ -153,23 +158,31 @@ impl Ttls {
 
 pub struct SessionTable {
     ttls: Ttls,
+    /// Most entries one listed peer may have pending; beyond it, its oldest goes.
+    pending_quota: usize,
     map: HashMap<SessionIdx, Session>,
     /// Entries in the `Pending` state, live or not yet swept.
     pending: usize,
+    /// Each listed peer's pending indexes, oldest first, so a flood aimed at one
+    /// peer evicts its own entries instead of crowding out other peers.
+    pending_by_peer: HashMap<PeerKey, VecDeque<SessionIdx>>,
 }
 
 impl SessionTable {
-    pub fn new(open_ttl: Duration, pending_ttl: Duration) -> Self {
+    pub fn new(open_ttl: Duration, pending_ttl: Duration, pending_quota: usize) -> Self {
         SessionTable {
             ttls: Ttls { open: open_ttl, pending: pending_ttl },
+            pending_quota,
             map: HashMap::new(),
             pending: 0,
+            pending_by_peer: HashMap::new(),
         }
     }
 
     /// Insert unless a live entry for a different address pair owns the index,
     /// so nobody can take over an index someone else is using. Returns whether
-    /// the entry was stored.
+    /// the entry was stored. A pending entry over its peer's quota evicts that
+    /// peer's oldest pending entry.
     pub fn insert(&mut self, idx: SessionIdx, s: Session) -> bool {
         let ttls = self.ttls;
         let taken = self.map.get(&idx).is_some_and(|old| {
@@ -179,10 +192,35 @@ impl SessionTable {
             return false;
         }
         if let Some(old) = self.map.insert(idx, s) {
-            self.pending -= usize::from(old.state == SessionState::Pending);
+            self.forget_pending(idx, &old);
         }
-        self.pending += usize::from(s.state == SessionState::Pending);
+        if s.state == SessionState::Pending {
+            self.pending += 1;
+            let queue = self.pending_by_peer.entry(s.peer).or_default();
+            queue.push_back(idx);
+            while queue.len() > self.pending_quota {
+                let Some(oldest) = queue.pop_front() else { break };
+                self.map.remove(&oldest);
+                self.pending -= 1;
+            }
+        }
         true
+    }
+
+    /// Account for `old`, just replaced or opened at `idx`, leaving the pending state.
+    fn forget_pending(&mut self, idx: SessionIdx, old: &Session) {
+        if old.state != SessionState::Pending {
+            return;
+        }
+        self.pending -= 1;
+        if let Some(queue) = self.pending_by_peer.get_mut(&old.peer) {
+            if let Some(i) = queue.iter().position(|q| *q == idx) {
+                queue.remove(i);
+            }
+            if queue.is_empty() {
+                self.pending_by_peer.remove(&old.peer);
+            }
+        }
     }
 
     pub fn get(&self, idx: SessionIdx, now: Instant) -> Option<Session> {
@@ -197,11 +235,11 @@ impl SessionTable {
 
     /// Mark a pending index open once the response is accepted.
     pub fn open(&mut self, idx: SessionIdx, now: Instant) {
-        if let Some(s) = self.map.get_mut(&idx) {
-            self.pending -= usize::from(s.state == SessionState::Pending);
-            s.last_seen = now;
-            s.state = SessionState::Open;
-        }
+        let Some(s) = self.map.get_mut(&idx) else { return };
+        let old = *s;
+        s.last_seen = now;
+        s.state = SessionState::Open;
+        self.forget_pending(idx, &old);
     }
 
     /// A registered peer moved: rewrite its address in every session.
@@ -225,6 +263,16 @@ impl SessionTable {
             kept
         });
         self.pending -= pending_gone;
+        if pending_gone > 0 {
+            let map = &self.map;
+            self.pending_by_peer.retain(|peer, queue| {
+                queue.retain(|i| {
+                    map.get(i).is_some_and(|s| s.state == SessionState::Pending && s.peer == *peer)
+                });
+                !queue.is_empty()
+            });
+            shrink_if_sparse(&mut self.pending_by_peer);
+        }
         shrink_if_sparse(&mut self.map);
         before - self.map.len()
     }
@@ -298,7 +346,9 @@ impl RateLimiter {
     }
 
     fn slot(&self, ip: IpAddr) -> usize {
-        let source = match ip {
+        // A dual-stack socket reports IPv4 sources as `::ffff:a.b.c.d`, whose /64 is
+        // all zeros: unmapped, each IPv4 source keeps its own bucket.
+        let source = match ip.to_canonical() {
             IpAddr::V4(a) => (4, u64::from(a.to_bits())),
             IpAddr::V6(a) => (6, (a.to_bits() >> 64) as u64),
         };
@@ -318,8 +368,8 @@ impl RateLimiter {
     }
 }
 
-/// Global budget for CPU work spent on unauthenticated handshakes, so a flood
-/// of them cannot starve forwarding. Work is charged once it is done, so the
+/// Budget for CPU work spent on unauthenticated handshakes, so a flood of
+/// them cannot starve forwarding. Work is charged once it is done, so the
 /// budget can go into debt by one handshake; the burst is one second's worth.
 pub struct WorkBudget {
     per_sec: f64,
@@ -375,7 +425,12 @@ mod tests {
     }
 
     fn table() -> SessionTable {
-        SessionTable::new(SESSION_TTL, PENDING_TTL)
+        SessionTable::new(SESSION_TTL, PENDING_TTL, usize::MAX)
+    }
+
+    /// The pending indexes of peer `n`, oldest first.
+    fn queue(t: &SessionTable, n: u8) -> Vec<SessionIdx> {
+        t.pending_by_peer.get(&key(n)).map(|q| q.iter().copied().collect()).unwrap_or_default()
     }
 
     #[test]
@@ -472,7 +527,11 @@ mod tests {
         assert_eq!(r.addr(&key(1), t0 + secs(180)), None);
         assert_eq!(r.expire(t0 + secs(181)), vec![key(1)]);
         r.update(key(3), a1, t0);
+        assert!(r.is_registered(a1, t0 + secs(179)));
+        assert!(!r.is_registered(a1, t0 + secs(180)), "expired");
+        assert!(!r.is_registered(a2, t0), "address of an expired registration");
         assert!(r.remove(&key(3)));
+        assert!(!r.is_registered(a1, t0));
         assert!(!r.remove(&key(3)));
         assert_eq!(r.addr(&key(3), t0), None);
     }
@@ -523,6 +582,55 @@ mod tests {
         assert_eq!(l.slot(ip("2001:db8:1:2::1")), l.slot(ip("2001:db8:1:2:ffff::9")));
         let others = (3..200).map(|n| ip(&format!("2001:db8:1:{n:x}::1")));
         assert!(others.into_iter().any(|o| l.slot(o) != l.slot(ip("2001:db8:1:2::1"))));
+    }
+
+    #[test]
+    fn rate_limiter_keys_v4_mapped_sources_as_ipv4() {
+        let l = RateLimiter::new(1.0);
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert_eq!(l.slot(ip("::ffff:192.0.2.1")), l.slot(ip("192.0.2.1")));
+        let others = (2..=255).map(|n| ip(&format!("::ffff:192.0.2.{n}")));
+        assert!(others.into_iter().any(|o| l.slot(o) != l.slot(ip("::ffff:192.0.2.1"))));
+    }
+
+    #[test]
+    fn pending_over_quota_evicts_that_peers_oldest_only() {
+        let t0 = Instant::now();
+        let mut t = SessionTable::new(SESSION_TTL, PENDING_TTL, 2);
+        let for_peer = |n: u8, port: u16| {
+            Session::pending(addr(&format!("192.0.2.1:{port}")), addr("192.0.2.9:9"), key(n), t0)
+        };
+        assert!(t.insert(idx(1), for_peer(1, 1)));
+        assert!(t.insert(idx(2), for_peer(1, 2)));
+        assert!(t.insert(idx(10), for_peer(2, 10)));
+        assert!(t.insert(idx(11), for_peer(2, 11)));
+        assert!(t.insert(idx(3), for_peer(1, 3)));
+        assert_eq!(t.get(idx(1), t0), None, "peer 1's oldest went");
+        assert_eq!((queue(&t, 1), queue(&t, 2)), (vec![idx(2), idx(3)], vec![idx(10), idx(11)]));
+        assert_eq!((t.pending(), t.len()), (4, 4));
+
+        // An opened entry no longer counts, so the next one evicts nothing.
+        t.open(idx(2), t0);
+        assert!(t.insert(idx(4), for_peer(1, 4)));
+        assert!(t.get(idx(2), t0).is_some() && t.get(idx(3), t0).is_some());
+        assert_eq!((queue(&t, 1), t.pending()), (vec![idx(3), idx(4)], 4));
+
+        // Re-sending a pending index moves it to the back instead of duplicating it.
+        assert!(t.insert(idx(3), for_peer(1, 3)));
+        assert!(t.insert(idx(5), for_peer(1, 5)));
+        assert_eq!(t.get(idx(4), t0), None);
+        assert_eq!((queue(&t, 1), t.pending()), (vec![idx(3), idx(5)], 4));
+
+        // Opened, expired and removed entries leave the queues, and empty queues go.
+        assert!(
+            t.insert(idx(5), Session::open(addr("192.0.2.1:5"), addr("192.0.2.9:9"), key(1), t0))
+        );
+        assert_eq!((queue(&t, 1), t.pending()), (vec![idx(3)], 3));
+        assert_eq!(t.retain(|s| s.peer != key(2)), 2);
+        assert_eq!((queue(&t, 2), t.pending()), (vec![], 1));
+        assert_eq!(t.expire(t0 + PENDING_TTL), 1);
+        assert_eq!((t.pending(), t.pending_by_peer.len()), (0, 0));
+        assert_eq!(t.len(), 2, "the open entries");
     }
 
     #[test]

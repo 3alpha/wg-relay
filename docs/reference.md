@@ -17,15 +17,15 @@ Each listed peer has the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` 
 
 ### Session table
 
-`receiver_idx → { dest_addr, expected_src_addr, open, last_seen, peer }`, where `peer` is the listed peer the session was routed to, used to revoke sessions on reload. **Every type 2, 3 and 4 packet must arrive from `expected_src_addr`.** Open entries expire after 200 s idle, pending ones (an initiation without an accepted response) after 10 s. At most 65,536 entries may be pending at once (`MAX_PENDING`, about 17 MB); beyond that, initiations are dropped before any other work (`too_many_pending`). The table gives memory back once the sweep finds it mostly empty. A handshake that picks an index held by a live entry of a different address pair is dropped (`index_in_use`), so nobody can take over an index someone else is using; the peer retries with a new index.
+`receiver_idx → { dest_addr, expected_src_addr, open, last_seen, peer }`, where `peer` is the listed peer the session was routed to, used to revoke sessions on reload. **Every type 2, 3 and 4 packet must arrive from `expected_src_addr`.** Open entries expire after 200 s idle, pending ones (an initiation without an accepted response) after 10 s. Each listed peer may have at most 1,024 pending entries (`MAX_PENDING_PER_PEER`); a new initiation for a peer at its quota evicts that peer's oldest pending entry, so a flood aimed at one listed peer disturbs only handshakes to that peer, and even there a handshake answered within the time the flood takes to send 1,024 more initiations survives. As a memory backstop, at most 262,144 entries may be pending in total (`MAX_PENDING`, about 70 MB); beyond that, initiations not for the relay are dropped before the mac1 scan (`too_many_pending`). With the default budgets a flood of initiations cannot reach it: filling it needs at least 256 listed peers at quota, and the scans that create that many entries within their 10 s lifetime cost about three times what the forwarding budget allows in that time. The table gives memory back once the sweep finds it mostly empty. A handshake that picks an index held by a live entry of a different address pair is dropped (`index_in_use`), so nobody can take over an index someone else is using; the peer retries with a new index.
 
 ### Forwarding rules
 
-Every initiation is rate-limited per source first, then checked against the global handshake budget (below). A source is an IPv4 address or an IPv6 /64, hashed with a random key into one of 65,536 fixed buckets, so the limiter's memory is constant (under 2 MB) however many sources appear; sources that share a bucket share its allowance.
+Every initiation is rate-limited per source first. Then, unless it is for the relay and comes from a listed peer's registered address, it must fit in one of two handshake budgets (below). A source is an IPv4 address or an IPv6 /64 (an IPv4-mapped IPv6 address, as a dual-stack `[::]` socket reports IPv4 senders, counts as its IPv4 address), hashed with a random key into one of 65,536 fixed buckets, so the limiter's memory is constant (under 2 MB) however many sources appear; sources that share a bucket share its allowance.
 
-**Type 1, initiation** (`sender_idx` must not be in a relay prefix):
+**Type 1, initiation** not for the relay (`sender_idx` must not be in a relay prefix; then the global pending cap and the forwarding budget are checked before the scan):
 
-* **mac1 matches a listed peer P**, which must be registered (`peer_not_registered`). Accepted from any source except P's own address (`loop`). The relay records `idx[sender] = {dest: src, expected_src: addr(P), open: false, peer: P}` and forwards to P.
+* **mac1 matches a listed peer P**, which must be registered (`peer_not_registered`). Accepted from any source except P's own address (`loop`). The relay records `idx[sender] = {dest: src, expected_src: addr(P), open: false, peer: P}`, evicting P's oldest pending entry if P is at its quota, and forwards to P.
 * Otherwise the packet is dropped (`no_mac1_match`). An unlisted peer can therefore never receive an initiation: a listed peer cannot start a handshake towards it, but listed peers can start handshakes with each other in both directions.
 
 **Type 2, response** (it must match a pending entry and come from its `expected_src`, the listed peer's registered address):
@@ -37,11 +37,16 @@ The relay does not check who the listed peer accepted. Its own WireGuard peer li
 
 **Types 3 and 4** (cookie reply and data) are forwarded only from `expected_src`. Data requires an `open` session. A cookie reply may also pass on a pending one, so a peer under load can answer an initiation.
 
-### Handshake budget
+### Handshake budgets
 
-Initiations are unauthenticated, so their cost must be bounded. Scanning for the destination costs one keyed BLAKE2s per listed key, with eight keys hashed per SIMD batch, and a registration attempt costs an X25519 operation, about as much as 400 key checks, before the sender is known. A global token bucket, `HANDSHAKE_WORK_PER_SEC` = 1,000,000 mac1 checks per second with a one-second burst, is checked before that work and charged after it: a scan costs the number of keys tried, a registration attempt 400. When it is empty, initiations are dropped cheaply (`handshake_budget`), so forwarding continues at full speed during a flood.
+Initiations are unauthenticated, so their cost must be bounded. Scanning for the destination costs one keyed BLAKE2s per listed key, with eight keys hashed per SIMD batch, and a registration attempt costs an X25519 operation, about as much as 400 key checks, before the sender is known. Two token buckets, each with a one-second burst, are checked before that work and charged after it, so a flood on one path cannot starve the other:
 
-Legitimate load is about `sessions × listed peers / 240` checks per second: every session rekeys every 2 minutes, and a scan tries half the keys on average. The default allows, for example, 1,000 listed peers with 240,000 sessions, or 10,000 with 24,000.
+* **Forwarding**, `FORWARD_WORK_PER_SEC` = 1,000,000 mac1 checks per second, charged the number of keys a scan tried. When it is empty, initiations not for the relay are dropped (`handshake_budget`).
+* **Registration**, `REGISTRATION_WORK_PER_SEC` = 200,000 mac1 checks per second, charged 400 per attempt, so 500 attempts per second. When it is empty, relay-bound initiations are dropped (`registration_budget`).
+
+The order for an initiation is: the per-source limit; one mac1 check against the relay's own key; for a relay-bound initiation, **if `src` is the address a listed peer is currently registered from, the registration budget is skipped** (only the per-source limit applies), otherwise the registration budget is required and charged; any other initiation goes to the forwarding rules above. A flood of registration attempts from other addresses therefore cannot stop registered peers from re-handshaking their registration tunnels. Dropped initiations cost only parsing, the limiter and at most one hash, so forwarding continues at full speed during a flood.
+
+Legitimate forwarding load is about `sessions × listed peers / 240` checks per second: every session rekeys every 2 minutes, and a scan tries half the keys on average. The default allows, for example, 1,000 listed peers with 240,000 sessions, or 10,000 with 24,000. Legitimate registration load from unregistered addresses is only first registrations and address changes, and at 500 per second even 10,000 peers re-registering after a relay restart are admitted within 20 s.
 
 ### Other rules
 
@@ -55,12 +60,13 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 |---|---|
 | `malformed` | wrong size, type or reserved bytes |
 | `rate_limited` | the source (IPv4 address or IPv6 /64) exceeded `handshake_rate_per_ip` |
-| `handshake_budget` | the global handshake budget is spent; the initiation was dropped before any mac1 or X25519 work |
+| `handshake_budget` | the forwarding budget is spent; the initiation was dropped before the mac1 scan |
+| `registration_budget` | the registration budget is spent and the relay-bound initiation did not come from a registered address; dropped before any X25519 work |
 | `reserved_index` | a forwarded handshake picked an index in the relay's range |
 | `no_mac1_match` | the initiation is not for any listed peer or the relay |
 | `peer_not_registered` | the target listed peer has no current registration |
 | `loop` | the initiation came from the target's own address |
-| `too_many_pending` | 65,536 handshakes already await a response |
+| `too_many_pending` | 262,144 handshakes already await a response, across all listed peers |
 | `index_in_use` | the handshake's `sender_idx` belongs to a live session of another address pair |
 | `unknown_index` | no live session for `receiver_idx` |
 | `wrong_source` | the packet is not from the session's `expected_src_addr` |
@@ -83,11 +89,13 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 * **Each listed peer's own WireGuard peer list is the only authentication**, and strangers' handshakes reach the listed peer (it drops them). The relay learns an unlisted peer's address from the initiation it forwards, so an on-path attacker who replays a peer's fresh initiation from another address first can make that handshake fail. That is a denial of service only.
 * **Unlisted peers cannot receive initiations**: the relay cannot tell which peer such a handshake is for. Clients normally start the handshake, and the side that started a session also does its timed rekeys, so with `PersistentKeepalive` this rarely matters. When the server must send first (e.g. right after it restarts), that traffic waits until the client sends something. List a peer to make it reachable; it then registers like a server.
 * **The relay cannot cap who uses its bandwidth.** A listed peer can accept any number of unlisted peers; only handshakes are rate-limited, per source IP.
-* **WireGuard's cookie defence is weaker behind the relay.** A server under load binds cookies to the sender's address, but it sees every packet coming from the relay, so one cookie obtained through the relay is valid for initiations from any (even spoofed) source. The relay's per-IP rate limit and global handshake budget are then the only brakes. See [How it works, section 3.5](how-it-works.md#35-under-load-cookies-and-mac2).
+* **WireGuard's cookie defence is weaker behind the relay.** A server under load binds cookies to the sender's address, but it sees every packet coming from the relay, so one cookie obtained through the relay is valid for initiations from any (even spoofed) source. The relay's per-IP rate limit and forwarding budget are then the only brakes. See [How it works, section 3.5](how-it-works.md#35-under-load-cookies-and-mac2).
 * **The per-IP initiation limit is charged before any check**, so someone who can spoof a peer's source IP can use up that peer's budget and delay its handshakes (for a listed peer, including its re-registration).
-* **The per-source initiation limit is shared** by all hosts behind one NAT address or in one IPv6 /64, and by unrelated sources that hash to the same bucket. Many distributed sources are held back only by the global handshake budget.
-* **Spoofed initiations can fill the pending table.** Each one aimed at a listed peer holds an entry for 10 s, so a flood of about 6,500 per second fills all 65,536; new handshakes are then refused (`too_many_pending`) until entries expire. Memory stays bounded and open sessions keep forwarding.
-* **A sustained handshake flood delays legitimate handshakes.** They compete with the flood for the global budget: open sessions keep forwarding, but new handshakes and rekeys may be dropped (`handshake_budget`) until the flood ends. The budget is a constant, sized so that a flood keeps the relay well below one core.
+* **The per-source initiation limit is shared** by all hosts behind one NAT address or in one IPv6 /64, and by unrelated sources that hash to the same bucket. Many distributed sources are held back only by the handshake budgets.
+* **Spoofed initiations can crowd out handshakes to one listed peer.** Each one aimed at a listed peer takes one of that peer's 1,024 pending slots. A flood that cycles through all of them before the peer's response comes back (with a 100 ms round trip, about 10,000 initiations per second) evicts every legitimate pending entry, so new handshakes to that peer (only) fail until the flood ends. Other peers' handshakes, open sessions and memory are unaffected.
+* **Junk initiations can exhaust the forwarding budget.** A mac1 cannot be looked up by index, so an initiation that matches no key costs a scan of every listed key before it can be dropped. A sustained flood of them makes forwarded handshakes compete for the budget: open sessions keep forwarding and registration tunnels are unaffected, but new handshakes and rekeys between peers may be dropped (`handshake_budget`) until the flood ends.
+* **During a registration flood, a peer registering from a new address competes for the registration budget.** That covers a first registration, NAT rebinding and every peer after a relay restart; their registrations may be delayed (`registration_budget`) until the flood ends. Peers already registered from their current address are not affected.
+* **Packets spoofed from a listed peer's registered address get past several checks.** Relay-bound initiations from it skip the registration budget and are limited only per source, so X25519 work from such packets grows with the number of registered peers times `handshake_rate_per_ip` instead of being capped. Fake cookie replies or responses from it can also keep pending entries alive past 10 s or open them. This needs the registered `ip:port` and a network path that allows spoofing it.
 * **Two listed peers cannot register from the same `ip:port`.** The newest claimant wins and a warning is logged.
 * **Index collisions** between independent sessions (probability 2⁻³² per pair) make the newer handshake fail once (`index_in_use`); its retry uses a new index.
 * **Single-threaded**, with a mac1 scan over the listed peers per handshake, eight keys per SIMD batch. That is fine for thousands of keys.
@@ -117,7 +125,7 @@ The test runs a server, two clients the server knows and a stranger. `relay.toml
 | File | Purpose |
 |---|---|
 | `src/packet/` | wire-format parsing, size checks, mac1, `SessionIdx` |
-| `src/tables.rs` | registry, session table, per-source token buckets, handshake budget |
+| `src/tables.rs` | registry, session table with per-peer pending quotas, per-source token buckets, work budgets |
 | `src/relay/` | `Relay::handle` (no I/O); `forward.rs` forwarding rules, `registration.rs` registration tunnels, `reload.rs`, `reason.rs`, `metrics.rs` |
 | `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
 | `src/main.rs` | parse the CLI, set up logging, report errors |
