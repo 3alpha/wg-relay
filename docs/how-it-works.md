@@ -7,7 +7,7 @@ quick reference; this is the long version.
 
 - [1. The problem](#1-the-problem)
 - [2. The trick: routing ciphertext without keys](#2-the-trick-routing-ciphertext-without-keys)
-- [3. WireGuard in five minutes](#3-wireguard-in-five-minutes)
+- [3. The WireGuard protocol](#3-the-wireguard-protocol)
 - [4. The relay's state](#4-the-relays-state)
 - [5. Server registration](#5-server-registration)
 - [6. A client connects](#6-a-client-connects)
@@ -90,10 +90,15 @@ to reveal the key. This one fact explains several behaviours later on (for
 example, why the relay can't route a server's handshake to a client it has
 never heard of, see [section 8](#8-server-initiated-handshakes-and-rekeys)).
 
-## 3. WireGuard in five minutes
+## 3. The WireGuard protocol
 
-WireGuard has four message types. Only the header fields in **bold** matter to
-the relay; everything else is opaque. All integers are little-endian.
+The relay never decrypts anything, but nearly every rule in it exists because of
+something WireGuard does. This section walks through the protocol, following the
+[WireGuard whitepaper](https://www.wireguard.com/papers/wireguard.pdf), with an
+eye on what is visible on the wire and what that means for a relay.
+
+The four messages at a glance (fields in **bold** are the only ones the relay
+reads; integers are little-endian):
 
 | Type | Name | Size | Layout |
 |---|---|---|---|
@@ -103,10 +108,37 @@ the relay; everything else is opaque. All integers are little-endian.
 | 4 | Data | ≥ 32 B | type(1) reserved(3) **receiver_idx(4)** counter(8) encrypted payload |
 
 mac1 covers every byte before it: the first 116 bytes of an initiation, the
-first 60 of a response. Cookie replies are WireGuard's DoS defence: a peer under
-load answers a handshake with a cookie instead of doing the expensive work.
+first 60 of a response.
 
-A handshake is one round trip:
+### 3.1 Keys and primitives
+
+| Key | Lifetime | Purpose |
+|---|---|---|
+| **Static key pair** | long-term | A peer's identity. The public half is what goes in `PublicKey =` lines and in `relay.toml`. |
+| **Ephemeral key pair** | one handshake | Fresh randomness for each session, giving forward secrecy. |
+| **Preshared key** (optional) | long-term | 32 symmetric bytes mixed into the handshake, a hedge against future quantum attacks on Curve25519. |
+| **Transport keys** | one session (≈ 2 min) | Derived by the handshake, one per direction, used for data packets. |
+
+There is exactly one cipher suite, `Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s`, and no
+negotiation:
+
+| Primitive | Used for |
+|---|---|
+| Curve25519 | every Diffie-Hellman exchange |
+| ChaCha20-Poly1305 | encrypting handshake fields and data packets |
+| XChaCha20-Poly1305 | encrypting cookies (needs a random 24-byte nonce) |
+| BLAKE2s | hashing, mac1/mac2, and HKDF key derivation |
+
+With nothing to negotiate there are no version or algorithm fields, and every
+handshake message has a fixed size. That is what lets the relay validate message
+types by exact length.
+
+### 3.2 The handshake: Noise IKpsk2
+
+In Noise naming, **I** means the initiator transmits its static key (encrypted)
+in the first message, and **K** means it already knows the responder's static
+key, because it is in its config. One round trip gives both sides mutual
+authentication and fresh, forward-secret keys. The overview:
 
 ```mermaid
 sequenceDiagram
@@ -120,18 +152,223 @@ sequenceDiagram
     R->>I: Data (receiver_idx = i)
 ```
 
-Two details the relay depends on:
+Two running values carry the handshake along. The **chaining key** absorbs every
+Diffie-Hellman result through HKDF, and every encryption key is split off from
+it. The **transcript hash** absorbs every byte sent and is used as associated
+data, so each encrypted field is bound to everything before it; tampering with
+any earlier byte breaks every later field.
 
-- **The response's mac1 is keyed to the initiator's public key**, the one the
-  responder just decrypted and authenticated. So a server's response tells the
-  relay *which client the server accepted*, as long as the relay has that
-  client's key to test.
-- **Each side picks its own index**, and a new handshake (every 2 minutes, or
-  after a restart) picks new ones. The relay has to keep learning.
+```mermaid
+flowchart TD
+    S0["Start: chaining key and hash from the protocol name.<br/>The hash also absorbs the responder's static public key."]
+    S0 --> A1["Mix in the initiator's ephemeral public key (sent in the clear)"]
+    A1 --> A2["Mix in DH(initiator ephemeral, responder static).<br/>Split off key k1: it encrypts the initiator's static public key."]
+    A2 --> A3["Mix in DH(initiator static, responder static).<br/>Split off key k2: it encrypts a timestamp."]
+    A3 --> M1(["Initiation sent"])
+    M1 --> B1["Mix in the responder's ephemeral public key (sent in the clear)"]
+    B1 --> B2["Mix in DH(responder ephemeral, initiator ephemeral)"]
+    B2 --> B3["Mix in DH(responder ephemeral, initiator static)"]
+    B3 --> B4["Mix in the preshared key (zeros if none).<br/>Split off key k3: it seals an empty payload."]
+    B4 --> M2(["Response sent"])
+    M2 --> T["Split the chaining key into two transport keys,<br/>one per direction. Counters start at zero."]
+```
 
-WireGuard identifies a peer by its key and indexes, never by source address. That
-is why every peer on a host can share the same `Endpoint` (the relay) without
-confusion.
+What each Diffie-Hellman exchange contributes:
+
+| Exchange | Who can compute it | What it gives |
+|---|---|---|
+| initiator ephemeral × responder static | initiator, and only the real responder | hides the initiator's identity: only the responder can decrypt `enc_static` |
+| initiator static × responder static | the two real peers | authenticates both static keys in the first message |
+| responder ephemeral × initiator ephemeral | only this session's two peers | forward secrecy: stealing static keys later does not reveal this session |
+| responder ephemeral × initiator static | responder, and only the real initiator | only the real initiator can derive the transport keys |
+
+The initiation, field by field:
+
+| Field | Bytes | Contents | Readable by |
+|---|---|---|---|
+| `sender_idx` | 4 | random index the initiator picked for this session | everyone (the relay routes on it) |
+| `ephemeral` | 32 | initiator's ephemeral public key | everyone, but it looks random |
+| `enc_static` | 48 | initiator's static public key + 16-byte tag | only the responder |
+| `enc_timestamp` | 28 | 12-byte TAI64N timestamp + tag | only the responder |
+| `mac1` | 16 | MAC keyed with `BLAKE2s("mac1----" ‖ responder public key)` | anyone who knows the responder's public key (the relay does) |
+| `mac2` | 16 | zeros, or a MAC keyed with a cookie (section 3.5) | the responder |
+
+And the response:
+
+| Field | Bytes | Contents | Readable by |
+|---|---|---|---|
+| `sender_idx` | 4 | random index the responder picked | everyone |
+| `receiver_idx` | 4 | the initiator's `sender_idx` | everyone |
+| `ephemeral` | 32 | responder's ephemeral public key | everyone, but it looks random |
+| `enc_empty` | 16 | an authentication tag over nothing; producing it requires the responder's static private key | the initiator |
+| `mac1` | 16 | MAC keyed with `BLAKE2s("mac1----" ‖ initiator public key)` | anyone who knows the initiator's public key |
+
+A few consequences matter for the relay:
+
+- **The initiation hides who is calling; the response reveals who was accepted.**
+  The relay cannot read `enc_static`, so it cannot tell which client sent an
+  initiation. The response's mac1, however, is keyed to the initiator's public
+  key. A relay that knows candidate client keys can test which one the server
+  just accepted. That is the whole basis of the `response` gate.
+- **Replays are refused by the responder.** It keeps the newest timestamp seen
+  from each peer and rejects anything not newer, so a captured initiation can't
+  be replayed to start a session. The relay's server registration leans on this:
+  only a fresh handshake from the server can (re)register it.
+- **The responder speaks second in data, too.** The initiator can send data as
+  soon as the response arrives. The responder has to wait for the initiator's
+  first data packet, which confirms both sides derived the same keys. That is
+  why an initiator with nothing to send immediately sends an empty keepalive.
+  You can see it in every handshake through the relay ([section 6](#6-a-client-connects)).
+
+### 3.3 Transport: data packets
+
+| Field | Bytes | Contents |
+|---|---|---|
+| `receiver_idx` | 4 | the recipient's index, so it finds the right keys without trial decryption |
+| `counter` | 8 | the nonce: 0, 1, 2, … per direction, sent in the clear |
+| payload | 16 + n | the IP packet, padded to a multiple of 16 bytes, then encrypted with a 16-byte tag |
+
+- **Replay protection:** the receiver tracks counters in a sliding window and
+  drops duplicates and anything too old.
+- **Padding** rounds every packet up to 16 bytes, so an observer such as the
+  relay sees sizes in 16-byte steps rather than exact lengths.
+- **Keepalives** are data packets with an empty payload: 4 + 4 + 8 + 16 = 32
+  bytes, which is why 32 is the minimum data size the relay accepts.
+- **Overlapping keys:** each peer keeps the previous, current and next keypairs,
+  so packets in flight during a rekey still decrypt.
+
+`receiver_idx` exists so the recipient can find its keys quickly. The relay
+uses the same field, which is why it can route data without any keys at all.
+
+### 3.4 Timers: when handshakes happen
+
+WireGuard has no connection state machine to configure. A handful of timers
+decide everything:
+
+| Constant | Value | Rule |
+|---|---|---|
+| `REKEY_AFTER_TIME` | 120 s | the side that initiated a session starts a new handshake when it sends with a key this old |
+| `REJECT_AFTER_TIME` | 180 s | a key this old is never used again, in either direction |
+| `REKEY_TIMEOUT` | 5 s | an unanswered initiation is retried after this long (with a fresh `sender_idx`) |
+| `REKEY_ATTEMPT_TIME` | 90 s | retries stop after this long, until there is new data to send |
+| `KEEPALIVE_TIMEOUT` | 10 s | received data but have nothing to send back for this long: send a keepalive |
+| send, no reply | 10 + 5 = 15 s | sent data and heard nothing for this long: assume the session is dead and start a new handshake |
+| `PersistentKeepalive` | per peer | send a keepalive every N seconds regardless, to keep NAT mappings open |
+
+```mermaid
+flowchart TD
+    D1["No session yet,<br/>and a packet to send"] --> H["Send an initiation<br/>(new random sender_idx)"]
+    D2["Sending on a key<br/>older than 120 s<br/>(we initiated it)"] --> H
+    D3["Sent data, no reply<br/>for 15 s"] --> H
+    D4["Received on a key<br/>older than 165 s<br/>(we initiated it)"] --> H
+    H --> W{"Response<br/>within 5 s?"}
+    W -- yes --> OK["New keypair, counters reset,<br/>old keypair kept for<br/>in-flight packets"]
+    W -- no --> T{"Retrying for<br/>90 s already?"}
+    T -- no --> H
+    T -- yes --> G["Stop until there is<br/>new data to send"]
+```
+
+How these numbers show up in the relay:
+
+- The **2-minute rekey** is why the relay keeps learning new indexes, and why old
+  session entries simply age out.
+- The relay's **200 s session TTL** sits just above `REJECT_AFTER_TIME`, so the
+  relay never forgets an index that WireGuard might still use.
+- The **15 s no-reply rule** is why a client that changes network recovers in
+  about 5 to 15 s ([section 14](#14-when-things-move-roaming-and-restarts)).
+- **`PersistentKeepalive = 25`** keeps every NAT mapping open, refreshes the
+  server's registration well inside its 180 s TTL, and, because a keepalive
+  counts as sending, keeps sessions rekeying while idle.
+
+### 3.5 Under load: cookies and mac2
+
+A handshake costs the responder several Curve25519 operations, so a flood of
+initiations could exhaust it. mac1 already filters anyone who doesn't know the
+responder's public key. For floods from people who do, WireGuard adds a
+**cookie** exchange that proves the sender can receive packets at the address it
+claims:
+
+```mermaid
+sequenceDiagram
+    participant I as Initiator
+    participant R as Responder (under load)
+    I->>R: Initiation<br/>valid mac1, mac2 = zeros
+    Note right of R: under load: no<br/>Diffie-Hellman yet.<br/>cookie = MAC(secret,<br/>sender IP and port)
+    R->>I: Cookie reply (receiver_idx = i)<br/>cookie encrypted, bound to that mac1
+    Note left of I: decrypts the cookie,<br/>keeps it up to 2 min
+    I->>R: Initiation again<br/>mac2 = MAC(cookie, message)
+    Note right of R: mac2 valid: the sender<br/>receives at that address.<br/>Do the handshake.
+    R->>I: Response
+```
+
+The cookie reply is encrypted with a key derived from the responder's public key,
+and its associated data is the mac1 of the message it answers. Only someone who
+sent that initiation can use it, and a spoofed source address never receives it.
+That is why the relay lets cookie replies through on *pending* sessions
+([section 7](#7-sessions-the-state-machine)): without that, a server under load
+could never complete a handshake through the relay.
+
+**What the relay changes here.** The server sees every packet arriving from the
+relay's address, so it computes the same cookie for every client. The cookie no
+longer proves anything about the real sender. Someone who obtains one cookie
+through the relay could attach a valid mac2 to initiations sent from spoofed
+addresses, and the server would do the expensive work for each. The relay's
+per-source-IP rate limit is then the only brake, and each spoofed address gets
+its own budget. This is listed under the README's limitations. Possible
+hardening, not implemented: a global initiation cap per server, or the relay
+running the cookie exchange itself (it knows each server's public key, which is
+all the protocol needs).
+
+### 3.6 Cryptokey routing and roaming
+
+Each peer's `AllowedIPs` does two jobs at once:
+
+```mermaid
+flowchart TB
+    subgraph sendg["Sending"]
+        direction LR
+        O1["IP packet<br/>for 10.99.0.1"] --> O2{"Whose AllowedIPs<br/>contain 10.99.0.1?"}
+        O2 --> O3["encrypt with that<br/>peer's transport key"]
+        O3 --> O4["send to that peer's<br/>endpoint (the relay)"]
+    end
+    subgraph recvg["Receiving"]
+        direction LR
+        I1["data packet"] --> I2["receiver_idx finds<br/>the keys and the peer"]
+        I2 --> I3{"decrypts, and inner<br/>source IP is in that<br/>peer's AllowedIPs?"}
+        I3 -- yes --> I4["deliver, and set the<br/>peer's endpoint to the<br/>packet's source"]
+        I3 -- no --> I5["drop"]
+    end
+    sendg ~~~ recvg
+```
+
+- **Routing out:** the destination IP picks the peer.
+- **Filtering in:** a decrypted packet is accepted only if its inner source IP
+  belongs to the peer whose keys decrypted it. A peer cannot spoof another
+  peer's tunnel address.
+- **Roaming:** every authenticated packet updates that peer's endpoint to the
+  packet's source. Peers can move freely, and the most recent address wins.
+
+What this means behind the relay:
+
+- Every peer's endpoint is the relay, so from WireGuard's point of view nothing
+  ever roams. The relay absorbs all address changes (section 14).
+- The server's `[Peer]` for the relay has `AllowedIPs = 10.99.0.254/32`. Even an
+  attacker holding the relay's private key can only inject packets whose inner
+  source is `10.99.0.254`, and only the relay's pings are routed there. The
+  relay's key opens a door into one `/32` and nothing else.
+
+### 3.7 What survives the relay
+
+| Property | How WireGuard provides it | Through wg-relay |
+|---|---|---|
+| Confidentiality and integrity | ChaCha20-Poly1305 on every field and packet | unchanged: the relay cannot read or alter anything |
+| Mutual authentication | static keys inside Noise IK | unchanged: the relay never holds client or server keys |
+| Forward secrecy | ephemeral Diffie-Hellman, keys replaced every 2 min | unchanged |
+| Replay protection | handshake timestamps, data counters | unchanged |
+| Silence towards strangers | no reply without a valid mac1 and handshake | kept: the relay never answers forwarded traffic |
+| Identity hiding | initiator's static key encrypted to the responder | partly lost: mac1 tells the relay which server is called, and the response's mac1 which *listed* client was accepted |
+| Flood resistance | mac1, plus cookies bound to the sender's address | weakened: the server sees one address, so cookies stop distinguishing clients (section 3.5) |
+| Hidden packet sizes | padding to 16 bytes | unchanged; the relay sees padded sizes and timing |
 
 ## 4. The relay's state
 
@@ -184,16 +421,20 @@ sequenceDiagram
     Note over R: mac1 matches the relay's own key<br/>parse_handshake_anon reveals sender = server "main"<br/>"main" is allowlisted, so its Tunn takes the packet
     R->>N: Response (from the relay's Tunn for "main")
     N->>S: Response
-    Note over R: handshake authenticated:<br/>registry["main"] = 198.51.100.7:40001
+    S->>R: keepalive (confirms the handshake)
+    Note over R: authenticated:<br/>registry["main"] = 198.51.100.7:40001
     loop every 25 s
         S->>R: keepalive (authenticated data packet)
         Note over R: registry refreshed, NAT mapping kept open
     end
 ```
 
-What counts as authenticated: a completed handshake, a data packet, or a
-keepalive that decrypts on that server's tunnel. A cookie reply never counts,
-because producing one proves nothing about who you are. If an authenticated
+What counts as authenticated: a data packet or a keepalive that decrypts on
+that server's tunnel. An initiation alone does not count, because a captured
+one could be replayed from another address (for instance after a relay restart,
+when the replay timestamp is forgotten); the server's first keepalive right
+after the handshake does. A cookie reply never counts either, because producing
+one proves nothing about who you are. If an authenticated
 packet arrives from a **new** address (the server's NAT rebound), the registry
 moves the server there and every session using the old address is rewritten.
 
@@ -241,28 +482,28 @@ the session, even if they guess the index.
 Every entry in the session table follows this life cycle:
 
 ```mermaid
-stateDiagram-v2
-    [*] --> Pending: initiation forwarded<br/>(entry for the initiator's index)
-    [*] --> Open: response accepted<br/>(entry for the responder's index)
-    Pending --> Open: response accepted
-    Pending --> Pending: cookie reply forwarded
-    Pending --> [*]: 200 s idle / revoked by reload
-    Open --> Open: data or cookie forwarded (refreshes last_seen)
-    Open --> [*]: 200 s idle / revoked by reload / index reused (newest wins)
+flowchart LR
+    NEW(("handshake<br/>seen")) -- "initiation<br/>forwarded" --> P["Pending<br/>only cookie replies pass"]
+    P -- "response<br/>accepted" --> O["Open<br/>data and cookies pass"]
+    NEW -- "response accepted<br/>(responder's index)" --> O
+    O -- "200 s idle<br/>or reload" --> GONE(("removed"))
+    P -- "10 s idle<br/>or reload" --> GONE
 ```
 
 What each state lets through, always only from `expected_src`:
 
 | Packet | `Pending` | `Open` |
 |---|---|---|
-| Type 2, response | yes, subject to the gate (section 9) | n/a |
+| Type 2, response | yes, subject to the gate (section 9) | **no** (`session_not_pending`): one response per initiation |
 | Type 3, cookie reply | **yes**, so a server under load can still answer | yes |
 | Type 4, data | **no** (`session_not_open`) | yes |
 
 A WireGuard session rekeys every 2 minutes, which creates new indexes; the old
-entries simply age out after 200 s of silence. If two unrelated sessions pick
-the same index (probability 2⁻³² per pair), the newest entry wins and a warning
-is logged.
+entries simply age out after 200 s of silence. A pending entry whose handshake
+is never answered goes after 10 s. If a handshake picks an index that a live
+entry of a different address pair already holds (probability 2⁻³² per pair by
+accident), it is dropped (`index_in_use`) and the peer retries with a new index,
+so an index in use can never be taken over.
 
 ## 8. Server-initiated handshakes and rekeys
 
@@ -303,7 +544,9 @@ flowchart TD
     B -- no --> X1["Drop: unknown_index"]
     B -- yes --> C{"from the session's<br/>expected_src?"}
     C -- no --> X2["Drop: wrong_source"]
-    C -- yes --> D{"source is a<br/>registered server?"}
+    C -- yes --> P{"session still<br/>Pending?"}
+    P -- no --> X6["Drop: session_not_pending"]
+    P -- yes --> D{"source is a<br/>registered server?"}
     D -- "no: a client answering<br/>a server's handshake" --> E{"mac1 matches the<br/>session's server?"}
     E -- no --> X3["Drop: response_not_for_server"]
     E -- yes --> OK["Open session, forward"]
@@ -373,11 +616,11 @@ flowchart TD
     C -- yes --> L{"src is the server<br/>itself?"}
     L -- yes --> X2["Drop: loop"]
     L -- no --> OK1["Pending session for sender_idx,<br/>forward to server"]
-    B -- no --> E{"mac1 matches a<br/>listed client?"}
-    E -- no --> X3["Drop: no_mac1_match"]
-    E -- yes --> F{"src is a<br/>registered server?"}
-    F -- no --> X4["Drop: rekey_not_from_server"]
-    F -- yes --> G{"client may reach<br/>that server?"}
+    B -- no --> F{"src is a<br/>registered server?"}
+    F -- no --> X3["Drop: no_mac1_match"]
+    F -- yes --> E{"mac1 matches a<br/>listed client?"}
+    E -- no --> X4["Drop: no_mac1_match"]
+    E -- yes --> G{"client may reach<br/>that server?"}
     G -- no --> X5["Drop: acl"]
     G -- yes --> H{"client's address<br/>learned?"}
     H -- no --> X6["Drop: client_addr_unknown"]
@@ -421,7 +664,9 @@ whose `receiver_idx` is in a relay prefix can go straight to that relay tunnel.
 | WireGuard rekey | about 2 min | WireGuard itself | new keys and new indexes |
 | Registration TTL | 180 s | `REGISTRY_TTL` | a server silent for 3 min is forgotten |
 | Session TTL | 200 s idle | `SESSION_TTL` | indexes from old handshakes age out |
-| Relay tick | 250 ms | `app.rs` | runs relay tunnel timers, expires tables, prunes rate-limit buckets |
+| Pending TTL | 10 s idle | `PENDING_TTL` | unanswered initiations do not pile up |
+| Relay tick | 250 ms | `app.rs` | runs relay tunnel timers |
+| Table sweep | 1 s | `SWEEP_INTERVAL` | expires tables, prunes rate-limit buckets |
 | Stats log | 60 s | `app.rs` | logs all counters, including per-reason rejects |
 | Rate limit | `handshake_rate_per_ip`, burst 2 s worth | `relay.toml` | caps initiations per source IP |
 
@@ -434,15 +679,16 @@ gantt
     title One server and one client over five minutes (relative seconds)
     dateFormat X
     axisFormat %s
-    section Server registration
-    registered, refreshed every 25 s     :active, 0, 300
-    section Client session 1
-    handshake + traffic                  :done, 0, 120
-    idle until expiry                    :120, 320
-    section Client session 2 (rekey)
-    handshake + traffic                  :active, 120, 240
-    section Client session 3 (rekey)
-    handshake + traffic                  :active, 240, 300
+    section Server
+    registered, keepalive every 25 s     :0, 300
+    section Session 1
+    traffic                              :done, 0, 120
+    idle until expiry at 320 s           :120, 300
+    section Session 2
+    traffic                              :done, 120, 240
+    idle                                 :240, 300
+    section Session 3
+    traffic                              :done, 240, 300
 ```
 
 ## 13. Reload (SIGHUP)
