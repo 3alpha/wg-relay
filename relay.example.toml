@@ -6,7 +6,8 @@ listen = "0.0.0.0:51820"
 private_key = "<base64 private key>"
 # Address the relay answers pings on inside the registration tunnels.
 tunnel_ip = "10.99.0.254"
-# Handshake initiations per source IP: "<n>/s" or "<n>/m". Burst = 2 s worth.
+# Handshake initiations per source (IPv4 address or IPv6 /64): "<n>/s" or
+# "<n>/m". Burst = 2 s worth.
 handshake_rate_per_ip = "10/s"
 
 # The peers that must be reachable, usually the servers. Each one adds the

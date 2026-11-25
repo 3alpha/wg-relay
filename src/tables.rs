@@ -3,6 +3,7 @@
 use crate::key::PeerKey;
 use crate::packet::{IdxPrefix, SessionIdx};
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -11,8 +12,21 @@ pub const SESSION_TTL: Duration = Duration::from_secs(200);
 /// A handshake is answered within WireGuard's 5 s retry timer or abandoned.
 pub const PENDING_TTL: Duration = Duration::from_secs(10);
 
+/// Rate-limit buckets, a power of two. Fixed, so spoofed sources cannot grow memory.
+const RATE_SLOTS: usize = 1 << 16;
+/// Maps smaller than this are never shrunk, to avoid reallocating for nothing.
+const SHRINK_MIN_CAPACITY: usize = 1024;
+
 fn live(at: Instant, now: Instant, ttl: Duration) -> bool {
     now.saturating_duration_since(at) < ttl
+}
+
+/// Give memory back once a map is mostly empty, e.g. after a flood:
+/// `HashMap` never shrinks on its own.
+fn shrink_if_sparse<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>) {
+    if map.capacity() > SHRINK_MIN_CAPACITY && map.capacity() > 4 * map.len() {
+        map.shrink_to(2 * map.len());
+    }
 }
 
 /// key -> (address, last authenticated packet), plus the reverse map. Only
@@ -140,11 +154,17 @@ impl Ttls {
 pub struct SessionTable {
     ttls: Ttls,
     map: HashMap<SessionIdx, Session>,
+    /// Entries in the `Pending` state, live or not yet swept.
+    pending: usize,
 }
 
 impl SessionTable {
     pub fn new(open_ttl: Duration, pending_ttl: Duration) -> Self {
-        SessionTable { ttls: Ttls { open: open_ttl, pending: pending_ttl }, map: HashMap::new() }
+        SessionTable {
+            ttls: Ttls { open: open_ttl, pending: pending_ttl },
+            map: HashMap::new(),
+            pending: 0,
+        }
     }
 
     /// Insert unless a live entry for a different address pair owns the index,
@@ -155,10 +175,14 @@ impl SessionTable {
         let taken = self.map.get(&idx).is_some_and(|old| {
             (old.dest, old.expected_src) != (s.dest, s.expected_src) && ttls.live(old, s.last_seen)
         });
-        if !taken {
-            self.map.insert(idx, s);
+        if taken {
+            return false;
         }
-        !taken
+        if let Some(old) = self.map.insert(idx, s) {
+            self.pending -= usize::from(old.state == SessionState::Pending);
+        }
+        self.pending += usize::from(s.state == SessionState::Pending);
+        true
     }
 
     pub fn get(&self, idx: SessionIdx, now: Instant) -> Option<Session> {
@@ -174,6 +198,7 @@ impl SessionTable {
     /// Mark a pending index open once the response is accepted.
     pub fn open(&mut self, idx: SessionIdx, now: Instant) {
         if let Some(s) = self.map.get_mut(&idx) {
+            self.pending -= usize::from(s.state == SessionState::Pending);
             s.last_seen = now;
             s.state = SessionState::Open;
         }
@@ -193,8 +218,14 @@ impl SessionTable {
 
     /// Keep only matching sessions; returns how many were removed.
     pub fn retain(&mut self, mut keep: impl FnMut(&Session) -> bool) -> usize {
-        let before = self.map.len();
-        self.map.retain(|_, s| keep(s));
+        let (before, mut pending_gone) = (self.map.len(), 0);
+        self.map.retain(|_, s| {
+            let kept = keep(s);
+            pending_gone += usize::from(!kept && s.state == SessionState::Pending);
+            kept
+        });
+        self.pending -= pending_gone;
+        shrink_if_sparse(&mut self.map);
         before - self.map.len()
     }
 
@@ -210,6 +241,11 @@ impl SessionTable {
 
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    /// How many sessions await a response.
+    pub fn pending(&self) -> usize {
+        self.pending
     }
 }
 
@@ -233,38 +269,52 @@ impl Bucket {
     }
 }
 
-/// Token bucket per source IP, for handshake initiations.
+/// Token buckets per source, for handshake initiations: an IPv4 address or
+/// an IPv6 /64, the smallest block a single host usually gets. Sources are
+/// hashed with a random key into a fixed number of buckets, so memory stays
+/// constant however many sources (spoofed or not) appear; sources that share a
+/// bucket share its allowance.
 pub struct RateLimiter {
     burst: f64,
     per_sec: f64,
-    buckets: HashMap<IpAddr, Bucket>,
+    hasher: RandomState,
+    /// `None` is a bucket nobody has used yet, i.e. a full one.
+    buckets: Vec<Option<Bucket>>,
 }
 
 impl RateLimiter {
     /// The burst is two seconds' worth of tokens (at least one).
     pub fn new(per_sec: f64) -> Self {
-        RateLimiter { burst: (per_sec * 2.0).max(1.0), per_sec, buckets: HashMap::new() }
+        RateLimiter {
+            burst: (per_sec * 2.0).max(1.0),
+            per_sec,
+            hasher: RandomState::new(),
+            buckets: vec![None; RATE_SLOTS],
+        }
     }
 
     pub fn set_rate(&mut self, per_sec: f64) {
         (self.per_sec, self.burst) = (per_sec, (per_sec * 2.0).max(1.0));
     }
 
+    fn slot(&self, ip: IpAddr) -> usize {
+        let source = match ip {
+            IpAddr::V4(a) => (4, u64::from(a.to_bits())),
+            IpAddr::V6(a) => (6, (a.to_bits() >> 64) as u64),
+        };
+        self.hasher.hash_one(source) as usize % RATE_SLOTS
+    }
+
     pub fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
-        let b = self.buckets.entry(ip).or_insert(Bucket::full(self.burst, now));
-        b.refill(now, self.per_sec, self.burst);
+        let (per_sec, burst) = (self.per_sec, self.burst);
+        let slot = self.slot(ip);
+        let b = self.buckets[slot].get_or_insert(Bucket::full(burst, now));
+        b.refill(now, per_sec, burst);
         let ok = b.tokens >= 1.0;
         if ok {
             b.tokens -= 1.0;
         }
         ok
-    }
-
-    /// Forget sources whose bucket would be full again by now.
-    pub fn prune(&mut self, now: Instant) {
-        let full_after = self.burst / self.per_sec;
-        self.buckets
-            .retain(|_, b| now.saturating_duration_since(b.last).as_secs_f64() < full_after);
     }
 }
 
@@ -452,12 +502,62 @@ mod tests {
     #[test]
     fn rate_limiter_has_two_second_burst_per_source() {
         let t0 = Instant::now();
-        let ip = "192.0.2.1".parse().unwrap();
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
         let mut l = RateLimiter::new(1.5);
         assert!((0..3).all(|_| l.allow(ip, t0)), "burst of 3");
         assert!(!l.allow(ip, t0));
-        assert!(l.allow("192.0.2.2".parse().unwrap(), t0), "per-source buckets");
+        // Any other source in a different bucket is unaffected.
+        let other = (2..=255)
+            .map(|n| IpAddr::from([192, 0, 2, n]))
+            .find(|o| l.slot(*o) != l.slot(ip))
+            .unwrap();
+        assert!(l.allow(other, t0), "per-source buckets");
         assert!(l.allow(ip, t0 + secs(1)));
         assert!(!l.allow(ip, t0 + secs(1)));
+    }
+
+    #[test]
+    fn rate_limiter_groups_ipv6_by_slash_64() {
+        let l = RateLimiter::new(1.0);
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert_eq!(l.slot(ip("2001:db8:1:2::1")), l.slot(ip("2001:db8:1:2:ffff::9")));
+        let others = (3..200).map(|n| ip(&format!("2001:db8:1:{n:x}::1")));
+        assert!(others.into_iter().any(|o| l.slot(o) != l.slot(ip("2001:db8:1:2::1"))));
+    }
+
+    #[test]
+    fn session_table_counts_pending_through_every_transition() {
+        let t0 = Instant::now();
+        let mut t = table();
+        t.insert(idx(1), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        t.insert(idx(2), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        t.insert(idx(3), open("192.0.2.1:1", "192.0.2.2:2", t0));
+        assert_eq!(t.pending(), 2);
+        t.insert(idx(1), pending("192.0.2.1:1", "192.0.2.2:2", t0 + secs(1)));
+        assert_eq!(t.pending(), 2, "replacing a pending entry");
+        assert!(!t.insert(idx(1), pending("192.0.2.3:3", "192.0.2.4:4", t0)), "refused");
+        assert_eq!(t.pending(), 2);
+        t.open(idx(2), t0);
+        t.open(idx(2), t0);
+        assert_eq!(t.pending(), 1, "opened once");
+        assert_eq!(t.expire(t0 + secs(30)), 1);
+        assert_eq!(t.pending(), 0, "expired");
+        t.insert(idx(4), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        assert_eq!(t.retain(|s| s.state == SessionState::Open), 1);
+        assert_eq!(t.pending(), 0, "removed by retain");
+    }
+
+    #[test]
+    fn session_table_gives_memory_back_after_a_flood() {
+        let t0 = Instant::now();
+        let mut t = table();
+        for i in 0..100_000 {
+            t.insert(idx(i), pending("192.0.2.1:1", "192.0.2.2:2", t0));
+        }
+        let peak = t.map.capacity();
+        t.insert(idx(1 << 31), open("192.0.2.1:1", "192.0.2.2:2", t0 + secs(5)));
+        assert_eq!(t.expire(t0 + secs(11)), 100_000);
+        assert!(t.map.capacity() < peak / 50, "{} of {peak}", t.map.capacity());
+        assert_eq!((t.len(), t.pending()), (1, 0));
     }
 }

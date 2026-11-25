@@ -36,6 +36,9 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 const HANDSHAKE_WORK_PER_SEC: f64 = 1_000_000.0;
 /// What a registration attempt costs: its X25519 work, measured in mac1 checks.
 const REGISTRATION_WORK: usize = 400;
+/// Most handshakes awaiting a response at once (about 17 MB of table). Spoofed
+/// initiations each hold an entry for `PENDING_TTL`, so this bounds their memory.
+const MAX_PENDING: usize = 65_536;
 
 /// What the relay holds for each listed peer.
 struct PeerState {
@@ -197,7 +200,6 @@ impl Relay {
         if gone > 0 {
             debug!(gone, live = self.sessions.len(), "expired sessions");
         }
-        self.limiter.prune(now);
     }
 
     fn reserved(&self, idx: SessionIdx) -> bool {
@@ -253,5 +255,30 @@ mod tests {
         assert_eq!(verdicts, [miss, miss, miss, miss, shed], "10 -> 7 -> 4 -> 1 -> -2");
         assert_eq!(send(&mut relay, 9, t0 + Duration::from_millis(300)), miss, "refilled to 1");
         assert_eq!(relay.metrics().rejected(Reason::HandshakeBudget), 1);
+    }
+
+    #[test]
+    fn full_pending_table_refuses_initiations_before_the_scan() {
+        let mut relay = relay();
+        relay.budget = WorkBudget::new(10.0);
+        let (now, a, b) = (
+            Instant::now(),
+            SocketAddr::from(([192, 0, 2, 1], 1)),
+            SocketAddr::from(([192, 0, 2, 2], 2)),
+        );
+        let key = PeerKey::from([7; 32]);
+        for i in 0..MAX_PENDING as u32 {
+            relay.sessions.insert(i.into(), crate::tables::Session::pending(a, b, key, now));
+        }
+        let mut junk = vec![0u8; packet::INIT_LEN];
+        junk[0] = 1;
+        junk[4] = 0xee; // a sender index none of the entries uses
+        junk[7] = 0xee;
+        let verdicts: Vec<Verdict> = (0..5).map(|_| relay.handle(a, &junk, now)).collect();
+        assert_eq!(verdicts, [Verdict::Drop(Reason::TooManyPending); 5], "and no budget spent");
+        relay.tick(now + PENDING_TTL + SWEEP_INTERVAL);
+        assert_eq!(relay.sessions.pending(), 0);
+        let later = now + PENDING_TTL + SWEEP_INTERVAL;
+        assert_eq!(relay.handle(a, &junk, later), Verdict::Drop(Reason::NoMac1Match));
     }
 }

@@ -17,11 +17,11 @@ Each listed peer has the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` 
 
 ### Session table
 
-`receiver_idx → { dest_addr, expected_src_addr, open, last_seen, peer }`, where `peer` is the listed peer the session was routed to, used to revoke sessions on reload. **Every type 2, 3 and 4 packet must arrive from `expected_src_addr`.** Open entries expire after 200 s idle, pending ones (an initiation without an accepted response) after 10 s. A handshake that picks an index held by a live entry of a different address pair is dropped (`index_in_use`), so nobody can take over an index someone else is using; the peer retries with a new index.
+`receiver_idx → { dest_addr, expected_src_addr, open, last_seen, peer }`, where `peer` is the listed peer the session was routed to, used to revoke sessions on reload. **Every type 2, 3 and 4 packet must arrive from `expected_src_addr`.** Open entries expire after 200 s idle, pending ones (an initiation without an accepted response) after 10 s. At most 65,536 entries may be pending at once (`MAX_PENDING`, about 17 MB); beyond that, initiations are dropped before any other work (`too_many_pending`). The table gives memory back once the sweep finds it mostly empty. A handshake that picks an index held by a live entry of a different address pair is dropped (`index_in_use`), so nobody can take over an index someone else is using; the peer retries with a new index.
 
 ### Forwarding rules
 
-Every initiation is rate-limited per source IP first, then checked against the global handshake budget (below).
+Every initiation is rate-limited per source first, then checked against the global handshake budget (below). A source is an IPv4 address or an IPv6 /64, hashed with a random key into one of 65,536 fixed buckets, so the limiter's memory is constant (under 2 MB) however many sources appear; sources that share a bucket share its allowance.
 
 **Type 1, initiation** (`sender_idx` must not be in a relay prefix):
 
@@ -54,12 +54,13 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 | Reason | Meaning |
 |---|---|
 | `malformed` | wrong size, type or reserved bytes |
-| `rate_limited` | the source IP exceeded `handshake_rate_per_ip` |
+| `rate_limited` | the source (IPv4 address or IPv6 /64) exceeded `handshake_rate_per_ip` |
 | `handshake_budget` | the global handshake budget is spent; the initiation was dropped before any mac1 or X25519 work |
 | `reserved_index` | a forwarded handshake picked an index in the relay's range |
 | `no_mac1_match` | the initiation is not for any listed peer or the relay |
 | `peer_not_registered` | the target listed peer has no current registration |
 | `loop` | the initiation came from the target's own address |
+| `too_many_pending` | 65,536 handshakes already await a response |
 | `index_in_use` | the handshake's `sender_idx` belongs to a live session of another address pair |
 | `unknown_index` | no live session for `receiver_idx` |
 | `wrong_source` | the packet is not from the session's `expected_src_addr` |
@@ -84,7 +85,8 @@ Every rejected datagram increments a per-reason counter and logs `reject reason=
 * **The relay cannot cap who uses its bandwidth.** A listed peer can accept any number of unlisted peers; only handshakes are rate-limited, per source IP.
 * **WireGuard's cookie defence is weaker behind the relay.** A server under load binds cookies to the sender's address, but it sees every packet coming from the relay, so one cookie obtained through the relay is valid for initiations from any (even spoofed) source. The relay's per-IP rate limit and global handshake budget are then the only brakes. See [How it works, section 3.5](how-it-works.md#35-under-load-cookies-and-mac2).
 * **The per-IP initiation limit is charged before any check**, so someone who can spoof a peer's source IP can use up that peer's budget and delay its handshakes (for a listed peer, including its re-registration).
-* **The per-IP initiation limit is shared** by all hosts behind one NAT address. Many distributed sources are held back only by the global handshake budget.
+* **The per-source initiation limit is shared** by all hosts behind one NAT address or in one IPv6 /64, and by unrelated sources that hash to the same bucket. Many distributed sources are held back only by the global handshake budget.
+* **Spoofed initiations can fill the pending table.** Each one aimed at a listed peer holds an entry for 10 s, so a flood of about 6,500 per second fills all 65,536; new handshakes are then refused (`too_many_pending`) until entries expire. Memory stays bounded and open sessions keep forwarding.
 * **A sustained handshake flood delays legitimate handshakes.** They compete with the flood for the global budget: open sessions keep forwarding, but new handshakes and rekeys may be dropped (`handshake_budget`) until the flood ends. The budget is a constant, sized so that a flood keeps the relay well below one core.
 * **Two listed peers cannot register from the same `ip:port`.** The newest claimant wins and a warning is logged.
 * **Index collisions** between independent sessions (probability 2⁻³² per pair) make the newer handshake fail once (`index_in_use`); its retry uses a new index.
@@ -115,7 +117,7 @@ The test runs a server, two clients the server knows and a stranger. `relay.toml
 | File | Purpose |
 |---|---|
 | `src/packet/` | wire-format parsing, size checks, mac1, `SessionIdx` |
-| `src/tables.rs` | registry, session table, per-IP token bucket, handshake budget |
+| `src/tables.rs` | registry, session table, per-source token buckets, handshake budget |
 | `src/relay/` | `Relay::handle` (no I/O); `forward.rs` forwarding rules, `registration.rs` registration tunnels, `reload.rs`, `reason.rs`, `metrics.rs` |
 | `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
 | `src/main.rs` | parse the CLI, set up logging, report errors |

@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use super::{Reason, Relay};
+use super::{MAX_PENDING, Reason, Relay};
 use crate::packet::SessionIdx;
 use crate::tables::{Session, SessionState};
 
@@ -23,6 +23,10 @@ impl Relay {
     ) -> Result<SocketAddr, Reason> {
         if self.reserved(sender) {
             return Err(Reason::ReservedIndex);
+        }
+        // Checked before the scan, so a full table also spares the handshake budget.
+        if self.sessions.pending() >= MAX_PENDING {
+            return Err(Reason::TooManyPending);
         }
         // Anyone may initiate to a listed peer; its own WireGuard peer list decides.
         let peer = self.mac1_peer(pkt).ok_or(Reason::NoMac1Match)?;

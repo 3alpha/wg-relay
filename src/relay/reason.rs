@@ -28,6 +28,7 @@ reasons! {
     NoMac1Match => "no_mac1_match",
     PeerNotRegistered => "peer_not_registered",
     Loop => "loop",
+    TooManyPending => "too_many_pending",
     IndexInUse => "index_in_use",
     UnknownIndex => "unknown_index",
     WrongSource => "wrong_source",
