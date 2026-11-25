@@ -1,226 +1,63 @@
 # wg-relay
 
-A UDP relay that lets **standard, unmodified WireGuard** clients reach a
-WireGuard **server that sits behind NAT**. This works with kernel `wg`,
-wireguard-go and the mobile apps. Neither side needs a public address or a port
-forward. The relay forwards encrypted WireGuard datagrams byte-for-byte. It
-never holds client↔server keys, so it cannot read or modify that traffic. It
-decides who may talk to whom from the public keys in each handshake's mac1 field
-and from addresses it has authenticated.
+**Reach your WireGuard server from anywhere, even when it sits behind NAT. Keep stock WireGuard on every device, and use a relay that cannot read a single byte of your traffic.**
+
+Your server is at home or in the office, behind a router you can't forward ports on, maybe behind carrier-grade NAT. Your laptop and phone are on café Wi-Fi and mobile data. Nobody can reach anybody.
+
+wg-relay is a tiny UDP relay you run on any cheap public host. Everyone points their WireGuard `Endpoint` at it, and it quietly passes packets between them. Your WireGuard connection stays end-to-end: the relay never holds a key that could open it.
 
 ```
- server ──NAT──┐                       ┌──NAT── client "laptop"
-   wg0         │      UDP :51820       │         wg0
-   peer relay  ├────►  wg-relay  ◄─────┤   peer server (Endpoint=relay)
-   peer laptop─┘   (forwards           ├──NAT── client "phone"
-   peer phone      ciphertext only)    │
-   (Endpoint=relay for every peer)     └──NAT── stranger (dropped)
+   home server ──NAT──┐                     ┌──NAT── laptop
+                      └──►  wg-relay  ◄─────┼──NAT── phone
+                                            └───✗─── stranger (dropped)
 ```
 
-**New here? Read [How wg-relay works](docs/how-it-works.md)**: a guided tour
-with diagrams of every packet path, the state the relay keeps, the client gates,
-reload, roaming and the security model.
+## Why you'll like it
 
-## Build, run, test
+- **Stock WireGuard everywhere.** Kernel `wg`, wireguard-go and the mobile apps work as they are. No agent, no custom client, no coordination service.
+- **No public IP, no port forward.** Every host only makes outbound connections, so it works behind any NAT, including CGNAT.
+- **A relay you don't have to trust.** It forwards encrypted packets byte for byte and holds no session keys. Even if someone takes over the relay, they can drop your traffic, but they can't read it, change it or add themselves as a peer.
+- **Not an open door.** Only servers you list can register. With the default gate, only clients you list can open sessions. Handshakes are rate-limited per IP, and the relay can't be used to bounce traffic at other hosts.
+- **Small and boring to run.** One binary, one UDP port, one TOML file. Reload it with `SIGHUP`, and a revoked key is cut off on the spot. About 1,700 lines of Rust.
+
+## How it works, in 30 seconds
+
+WireGuard keeps a couple of header fields readable on purpose, and wg-relay routes on just those.
+
+1. **Your server registers.** It adds the relay as an ordinary WireGuard peer. That tunnel proves to the relay, cryptographically, where the server is right now, and keeps the server's NAT open.
+2. **mac1 says who a handshake is for.** Every WireGuard handshake carries a checksum keyed with the recipient's public key. The relay tries the keys it knows and finds the destination without decrypting anything.
+3. **Session indexes carry everything else.** Each side announces a random session number in its handshake, in the clear. The relay notes which number belongs to which address, then routes the rest of the session with a single lookup.
+
+Want the whole story? **[How wg-relay works](docs/how-it-works.md)** is a guided tour with diagrams: the WireGuard protocol itself, every packet path, the relay's state, roaming and the security model.
+
+## Quick start
+
+**1. Build the relay.**
 
 ```sh
 cargo build --release
-./target/release/wg-relay --check-config -c relay.toml   # validate, print roles and warnings
-RUST_LOG=info ./target/release/wg-relay -c relay.toml    # RUST_LOG=wg_relay=debug logs every reject
-kill -HUP $(pidof wg-relay)                              # reload relay.toml
-WG_RELAY_CONFIG=/etc/wg-relay.toml ./target/release/wg-relay   # every flag also reads an env var (see --help)
-
-cargo test                                               # unit and in-process end-to-end tests
-cargo build --bins --examples && sudo tests/netns.sh     # namespace integration test, both gate modes
 ```
 
-`tests/netns.sh` needs root, the `wireguard` kernel module, `iproute2`,
-`wireguard-tools`, `iptables`, `tcpdump` and `ping`. Set `MODES="none"` to
-run a single mode. Without root on the host, a privileged container works:
-
-```sh
-cargo build --bins --examples
-docker run --rm --privileged -v "$PWD":/src:ro -w /src debian:trixie-slim bash -c \
-  'apt-get update -qq && apt-get install -y -qq iproute2 wireguard-tools iptables tcpdump iputils-ping >/dev/null && tests/netns.sh'
-```
-
-The test runs a server, two clients the server knows and a stranger. The
-stranger knows the server's public key but is not one of the server's peers.
-Each host is behind its own MASQUERADE NAT and runs kernel WireGuard. There are
-two runs: `none`, where `relay.toml` lists **only the server**, and `response`,
-where it also lists the two clients. Each run asserts that:
-
-1. the server registers with the relay;
-2. both clients ping the server;
-3. the stranger gets nothing through. A `tcpdump` on the server's LAN, decrypted
-   offline with the server key by `examples/pcap_check.rs --initiators`, shows
-   its handshakes reach the server, which drops them;
-4. pings still work after **client-initiated** rekeys, and in `response` also
-   after a **server-initiated** rekey (the server removes and re-adds a client);
-5. in `response`, removing a client from `relay.toml` and sending `SIGHUP` cuts
-   it off immediately, while the other client keeps working;
-6. in the relay-side capture, forwarded handshakes cannot be opened with the
-   relay's private key (the server's key opens them), forwarding is
-   byte-identical, and the ping payload never appears on the wire.
-
-## Roles and gate modes
+**2. Write `relay.toml`.** Generate the relay's key with `wg genkey`, and list your server and clients by public key:
 
 ```toml
-tunnel_ip = "10.99.0.254"
-client_gate = "response"        # "none" | "response"  (default: response)
-handshake_rate_per_ip = "10/s"  # or "600/m"; the burst is 2 seconds' worth
+listen = "0.0.0.0:51820"
+private_key = "<relay private key>"
+tunnel_ip = "10.99.0.254"         # the relay's address inside the server's tunnel
+client_gate = "response"          # "none" | "response" (see below)
+handshake_rate_per_ip = "10/s"
 
-[[server]]                      # at least one; servers always register
+[[server]]
 name = "main"
-pubkey = "<base64>"
+pubkey = "<server public key>"
 
-[[client]]                      # optional with "none", required with "response"
+[[client]]
 name = "laptop"
-pubkey = "<base64>"
-servers = ["main"]              # which servers this client may reach
+pubkey = "<laptop public key>"
+servers = ["main"]                # which servers this client may reach
 ```
 
-In both modes anyone may send a handshake to a registered server (rate-limited
-per source IP), and clients never talk to the relay directly. The modes differ in
-when a session may open:
-
-| `client_gate` | Relay allowlists | Session opens when |
-|---|---|---|
-| `none` | servers only | the server responds; its own peer list is the only gate |
-| `response` | servers and clients | the server's response is for an **allowlisted client permitted to reach that server** |
-
-* **`none`.** The relay checks only that the server is registered. Access
-  control is left to the server's peer list, so revoking a client means removing
-  it from the server. Any clients you do list also get server-initiated
-  handshakes (see Limitations).
-* **`response`.** A server's handshake response carries a mac1 keyed to the
-  public key of the client the server just authenticated. The relay only lets
-  the session open if that key is an allowlisted client allowed to reach that
-  server. This adds a second gate on the relay, which you can revoke with SIGHUP
-  without touching the server.
-
-In both modes a stranger's initiation reaches the server, which drops it because
-the stranger is not one of its peers.
-
-## Design
-
-One UDP socket carries two kinds of traffic.
-
-### Registration (servers only)
-
-Each server lists the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` and
-`PersistentKeepalive = 25`. The relay runs one `boringtun::noise::Tunn` per
-server.
-
-* An initiation whose mac1 is keyed to the **relay's** public key is for the
-  relay. `parse_handshake_anon` decrypts the sender's static key. Keys that are
-  not allowlisted are rejected (`registration_unknown_key`), and so are clients
-  (`client_registration_refused`). A server's initiation goes to its `Tunn`,
-  which performs the full handshake, including replay protection.
-* After **every packet that authenticates** on a server's tunnel (a handshake,
-  data or a keepalive, but never a cookie), the relay sets
-  `registry[server] = src_addr`. If the address changed (roaming), every session
-  table entry using the old address is rewritten. Entries expire after 180 s.
-* **The relay's indexes never collide with forwarded sessions.** Each relay
-  tunnel owns a random 24-bit index prefix, so it uses 256 indexes. A new prefix
-  is never one that a live session is using, and any forwarded handshake that
-  picks an index inside a relay prefix is dropped (`reserved_index`), so the peer
-  retries with a new random index. Packets in a relay prefix go only to that
-  relay tunnel.
-* The relay answers ICMP echo to `tunnel_ip` (`ping 10.99.0.254` from a server
-  checks its registration).
-
-### Session table
-
-`receiver_idx → { dest_addr, expected_src_addr, open, last_seen }`, plus the
-server's and (once known) the client's key, which are used to revoke sessions on
-reload. **Every type 2, 3 and 4 packet must arrive from `expected_src_addr`.**
-Entries expire after 200 s idle. On an index collision the newest entry wins and
-a warning is logged.
-
-### Forwarding rules
-
-Every initiation is rate-limited per source IP first.
-
-**Type 1, initiation** (`sender_idx` must not be in a relay prefix):
-
-* **mac1 matches a registered server S.** Accepted from any source. The relay
-  records `idx[sender] = {dest: src, expected_src: addr(S), open: false}` and
-  forwards to S.
-* **mac1 matches a listed client C** (a server-initiated handshake or rekey). The
-  source must be a registered server S that C may reach, and C's address must be
-  known, i.e. learned from S's last accepted response to C. The relay records
-  `idx[sender]` as pending and forwards to C.
-* Otherwise the packet is dropped (`no_mac1_match`).
-
-**Type 2, response** (it must match a pending entry and come from its `expected_src`):
-
-* **From a server.** Match mac1 against the listed client keys. A match with a
-  client C that may reach that server opens the session and records `addr[C]`.
-  With no match, the packet is dropped in `response` mode
-  (`response_unknown_client`), and in `none` mode it is forwarded anyway and the
-  session opens.
-* **From a client.** mac1 must match the server's key (`response_not_for_server`).
-* Either way, the initiator's entry becomes `open` and an open entry is created
-  for the responder's `sender_idx`.
-
-**Types 3 and 4** (cookie reply and data) are forwarded only from
-`expected_src`. Data requires an `open` session. A cookie reply may also pass on
-a pending one, so a server under load can answer an initiation.
-
-The relay never sends cookie replies (or anything else) for forwarded traffic.
-Datagrams are parsed with explicit size checks: exact sizes for types 1–3, at
-least 32 B for data, and the reserved bytes must be zero. Nothing on the
-forwarding path can panic. This is covered by a 20 000-case mutation test across
-both gate modes.
-
-### Rejects and metrics
-
-Every rejected datagram increments a per-reason counter and logs
-`reject reason=<reason> src=<addr>` at `debug` level. Per-packet logs are kept at
-debug because otherwise anyone could flood the log. Counters are logged every
-60 s and at shutdown, for example
-`rx=76 forwarded=66 … reject.server_not_registered=1 reject.unknown_index=4`.
-
-| Reason | Meaning |
-|---|---|
-| `malformed` | wrong size, type or reserved bytes |
-| `rate_limited` | the source IP exceeded `handshake_rate_per_ip` |
-| `reserved_index` | a forwarded handshake picked an index in the relay's range |
-| `no_mac1_match` | the initiation is not for any server, client or the relay |
-| `server_not_registered` | the target server has no current registration |
-| `acl` | the client may not reach that server |
-| `loop` | the initiation came from the target's own address |
-| `rekey_not_from_server` | a client-addressed initiation came from something other than a registered server |
-| `client_addr_unknown` | server→client initiation, but the client has no accepted response yet |
-| `unknown_index` | no live session for `receiver_idx` |
-| `wrong_source` | the packet is not from the session's `expected_src_addr` |
-| `response_unknown_client` | the server answered a key that is not allowlisted for it |
-| `response_not_for_server` | the client's response is not keyed to the session's server |
-| `session_not_open` | data on a session whose handshake has not completed |
-| `registration_unknown_key` | the relay-bound handshake came from a key that is not allowlisted |
-| `client_registration_refused` | a client tried to register; only servers register |
-| `tunnel_auth_failed` | a registration-tunnel packet failed authentication |
-
-### Reload (SIGHUP)
-
-`relay.toml` is re-read and validated. If it is invalid, the current config stays
-in effect and an error is logged. Changes to `listen` and `private_key` need a
-restart. Everything else applies immediately:
-
-* A **removed key** loses every session it is part of, and a removed server
-  also loses its registration and relay tunnel. Its next packet is rejected (`unknown_index`).
-* A client whose `servers` list no longer includes a server loses its sessions
-  with that server.
-* Switching from `none` to `response` drops open sessions whose client was
-  never identified (unlisted clients).
-
-## Node configuration
-
-Every peer on every host uses the relay as its `Endpoint`. Both sides keep a
-single wg interface.
-
-**Server** (behind NAT, `10.99.0.1`):
+**3. Configure the server.** Add the relay as a peer, and point every client peer at the relay too:
 
 ```ini
 [Interface]
@@ -243,7 +80,7 @@ AllowedIPs          = 10.99.0.11/32
 PersistentKeepalive = 25
 ```
 
-**Client** (`10.99.0.11`):
+**4. Configure the client.** It's a completely normal config. The relay is simply the server's address:
 
 ```ini
 [Interface]
@@ -257,86 +94,70 @@ AllowedIPs          = 10.99.0.1/32      # or the server's LAN / 0.0.0.0/0
 PersistentKeepalive = 25
 ```
 
-Clients do not list the relay as a peer; to them it is just the server's address.
+**5. Run it and check.**
 
-Because all of a host's peers share one endpoint, all its traffic uses one NAT
-mapping, which is the mapping its handshakes (and, for a server, its
-registration) come from.
-WireGuard identifies peers by key and index, not by endpoint, so sharing an
-endpoint is fine. Keep `PersistentKeepalive` so NAT mappings and registrations
-stay fresh.
+```sh
+./target/release/wg-relay --check-config -c relay.toml   # validate; prints roles and warnings
+RUST_LOG=info ./target/release/wg-relay -c relay.toml
+ping 10.99.0.254                                         # from the server: is it registered?
+ping 10.99.0.1                                           # from the laptop: you're in
+```
 
-## Threat model
+Keep `PersistentKeepalive` on every peer: it keeps NAT mappings and the server's registration fresh.
 
-**What the relay can never do:** decrypt, forge or modify client↔server traffic.
-It holds no session keys, and any change makes the packet fail authentication.
-Its private key only opens the registration tunnels, which expose nothing beyond
-the relay's own `/32`.
+## Choose who gets in
 
-**What the relay (or someone who controls it) sees and can do:**
+The server's own WireGuard peer list always decides who can actually connect. `client_gate` decides whether the relay adds a second lock of its own.
 
-* **Who talks to whom.** mac1 reveals the target's public key, and the server's
-  response reveals the client's key.
-* **Timing, sizes and volume** of all traffic, plus every host's public IP and port.
-* **Drop, delay or reorder** packets. Replays are rejected by WireGuard. The
-  relay can always deny service.
+| `client_gate` | What you list in `relay.toml` | A session opens when |
+|---|---|---|
+| `response` (default) | servers and clients | the server accepts a client **and** that client is on the relay's list for that server |
+| `none` | servers only | the server accepts the client; nothing to keep in sync on the relay |
 
-**What it protects against:**
+With `response` you can revoke a client from the relay with a `SIGHUP`, without touching the server. In both modes a stranger's handshake reaches the server, which drops it because the stranger isn't one of its peers.
 
-* **Open reflector / amplification.** The relay only sends to addresses taken
-  from authenticated server registrations or from a session's handshake. Replies
-  are never larger than requests, and forwarded traffic never gets
-  relay-generated replies. Unregistered sources reach only the rate-limited
-  paths: registration (one X25519 operation) and initiations to servers.
-* **Strangers.** Their initiations reach the server, which drops them because
-  they are not its peers. In `response` mode the relay additionally refuses to
-  open a session unless the server authenticated an allowlisted key.
-* **Cross-session injection and spoofed responses.** Every non-initiation packet
-  must come from the address recorded for that session and index.
-* **Revocation.** Removing a key and sending SIGHUP takes effect at once, without
-  waiting for sessions to expire.
+## What the relay can and can't see
 
-## Limitations
-
-* **A client that changes network** (Wi-Fi to cellular, NAT rebinding) **loses
-  data until it re-handshakes, about 5–15 s.** Its packets now come from a new
-  address, which no longer matches `expected_src_addr`, so they are dropped
-  (`wrong_source`). WireGuard starts a new handshake on its own once it stops
-  hearing back (keepalive timeout plus rekey timeout), and the new session then
-  works normally. A server that moves re-registers on its next authenticated
-  packet to the relay and its sessions are migrated, but data sent in the
-  meantime is lost.
-* **Both modes trust the server's peer list** for authentication, and strangers'
-  handshakes reach the server (it drops them). The relay learns a client's address from the server's
-  response, so an on-path attacker who replays a client's fresh initiation from
-  another address first can make that handshake fail. That is a denial of
-  service only.
-* **Unlisted clients (`none` mode)** cannot receive server-initiated handshakes:
-  the relay cannot tell which client such a handshake is for. Clients normally
-  start the handshake and keep it fresh with `PersistentKeepalive`, so this
-  rarely matters. When the server must send first (e.g. right after it
-  restarts), that traffic waits until the client sends something. List a client
-  to give it server-initiated handshakes.
-* **The per-IP initiation limit is shared** by all hosts behind one NAT address.
-  Many distributed sources can still make the relay do X25519 work on the
-  registration path, and send junk handshakes to the server.
-* **Two servers cannot register from the same `ip:port`.** The newest claimant wins
-  and a warning is logged.
-* **Index collisions** between independent sessions (probability 2⁻³² per pair)
-  break the older session until its next rekey.
-* **Single-threaded**, with a linear mac1 scan over servers or clients per
-  handshake. That is fine for thousands of keys.
-* The ICMP responder is IPv4-only, and metrics are logged rather than exported.
-
-## Code layout
-
-| File | Purpose |
+| The relay can | The relay can't |
 |---|---|
-| `src/packet/` | wire-format parsing, size checks, mac1, `SessionIdx` |
-| `src/tables.rs` | registry, session table, per-IP token bucket |
-| `src/relay/` | `Relay::handle` (no I/O); `forward.rs` gate rules, `registration.rs` server tunnels, `reload.rs`, `reason.rs`, `metrics.rs` |
-| `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
-| `src/main.rs` | parse the CLI, set up logging, report errors |
-| `src/app.rs` | clap `Cli`, tokio socket loop, timers, SIGHUP/SIGTERM |
-| `src/key/` | `PeerKey` / `PrivateKey` base64 newtypes |
-| `src/error.rs` | `AppError` and the `Report` error-chain printer |
+| see which keys talk to each other, when, and how much | decrypt any traffic |
+| see every host's public IP and port | inject or modify packets: WireGuard rejects them |
+| drop or delay packets | add a peer: the server's peer list decides |
+
+The relay's own private key only opens the registration tunnels, which carry nothing but keepalives and pings to `10.99.0.254`.
+
+## Good to know
+
+- **All traffic goes through the relay.** There is no direct peer-to-peer path, so you pay its latency and bandwidth.
+- **Switching networks costs a few seconds.** When a client moves from Wi-Fi to mobile data, traffic pauses for about 5–15 s until WireGuard re-handshakes on its own.
+- **One relay, no failover** yet.
+- **In `none` mode, the server can't start a handshake to a client the relay doesn't know.** Clients normally start handshakes themselves, so this rarely matters.
+- **WireGuard's flood protection is weaker behind the relay.** The relay's per-IP rate limit takes up part of the job. Details are in [the guide, section 3.5](docs/how-it-works.md#35-under-load-cookies-and-mac2).
+- **Single-threaded**, which is fine for thousands of keys. Ping replies are IPv4-only, and metrics go to the log rather than to Prometheus.
+
+The [full list of limitations](docs/reference.md#limitations) explains the reasoning behind each one, and the [guide's security model](docs/how-it-works.md#15-security-model) covers threats and defences.
+
+## Running it
+
+```sh
+kill -HUP $(pidof wg-relay)                                     # reload relay.toml
+RUST_LOG=wg_relay=debug ./target/release/wg-relay -c relay.toml # log every rejected packet
+WG_RELAY_CONFIG=/etc/wg-relay.toml ./target/release/wg-relay    # every flag also reads an env var (see --help)
+```
+
+Every dropped packet is counted under a named reason, such as `wrong_source` or `rate_limited`. The counters are logged every minute and at shutdown. The [reference](docs/reference.md) lists every reason and the exact forwarding and reload rules.
+
+## Tested for real
+
+```sh
+cargo test                                             # unit and in-process tests
+cargo build --bins --examples && sudo tests/netns.sh   # end-to-end, real kernel WireGuard
+```
+
+The end-to-end test builds a small internet in network namespaces: a server, two clients and a stranger, each behind its own NAT, all running kernel WireGuard. It checks that clients get through and the stranger doesn't, that rekeys work in both directions, and that a `SIGHUP` revokes a client instantly. A packet capture at the relay checks that the relay's key can't open forwarded handshakes and that every forwarded packet leaves byte-identical. No root on your machine? The [reference](docs/reference.md#the-namespace-integration-test) shows how to run it in Docker.
+
+## Learn more
+
+- [How wg-relay works](docs/how-it-works.md): the guided tour, with diagrams.
+- [Reference](docs/reference.md): forwarding rules, reject reasons, reload behaviour, the test suite and the code layout.
+- [`relay.example.toml`](relay.example.toml): a commented example config.
