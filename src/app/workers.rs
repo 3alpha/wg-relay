@@ -5,15 +5,26 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use tokio::sync::watch;
 use tracing::warn;
 use wg_relay::config::Config;
 use wg_relay::error::AppError;
-use wg_relay::relay::{Metrics, Relay};
+use wg_relay::relay::{ControlSnapshot, Metrics, Relay};
 
 use super::forwarding;
 use crate::udp::Bound;
+
+/// The relay's counters and state at one instant: the control plane's, copied
+/// in one hold of its lock, and each forwarding thread's as of its last wake-up.
+pub(super) struct Snapshot {
+    pub(super) control: ControlSnapshot,
+    /// Each thread's counters: what its data plane decided, and its socket errors.
+    pub(super) workers: Vec<Metrics>,
+    /// The control plane's and every thread's counters, merged.
+    pub(super) total: Metrics,
+}
 
 /// The forwarding threads: thread `i` runs on socket `i` and keeps `counters[i]`.
 pub(super) struct Workers {
@@ -65,10 +76,29 @@ impl Workers {
     /// Every thread's counters as of its last batch, and the control plane's, merged.
     pub(super) fn metrics(&self) -> Metrics {
         let mut all = self.relay.metrics();
-        for c in &self.counters {
-            all += &*c.lock().unwrap_or_else(PoisonError::into_inner);
+        for c in self.local_metrics() {
+            all += &c;
         }
         all
+    }
+
+    /// Each thread's counters as of its last batch.
+    fn local_metrics(&self) -> Vec<Metrics> {
+        self.counters
+            .iter()
+            .map(|c| c.lock().unwrap_or_else(PoisonError::into_inner).clone())
+            .collect()
+    }
+
+    /// The control plane's state and every thread's counters, for the stats line and scrapes.
+    pub(super) fn snapshot(&self, now: Instant) -> Snapshot {
+        let control = self.relay.snapshot(now);
+        let workers = self.local_metrics();
+        let mut total = control.metrics.clone();
+        for w in &workers {
+            total += w;
+        }
+        Snapshot { control, workers, total }
     }
 
     /// Stop every thread and wait for each: the final counters, and the first

@@ -321,7 +321,7 @@ The relay runs several forwarding threads (`workers` in `relay.toml`, one per CP
 - Each handle keeps its own counters, so counting never contends between threads.
 - Every forwarding thread also offers the control plane a timer tick every 250 ms and sends what the registration tunnels' timers queue. The control plane runs at most one tick per 250 ms however many threads offer one, so the timers keep their pace with one thread or many.
 
-The threads are all alike. The main thread forwards nothing: it starts them, logs the stats line, handles SIGHUP, SIGINT and SIGTERM, notices a thread that ended, and stops and joins them. For the stats and shutdown lines it adds every thread's counters to the control plane's.
+The threads are all alike. The main thread forwards nothing: it starts them, logs the stats line, serves the Prometheus metrics endpoint if it is on, handles SIGHUP, SIGINT and SIGTERM, notices a thread that ended, and stops and joins them. For the stats line, every scrape and the shutdown line it adds every thread's counters to the control plane's, locking the control plane only long enough to copy them.
 
 ```mermaid
 flowchart TB
@@ -329,13 +329,13 @@ flowchart TB
     subgraph threads["forwarding threads 0 … n-1, all alike"]
         L["socket loop on socket i<br/>plus a timer tick every 250 ms"]
     end
-    M["main thread: start and join the threads,<br/>stats, SIGHUP, SIGINT/SIGTERM"]
+    M["main thread: start and join the threads,<br/>stats, metrics, SIGHUP, SIGINT/SIGTERM"]
     F["data plane (DataPlane)<br/>established sessions, reserved prefixes<br/>read by all threads, no lock"]
     C["control plane (ControlPlane) behind a Mutex<br/>registration tunnels, registry, budgets,<br/>session table, reload"]
     K --> L
     L -- "triage every datagram" --> F
     L -- "lock for what triage hands over, and for ticks" --> C
-    M -- "lock for reloads and stats" --> C
+    M -- "lock for reloads, stats and scrapes" --> C
     M -- "start, watch, stop" --> L
     C -- "publish / withdraw established entries,<br/>reserve / free prefixes" --> F
 ```
@@ -667,7 +667,7 @@ gantt
 
 ## 13. Reload (SIGHUP)
 
-`kill -HUP` re-reads `relay.toml`. If the file is invalid, the running config stays and an error is logged. Changes to `listen` or `private_key` need a restart; everything else applies at once:
+`kill -HUP` re-reads `relay.toml`. If the file is invalid, the running config stays and an error is logged. Changes to `listen`, `workers`, `private_key` or `metrics_listen` need a restart; everything else applies at once. If a change to `public_endpoint` or `tunnel_ip` alters the `[Peer]` section configured peers paste, the relay prints it again:
 
 ```mermaid
 flowchart TD
@@ -752,7 +752,9 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    main["main.rs<br/>parse CLI, logging, report errors"] --> app["app.rs<br/>Cli, startup, main thread: stats, signals"]
+    main["main.rs<br/>parse CLI, logging, report errors"] --> app["app.rs<br/>Cli, startup and shutdown"]
+    app --> sup["app/supervisor.rs<br/>main thread: stats, signals, reloads, scrapes"]
+    sup --> met["app/metrics/<br/>Prometheus text, HTTP server"]
     app --> wrk["app/workers.rs<br/>the forwarding threads: start, watch, stop"]
     wrk --> loop["app/forwarding.rs<br/>one forwarding thread: batch, GSO runs,<br/>ticks, tx queue"]
     loop --> udp["udp.rs + udp/runs.rs<br/>SO_REUSEPORT sockets, batched I/O<br/>on quinn-udp, GRO split, GSO runs"]
@@ -787,9 +789,10 @@ Following one transport data message through the code:
 |---|---|---|
 | Unit | session table: fixed lifetimes, per-peer pending eviction, per-peer quota, global cap and exact counts, with its per-peer accounts and established-session view checked after every change; the data plane alone: forwarding on established sessions, the expected source, the transport data it drops itself, and everything it hands to the control plane; the data plane kept in step with the control plane after each kind of change and through 20,000 random operations, with both planes together reaching the verdict one session table would; data right after a handshake response forwarded; reader threads triaging while another thread changes the sessions, never seeing a route the session table never held; the control plane's classification of every case; read-only forwarding, source validation, eviction counter, counters merged from both planes; registry, rate limiter, the forwarding and registration budgets and their independence, `Rate` parsing, ICMP reply; splitting GRO buffers and grouping datagrams into GSO sends; the throttle on timer ticks | `#[cfg(test)]` modules in `src/` |
 | Message | parsing, size checks, mac1 matching and batched lookup on real messages made by boringtun | `tests/message.rs` |
-| Config | defaults, exact `ConfigError` for each bad input, `--check-config` | `tests/config.rs` |
+| Config | defaults, exact `ConfigError` for each bad input, `--check-config`, the exact `[Peer]` section from `--print-peer`, the `--metrics-listen` override | `tests/config.rs` |
+| Metrics | the real binary with metrics on: the startup `[Peer]` section, `/metrics` over HTTP, counters moving with real datagrams, reloads counted and the section printed again | `tests/metrics.rs`, plus exact-text tests of the encoder and the per-peer families in `src/app/metrics/` |
 | Relay, in-process | full handshakes between boringtun peers through `Relay::handle` (unconfigured to configured, configured to configured, configured to unconfigured refused), reload, roaming, reserved indexes, index takeover, re-sent initiations, fixed session lifetimes under traffic, IPv4-mapped sources, rate limits, registration and pending floods, 10 000 mutated packets | `tests/relay.rs` |
-| End-to-end | real kernel WireGuard in network namespaces behind real NATs, with three forwarding threads | `tests/netns.sh` |
+| End-to-end | real kernel WireGuard in network namespaces behind real NATs, with three forwarding threads; a scrape of `/metrics` checks both registrations | `tests/netns.sh` |
 
 The end-to-end topology:
 

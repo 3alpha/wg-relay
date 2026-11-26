@@ -107,6 +107,11 @@ impl ReservedPrefixes {
         self.map.pin().contains_key(&prefix)
     }
 
+    /// How many prefixes are reserved: one per configured peer's registration tunnel.
+    pub(super) fn len(&self) -> usize {
+        self.map.len()
+    }
+
     /// Reserve `prefix` for `peer`'s registration tunnel. For the control plane only.
     pub(super) fn reserve(&self, prefix: IndexPrefix, peer: PublicKey) {
         self.map.pin().insert(prefix, peer);

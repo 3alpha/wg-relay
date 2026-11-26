@@ -32,7 +32,7 @@ impl ControlPlane {
         now: Instant,
     ) -> Verdict {
         let outcome = self.decide(src, datagram, message, now);
-        record_verdict(&mut self.metrics, src, outcome)
+        record_verdict(&mut self.metrics, src, datagram, outcome)
     }
 
     /// Rate-limit initiations, classify the datagram and run its handler.
@@ -49,9 +49,16 @@ impl ControlPlane {
         if initiation && !self.limiter.allow(src.ip(), now) {
             return Err(DropReason::RateLimited);
         }
+        // `classify` checks every initiation's mac1 against the relay's own key.
+        self.counters.mac1_checks += u64::from(initiation);
         match self.classify(datagram, message)? {
             Class::RegistrationInitiation => {
-                self.handle_registration_initiation(src, datagram, now)
+                let outcome = self.handle_registration_initiation(src, datagram, now);
+                match outcome {
+                    Ok(_) => self.counters.registration_initiations_accepted += 1,
+                    Err(_) => self.counters.registration_initiations_rejected += 1,
+                }
+                outcome
             }
             Class::RegistrationTunnel { peer } => self.receive_on_tunnel(src, datagram, peer, now),
             Class::ForwardedInitiation { sender_index } => {

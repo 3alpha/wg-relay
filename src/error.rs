@@ -26,6 +26,12 @@ pub enum AppError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to listen for metrics on {addr}")]
+    MetricsBind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to start the async runtime")]
     Runtime {
         #[source]

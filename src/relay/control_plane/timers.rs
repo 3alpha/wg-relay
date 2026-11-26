@@ -54,12 +54,17 @@ impl ControlPlane {
 
     /// Expire stale registrations and sessions.
     fn collect_garbage(&mut self, now: Instant) {
+        self.counters.gc_runs += 1;
         for k in self.registry.expire(now) {
+            self.counters.registrations_expired += 1;
             info!(peer = %self.peers.get(&k).map_or("?", |p| &p.name), "registration expired");
         }
         let gone = self.sessions.expire(now, &self.data_plane.established);
-        if gone > 0 {
-            debug!(gone, live = self.sessions.len(), "expired sessions");
+        self.counters.sessions_expired_pending += gone.pending as u64;
+        self.counters.sessions_expired_established += gone.established as u64;
+        if gone.total() > 0 {
+            let (pending, established) = (gone.pending, gone.established);
+            debug!(pending, established, live = self.sessions.len(), "expired sessions");
         }
     }
 }

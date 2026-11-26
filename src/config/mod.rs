@@ -9,11 +9,15 @@ use serde::Deserialize;
 
 use crate::key::{PrivateKey, PublicKey};
 
+mod endpoint;
 pub mod error;
 mod rate;
+mod relay_peer;
 mod summary;
-pub use error::{ConfigError, RateError};
+pub use endpoint::PublicEndpoint;
+pub use error::{ConfigError, EndpointError, RateError};
 pub use rate::Rate;
+pub use relay_peer::{RELAY_PEER_KEEPALIVE_SECS, RelayPeer};
 pub use summary::Summary;
 
 /// Most forwarding workers: far beyond the cores one socket's traffic can use.
@@ -31,6 +35,10 @@ struct RawConfig {
     handshake_rate_per_ip: Rate,
     #[serde(default = "default_workers")]
     workers: usize,
+    #[serde(default)]
+    public_endpoint: Option<PublicEndpoint>,
+    #[serde(default)]
+    metrics_listen: Option<SocketAddr>,
     #[serde(default)]
     peer: Vec<Peer>,
 }
@@ -72,6 +80,10 @@ pub struct Config {
     pub handshake_rate: Rate,
     /// Forwarding worker threads, each with its own socket.
     pub workers: NonZeroUsize,
+    /// Where peers reach the relay, for the `[Peer]` section it prints.
+    pub public_endpoint: Option<PublicEndpoint>,
+    /// Where the Prometheus endpoint listens; off if unset.
+    pub metrics_listen: Option<SocketAddr>,
     pub peers: Vec<Peer>,
 }
 
@@ -107,8 +119,16 @@ impl Config {
             tunnel_ip: raw.tunnel_ip,
             handshake_rate: raw.handshake_rate_per_ip,
             workers,
+            public_endpoint: raw.public_endpoint,
+            metrics_listen: raw.metrics_listen,
             peers: raw.peer,
         })
+    }
+
+    /// The `[Peer]` section configured peers add to register with this relay.
+    pub fn relay_peer(&self) -> RelayPeer {
+        let key = self.private_key.public_key();
+        RelayPeer::new(key, self.public_endpoint.as_ref(), self.listen, self.tunnel_ip)
     }
 
     /// Summarise the effective config for humans.

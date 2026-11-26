@@ -11,7 +11,8 @@ use common::*;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use wg_relay::config::Config;
-use wg_relay::relay::{DropReason, Relay, Verdict};
+use wg_relay::message::MessageType;
+use wg_relay::relay::{DropReason, PeerSnapshot, Relay, Verdict};
 
 const SRV: &str = "198.51.100.1:51820";
 const SRV2: &str = "198.51.100.2:51820";
@@ -225,6 +226,9 @@ fn unregistered_configured_peer_is_unreachable() {
         relay.handle(addr(C1), &init, Instant::now()),
         Verdict::Drop(DropReason::PeerNotRegistered)
     );
+    let snap = relay.snapshot(Instant::now());
+    let main = &snap.peers[0];
+    assert_eq!((main.initiations_forwarded, main.initiations_dropped), (0, 1), "aimed at main");
 }
 
 #[test]
@@ -325,6 +329,55 @@ fn pending_session_expires_quickly() {
     assert_eq!(w.relay.session_count(), 1);
     w.relay.tick(Instant::now() + Duration::from_secs(11));
     assert_eq!(w.relay.session_count(), 0);
+    let c = w.relay.snapshot(Instant::now()).counters;
+    assert_eq!((c.sessions_expired_pending, c.sessions_expired_established), (1, 0), "half-open");
+    assert_eq!(c.gc_runs, 1);
+}
+
+#[test]
+fn snapshot_reports_peers_sessions_and_lifecycle_counters() {
+    let mut w = world();
+    let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
+    let (mut c2o, mut oc2) = (tunn(&w.c2, &w.srv2), tunn(&w.srv2, &w.c2));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.hs(&mut c2o, C2, &mut oc2, SRV2), ok3(SRV2, C2));
+    let srv = w.srv.clone();
+    w.register(&srv, "198.51.100.1:60000");
+    let peer = |name: &str, initiations_forwarded| PeerSnapshot {
+        name: name.into(),
+        registered: true,
+        since_authenticated: Some(Duration::ZERO),
+        sessions: 2,
+        pending: 0,
+        initiations_forwarded,
+        initiations_dropped: 0,
+    };
+    let now_ish = |mut p: PeerSnapshot| {
+        assert!(p.since_authenticated.is_some_and(|d| d < Duration::from_secs(5)), "{p:?}");
+        p.since_authenticated = Some(Duration::ZERO);
+        p
+    };
+    let snap = w.relay.snapshot(Instant::now());
+    assert_eq!((snap.sessions, snap.pending), (4, 0));
+    let peers: Vec<_> = snap.peers.into_iter().map(now_ish).collect();
+    assert_eq!(peers, vec![peer("main", 1), peer("other", 1)], "sorted by name");
+    let c = &snap.counters;
+    assert_eq!((c.registrations, c.registrations_roamed, c.sessions_roamed), (2, 1, 2));
+    assert_eq!((c.registration_initiations_accepted, c.registration_key_exchanges), (3, 3));
+    assert_eq!((c.mac1_scans, c.mac1_checks), (2, 2 + 3 + 2 * 2), "relay key per initiation");
+    assert_eq!(snap.reserved_prefixes, 2);
+    // Four source addresses; with randomly keyed hashing two may share a bucket.
+    assert!((3..=4).contains(&snap.rate_limit_buckets_used), "{}", snap.rate_limit_buckets_used);
+    let m = &snap.metrics;
+    assert_eq!(m.messages_forwarded(MessageType::HandshakeInitiation), 2);
+    assert_eq!(m.messages_forwarded(MessageType::HandshakeResponse), 2);
+    assert_eq!(m.messages_forwarded(MessageType::TransportData), 0, "the data plane's");
+    assert_eq!(w.relay.metrics().messages_forwarded(MessageType::TransportData), 2);
+
+    w.relay.reload(&config(&w.r, &[("main", &w.srv)]));
+    let snap = w.relay.snapshot(Instant::now());
+    assert_eq!((snap.counters.sessions_revoked, snap.reserved_prefixes), (2, 1));
+    assert_eq!(snap.peers.into_iter().map(now_ish).collect::<Vec<_>>(), vec![peer("main", 1)]);
 }
 
 #[test]

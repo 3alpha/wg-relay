@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use super::accounting::SessionAccounting;
 use super::established::{EstablishedSessions, Route};
-use super::session::{Session, SessionState, Timeouts};
+use super::session::{Expired, Session, SessionState, Timeouts};
 use super::shrink_if_sparse;
 use crate::key::PublicKey;
 use crate::message::{IndexPrefix, SessionIndex};
@@ -148,8 +148,10 @@ impl SessionTable {
         }
     }
 
-    /// A registered peer roamed to a new endpoint: rewrite its address in every session.
-    pub fn roam(&mut self, old: SocketAddr, new: SocketAddr, view: &EstablishedSessions) {
+    /// A registered peer roamed to a new endpoint: rewrite its address in every
+    /// session; returns how many were rewritten.
+    pub fn roam(&mut self, old: SocketAddr, new: SocketAddr, view: &EstablishedSessions) -> usize {
+        let mut rewritten = 0;
         for (index, s) in &mut self.map {
             let before = (s.dst, s.src);
             if s.dst == old {
@@ -158,10 +160,15 @@ impl SessionTable {
             if s.src == old {
                 s.src = new;
             }
-            if s.state == SessionState::Established && (s.dst, s.src) != before {
+            if (s.dst, s.src) == before {
+                continue;
+            }
+            rewritten += 1;
+            if s.state == SessionState::Established {
                 view.publish(*index, Route::from(&*s));
             }
         }
+        rewritten
     }
 
     /// Keep only the sessions `keep` accepts; returns how many were removed.
@@ -182,10 +189,21 @@ impl SessionTable {
         before - self.map.len()
     }
 
-    /// Drop expired sessions; returns how many were removed.
-    pub fn expire(&mut self, now: Instant, view: &EstablishedSessions) -> usize {
+    /// Drop expired sessions; returns how many were removed in each state.
+    pub fn expire(&mut self, now: Instant, view: &EstablishedSessions) -> Expired {
         let timeouts = self.timeouts;
-        self.retain(|s| timeouts.live(s, now), view)
+        let mut gone = Expired::default();
+        let keep = |s: &Session| {
+            let live = timeouts.live(s, now);
+            match (live, s.state) {
+                (true, _) => {}
+                (false, SessionState::Pending) => gone.pending += 1,
+                (false, SessionState::Established) => gone.established += 1,
+            }
+            live
+        };
+        self.retain(keep, view);
+        gone
     }
 
     /// Is any index with these upper 24 bits in use?
@@ -201,6 +219,16 @@ impl SessionTable {
     /// How many sessions await a response.
     pub fn pending_len(&self) -> usize {
         self.accounting.pending()
+    }
+
+    /// How many sessions, pending or established, are routed to `peer`.
+    pub fn peer_len(&self, peer: &PublicKey) -> usize {
+        self.accounting.count(peer)
+    }
+
+    /// How many of `peer`'s sessions await a response.
+    pub fn peer_pending_len(&self, peer: &PublicKey) -> usize {
+        self.accounting.pending_of(peer)
     }
 
     /// Would a new entry for `peer` exceed its quota?
@@ -306,9 +334,9 @@ mod tests {
             self.checked(());
         }
 
-        fn roam(&mut self, old: SocketAddr, new: SocketAddr) {
-            self.table.roam(old, new, &self.view);
-            self.checked(());
+        fn roam(&mut self, old: SocketAddr, new: SocketAddr) -> usize {
+            let out = self.table.roam(old, new, &self.view);
+            self.checked(out)
         }
 
         fn retain(&mut self, keep: impl FnMut(&Session) -> bool) -> usize {
@@ -316,7 +344,7 @@ mod tests {
             self.checked(out)
         }
 
-        fn expire(&mut self, now: Instant) -> usize {
+        fn expire(&mut self, now: Instant) -> Expired {
             let out = self.table.expire(now, &self.view);
             self.checked(out)
         }
@@ -350,8 +378,8 @@ mod tests {
         assert!(t.get(index(42), t0 + secs(199)).is_some());
         assert_eq!(t.get(index(42), t0 + secs(200)), None);
         assert!(t.get(index(43), t0 + secs(204)).is_some(), "counted from establishment");
-        assert_eq!(t.expire(t0 + secs(200)), 1);
-        assert_eq!(t.expire(t0 + secs(205)), 1);
+        assert_eq!(t.expire(t0 + secs(200)), Expired { pending: 0, established: 1 });
+        assert_eq!(t.expire(t0 + secs(205)), Expired { pending: 0, established: 1 });
         assert_eq!(t.len(), 0);
     }
 
@@ -363,7 +391,7 @@ mod tests {
         t.insert(index(2), established("192.0.2.1:1", "192.0.2.2:2", t0)).unwrap();
         assert!(t.get(index(1), t0 + secs(9)).is_some());
         assert_eq!(t.get(index(1), t0 + secs(10)), None);
-        assert_eq!(t.expire(t0 + secs(10)), 1);
+        assert_eq!(t.expire(t0 + secs(10)), Expired { pending: 1, established: 0 }, "half-open");
         assert!(t.get(index(2), t0 + secs(10)).is_some());
     }
 
@@ -440,7 +468,8 @@ mod tests {
         let mut t = table();
         t.insert(index(0x00ab_cd01), pending("192.0.2.1:1", "192.0.2.2:2", t0)).unwrap();
         t.insert(index(0x0011_2201), pending("192.0.2.2:2", "192.0.2.1:1", t0)).unwrap();
-        t.roam(addr("192.0.2.1:1"), addr("192.0.2.9:9"));
+        assert_eq!(t.roam(addr("192.0.2.1:1"), addr("192.0.2.9:9")), 2);
+        assert_eq!(t.roam(addr("192.0.2.1:1"), addr("192.0.2.9:9")), 0, "nothing left there");
         assert_eq!(t.get(index(0x00ab_cd01), t0).map(|s| s.dst), Some(addr("192.0.2.9:9")));
         assert_eq!(t.get(index(0x0011_2201), t0).map(|s| s.src), Some(addr("192.0.2.9:9")));
         assert_eq!(t.retain(|s| s.dst.port() == 9), 1);
@@ -492,7 +521,7 @@ mod tests {
         assert_eq!((queue(&t, 1), t.pending_len()), (vec![index(3)], 3));
         assert_eq!(t.retain(|s| s.peer != key(2)), 2);
         assert_eq!((queue(&t, 2), t.pending_len()), (vec![], 1));
-        assert_eq!(t.expire(t0 + PENDING_TIMEOUT), 1);
+        assert_eq!(t.expire(t0 + PENDING_TIMEOUT).total(), 1);
         assert_eq!((t.pending_len(), t.accounting.peers().0), (0, 0));
         assert_eq!(t.len(), 2, "the established entries");
         assert!(counts_exact(&t));
@@ -514,7 +543,7 @@ mod tests {
         t.establish(index(2), t0);
         t.establish(index(2), t0);
         assert_eq!(t.pending_len(), 1, "established once");
-        assert_eq!(t.expire(t0 + secs(30)), 1);
+        assert_eq!(t.expire(t0 + secs(30)).total(), 1);
         assert_eq!(t.pending_len(), 0, "expired");
         t.insert(index(4), pending("192.0.2.1:1", "192.0.2.2:2", t0)).unwrap();
         assert_eq!(t.retain(|s| s.state == SessionState::Established), 1);
@@ -532,7 +561,7 @@ mod tests {
         }
         let peak = t.map.capacity();
         t.insert(index(1 << 31), established("192.0.2.1:1", "192.0.2.2:2", t0 + secs(5))).unwrap();
-        assert_eq!(t.expire(t0 + secs(11)), 100_000);
+        assert_eq!(t.expire(t0 + secs(11)).total(), 100_000);
         assert!(t.map.capacity() < peak / 50, "{} of {peak}", t.map.capacity());
         assert_eq!((t.len(), t.pending_len()), (1, 0));
     }
@@ -565,7 +594,7 @@ mod tests {
         assert!(counts_exact(&t));
         assert!(!t.peer_at_quota(&key(1)) && t.accounting.count(&key(2)) == 2);
         // Expiry and retain free quota.
-        assert_eq!(t.expire(t0 + PENDING_TIMEOUT), 2);
+        assert_eq!(t.expire(t0 + PENDING_TIMEOUT).total(), 2);
         assert!(counts_exact(&t));
         assert_eq!(t.retain(|s| s.peer != key(2)), 2);
         assert!(counts_exact(&t) && t.accounting.peers().1 == 0 && t.len() == 0);
@@ -588,7 +617,7 @@ mod tests {
         // A peer at its pending quota still cannot add an index to a full table.
         assert_eq!(t.insert(index(5), for_peer(1, 5)), Err(InsertError::Full));
         assert_eq!(t.get(index(1), t0).map(|s| s.dst), Some(addr("192.0.2.1:1")));
-        assert_eq!(t.expire(t0 + PENDING_TIMEOUT), 3);
+        assert_eq!(t.expire(t0 + PENDING_TIMEOUT).total(), 3);
         assert_eq!(t.insert(index(4), for_peer(4, 4)), Ok(None), "room after expiry");
         assert!(counts_exact(&t));
     }

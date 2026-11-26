@@ -27,3 +27,13 @@ pub enum ConfigError {
     #[error("workers must be between 1 and {max}, got {got}")]
     Workers { got: usize, max: usize },
 }
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EndpointError {
+    #[error("missing port, expected \"<host>:<port>\"")]
+    MissingPort,
+    #[error("invalid port {0:?}")]
+    Port(String),
+    #[error("invalid host {0:?}, expected a hostname, an IPv4 address or [IPv6]")]
+    Host(String),
+}

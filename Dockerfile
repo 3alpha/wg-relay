@@ -18,4 +18,8 @@ COPY --from=build /usr/local/bin/wg-relay /usr/local/bin/wg-relay
 ENV WG_RELAY_CONFIG=/etc/wg-relay/relay.toml
 ENV RUST_LOG=info
 EXPOSE 51820/udp
+# Prometheus metrics, off unless metrics_listen or WG_RELAY_METRICS_LISTEN is
+# set (e.g. 0.0.0.0:9586). No authentication: publish it only to the host's
+# loopback or a private network.
+EXPOSE 9586/tcp
 ENTRYPOINT ["/usr/local/bin/wg-relay"]

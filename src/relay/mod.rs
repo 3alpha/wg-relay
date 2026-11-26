@@ -20,14 +20,16 @@ use crate::key::PublicKey;
 mod control_plane;
 mod data_plane;
 mod metrics;
+mod snapshot;
 #[cfg(test)]
 mod testing;
 mod verdict;
 
 use control_plane::ControlPlane;
-pub use control_plane::TICK_INTERVAL;
+pub use control_plane::{LIMITS, TICK_INTERVAL};
 use data_plane::{DataPlane, Triage};
-pub use metrics::Metrics;
+pub use metrics::{ControlMetrics, Metrics, TunnelError};
+pub use snapshot::{ControlSnapshot, Limits, PeerSnapshot};
 use verdict::Accepted;
 pub use verdict::{DropReason, Verdict};
 
@@ -87,6 +89,12 @@ impl Relay {
         all
     }
 
+    /// The control plane's counters, session counts and configured peers,
+    /// copied out in one hold of its lock; this handle's own counters are not included.
+    pub fn snapshot(&self, now: Instant) -> ControlSnapshot {
+        self.control_plane().snapshot(now)
+    }
+
     /// What the data plane decided on this handle's thread, and its socket errors.
     pub fn local_metrics(&self) -> &Metrics {
         &self.local_metrics
@@ -117,8 +125,10 @@ impl Relay {
     pub fn handle(&mut self, src: SocketAddr, datagram: &[u8], now: Instant) -> Verdict {
         let metrics = &mut self.local_metrics;
         match self.data_plane.triage(src, datagram, now) {
-            Triage::Forward(dst) => record_verdict(metrics, src, Ok(Accepted::Forward(dst))),
-            Triage::Drop(reason) => record_verdict(metrics, src, Err(reason)),
+            Triage::Forward(dst) => {
+                record_verdict(metrics, src, datagram, Ok(Accepted::Forward(dst)))
+            }
+            Triage::Drop(reason) => record_verdict(metrics, src, datagram, Err(reason)),
             Triage::ToControl(message) => self.control_plane().handle(src, datagram, message, now),
         }
     }
@@ -140,10 +150,11 @@ impl Relay {
 fn record_verdict(
     metrics: &mut Metrics,
     src: SocketAddr,
+    datagram: &[u8],
     outcome: Result<Accepted, DropReason>,
 ) -> Verdict {
     let verdict = Verdict::from(outcome);
-    metrics.record(verdict);
+    metrics.record(verdict, datagram);
     if let Verdict::Drop(reason) = verdict {
         debug!(%reason, %src, "reject");
     }

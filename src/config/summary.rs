@@ -14,6 +14,14 @@ impl fmt::Display for Summary<'_> {
         let rate = config.handshake_rate;
         writeln!(f, "init rate    {rate} per source (IPv4 address or IPv6 /64)")?;
         writeln!(f, "workers      {}", config.workers)?;
+        match &config.public_endpoint {
+            Some(e) => writeln!(f, "endpoint     {e}")?,
+            None => writeln!(f, "endpoint     unset (public_endpoint)")?,
+        }
+        match config.metrics_listen {
+            Some(addr) => writeln!(f, "metrics      http://{addr}/metrics")?,
+            None => writeln!(f, "metrics      off")?,
+        }
         for p in &config.peers {
             writeln!(f, "peer {:<12} {}", p.name, p.pubkey)?;
         }

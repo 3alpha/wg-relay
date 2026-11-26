@@ -13,6 +13,20 @@ pub enum SessionState {
     Established,
 }
 
+/// Sessions garbage collection removed, by the state they were in.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Expired {
+    /// Initiations never answered: half-open handshakes.
+    pub pending: usize,
+    pub established: usize,
+}
+
+impl Expired {
+    pub fn total(self) -> usize {
+        self.pending + self.established
+    }
+}
+
 /// A session: the relay's routing entry for one index, which later messages
 /// carry as `receiver_index`. Not a WireGuard session: each forwarded handshake
 /// creates two, one per direction.

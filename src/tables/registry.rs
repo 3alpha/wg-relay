@@ -49,6 +49,11 @@ impl Registry {
         self.by_key.get(k).filter(|(_, t)| live(*t, now, self.timeout)).map(|(a, _)| *a)
     }
 
+    /// When `k` last authenticated, if it has a registration, live or not yet expired.
+    pub fn last_authenticated(&self, k: &PublicKey) -> Option<Instant> {
+        self.by_key.get(k).map(|(_, t)| *t)
+    }
+
     /// Is `addr` the current endpoint of some configured peer?
     pub fn is_registered(&self, addr: SocketAddr, now: Instant) -> bool {
         self.by_addr.get(&addr).is_some_and(|k| self.endpoint(k, now) == Some(addr))

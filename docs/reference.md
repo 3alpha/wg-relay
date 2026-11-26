@@ -8,11 +8,13 @@ The exact rules wg-relay follows and its known limitations. For a guided tour wi
 
 Inside, the relay is split into two planes. The **data plane** (`DataPlane`) holds only the established sessions (index to destination, expected source and the time it was established) and the reserved prefixes (prefix to configured peer); it forwards transport data and cookie replies on live established sessions, drops what it can judge alone (`invalid_source`, `malformed`, `wrong_source`, and `unknown_index` for transport data on an index that is neither a live established session nor in a reserved prefix), never writes, and hands everything else to the control plane: handshake messages, messages to a registration tunnel, and cookie replies on an index that is not a live established session. The **control plane** (`ControlPlane`) owns everything that changes: configured peers and their registration tunnels, the registry, the rate limiter, the budgets, the session table with its quotas and lifetimes, reload. It is the data plane's only writer: the session table publishes or withdraws an established entry in the same call that changes it, so the two never disagree, and the control plane reserves a prefix when it creates a registration tunnel and frees it when the tunnel's peer is removed. The control plane reads the same reserved prefixes; there is no second copy. No established session is ever in a reserved prefix, so the data plane looks up the prefixes only when the established sessions miss, and forwarded data never pays for that lookup.
 
-The relay runs `workers` forwarding threads (one per CPU the process may use by default). Each has its own UDP socket bound to the listen address with `SO_REUSEPORT`, so the kernel spreads incoming flows across the sockets by their address pair and keeps every flow on one thread, in order. All threads share one relay: they read the data plane at the same time without locks (a concurrent hash map, `papaya`), and lock the control plane, a `Mutex`, only for the datagrams the data plane hands over and for the timers and reloads. Whichever thread handled a datagram sends the result on its own socket, together with any datagrams the registration tunnels queued, since every socket has the same address. Every forwarding thread offers the control plane a timer tick every 250 ms (`TICK_INTERVAL`) and sends what the registration tunnels' timers queue; the control plane runs at most one tick per interval. The threads are all alike: the main thread forwards nothing, and starts them, runs the stats line, SIGHUP and shutdown, and checks every 250 ms that each is still running. Each thread counts what the data plane decided on it; the stats and shutdown lines add every thread's counters to the control plane's.
+The relay runs `workers` forwarding threads (one per CPU the process may use by default). Each has its own UDP socket bound to the listen address with `SO_REUSEPORT`, so the kernel spreads incoming flows across the sockets by their address pair and keeps every flow on one thread, in order. All threads share one relay: they read the data plane at the same time without locks (a concurrent hash map, `papaya`), and lock the control plane, a `Mutex`, only for the datagrams the data plane hands over and for the timers and reloads. Whichever thread handled a datagram sends the result on its own socket, together with any datagrams the registration tunnels queued, since every socket has the same address. Every forwarding thread offers the control plane a timer tick every 250 ms (`TICK_INTERVAL`) and sends what the registration tunnels' timers queue; the control plane runs at most one tick per interval. The threads are all alike: the main thread forwards nothing, and starts them, runs the stats line, the metrics endpoint, SIGHUP and shutdown, and checks every 250 ms that each is still running. Each thread counts what the data plane decided on it; the stats and shutdown lines add every thread's counters to the control plane's.
 
 ### Registration (configured peers only)
 
 Each configured peer has the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` and `PersistentKeepalive = 25`. The relay runs one `boringtun::noise::Tunn` per configured peer.
+
+The relay prints that `[Peer]` section at startup as one `info` event whose first line carries the log prefix and whose other lines are the section alone, so it can be copied as it is; `--print-peer` prints only the section to stdout and exits. `PublicKey` is derived from `private_key`, which is never printed. `Endpoint` is `public_endpoint` verbatim (a hostname, IPv4 address or bracketed IPv6 address with a port, checked at load); without it, `listen` if it names a specific address, or else `<relay public address>:<listen port>` as a placeholder. A reload that changes `public_endpoint` or `tunnel_ip` prints the section again; `listen` and `private_key` take effect only at a restart, so the section keeps the running ones.
 
 * A handshake initiation whose mac1 is keyed to the **relay's** public key is a registration initiation. `parse_handshake_anon` decrypts the sender's static key. Keys that are not configured are rejected (`registration_unknown_key`). A configured peer's initiation goes to its `Tunn`, which performs the full handshake, including replay protection.
 * After **every packet that authenticates** on a configured peer's tunnel (data or a keepalive; never a bare initiation, which could be a replay, and never a cookie), the relay sets `registry[peer] = src_addr`. If the address changed (roaming), every session table entry using the old address is rewritten. Entries expire after 180 s.
@@ -71,7 +73,7 @@ The relay never sends cookie replies (or anything else) for forwarded traffic. D
 
 ### Socket I/O
 
-Each forwarding thread runs a tokio current-thread runtime that drives its own socket and its timer ticks; the main thread's runtime drives the stats timer and the signal handlers. Each socket is read in batches through `quinn-udp`: one `recvmmsg` call fills up to 32 receive buffers of 64 KiB each (2 MiB per thread, allocated once at startup). Where the kernel supports UDP GRO, one buffer can hold up to 64 datagrams from one source that the kernel coalesced on receipt, never more than 64 KiB in total. The relay splits such a buffer at the reported segment size and passes every datagram to `Relay::handle` on its own, exactly as if it had arrived alone.
+Each forwarding thread runs a tokio current-thread runtime that drives its own socket and its timer ticks; the main thread's runtime drives the stats timer, the signal handlers and the metrics endpoint. Each socket is read in batches through `quinn-udp`: one `recvmmsg` call fills up to 32 receive buffers of 64 KiB each (2 MiB per thread, allocated once at startup). Where the kernel supports UDP GRO, one buffer can hold up to 64 datagrams from one source that the kernel coalesced on receipt, never more than 64 KiB in total. The relay splits such a buffer at the reported segment size and passes every datagram to `Relay::handle` on its own, exactly as if it had arrived alone.
 
 Forwarded datagrams leave through UDP GSO where the kernel supports it. Consecutive datagrams of a batch that go to the same address, carry the same ECN bits and have the same length (the last one may be shorter) are handed to the kernel as one send of at most 64 datagrams and 65,507 bytes, which the kernel or the NIC splits back into the very same datagrams. A run within one receive buffer is sent straight from it; a run that continues into the next buffer is copied together first. A datagram the relay drops or consumes, a change of destination or ECN bits, or a longer datagram ends a run, so datagrams leave byte-identical and in the order they arrived. Without GSO, every forwarded datagram is a send of its own. If a GSO send fails (some drivers and paths reject GSO), its datagrams are sent again one by one, so only those the network itself refuses are lost; after `EIO` or `EINVAL`, `quinn-udp` stops using GSO for the rest of the process's life, and the relay logs that once at `info`. The startup line reports whether GRO and GSO are available (`gro=true gso=true`).
 
@@ -85,7 +87,7 @@ On Linux the sockets are bound with `SO_REUSEPORT`; before binding them the rela
 
 ## Rejects and metrics
 
-Every rejected datagram increments a per-reason counter and logs `reject reason=<reason> src=<addr>` at `debug` level. Per-packet logs are kept at debug because otherwise anyone could flood the log. Counters are logged every 60 s and at shutdown, for example `rx=74 forwarded=60 … pending_evicted=0 reject.peer_not_registered=1 reject.unknown_index=4`. Besides the rejects, `forwarded` counts datagrams forwarded, `tunnel_rx` and `tunnel_tx` count datagrams taken and sent by the registration tunnels, `rx_errors` and `tx_errors` count socket failures (logged individually only at `debug`, since a remote host can cause them at packet rate), and `pending_evicted` counts pending entries evicted by a newer initiation to the same configured peer: a steady rise means a flood aimed at one peer, which otherwise shows up only as later `unknown_index` drops.
+Every rejected datagram increments a per-reason counter and logs `reject reason=<reason> src=<addr>` at `debug` level. Per-packet logs are kept at debug because otherwise anyone could flood the log. Counters are logged every 60 s, for example `metrics="rx=74 rx_bytes=9120 forwarded=60 … pending_evicted=0 reject.peer_not_registered=1 reject.unknown_index=4" control="half_open_expired=3 established_expired=0 … gc_runs=60"`, and the datagram counters again at shutdown. Besides the rejects, `forwarded` counts datagrams forwarded, `tunnel_rx` and `tunnel_tx` count datagrams taken and sent by the registration tunnels, `rx_errors` and `tx_errors` count socket failures (logged individually only at `debug`, since a remote host can cause them at packet rate), and `pending_evicted` counts pending entries evicted by a newer initiation to the same configured peer: a steady rise means a flood aimed at one peer, which otherwise shows up only as later `unknown_index` drops. The `control` field holds what only the control plane counts: session and registration lifecycles, mac1 work, registration attempts and registration tunnel errors (listed below). The same counters, and more, are exported to Prometheus.
 
 The reasons, in the order the relay checks them:
 
@@ -110,9 +112,130 @@ The reasons, in the order the relay checks them:
 | `wrong_source` | the packet is not from the session's `src` |
 | `session_not_pending` | a response to a handshake that was already answered |
 
+### Prometheus metrics
+
+`metrics_listen = "<ip>:<port>"` in `relay.toml`, or `--metrics-listen <ip>:<port>` / `WG_RELAY_METRICS_LISTEN`, which override it, turns on a plain HTTP endpoint that serves the Prometheus text format (version 0.0.4) at `GET /metrics` (and `HEAD`); other paths get 404, other methods 405. Any IPv4 or IPv6 address works, wildcards (`0.0.0.0`, `[::]`) included. It is off when unset, and changing it needs a restart. The bound address is logged once at startup. The endpoint has no authentication or TLS: bind it to loopback or a private network, or firewall it. The listener is bound at startup, before the forwarding threads start, so an address in use fails startup.
+
+The server runs on the main thread's runtime, never on a forwarding thread, and answers at most 16 connections at once, each within 10 s. Every scrape takes a fresh snapshot when the request arrives, through the same path as the stats line: the main thread locks the control plane once, just long enough to copy its counters, session counts and each configured peer's state (one lookup per table per peer, no scan), and copies each forwarding thread's counters, which that thread publishes after every batch and timer tick (so they are at most a fraction of a second old). Nothing is cached. The forwarding path gains nothing but plain, unshared increments of counters each thread already keeps (bytes per outcome and messages per type); everything else is counted by the control plane, under the lock it already holds, or read at scrape time.
+
+Labels are low-cardinality only: `reason`, `type`, `state`, `plane`, `direction`, `kind`, `result`, `budget`, `error`, `worker` (thread index) and `peer` (a configured peer's `name` from `relay.toml`). Source addresses, session indexes and the keys of unconfigured peers are never labels. Every drop reason, message type, tunnel error kind and worker appears from the start, at zero.
+
+#### What to alert on
+
+The abuse signals, roughly in the order they show a flood:
+
+- **Half-open handshakes:** `rate(wg_relay_sessions_expired_total{state="pending"}[5m])`. Initiations that were forwarded but never answered; a flood of spoofed or junk initiations to a configured peer drives it up, together with `wg_relay_pending_sessions_evicted_total` and, per server, `wg_relay_peer_sessions{state="pending"}` and `wg_relay_peer_initiations_total{peer}`.
+- **Rate limiting:** `rate(wg_relay_datagrams_dropped_total{reason="rate_limited"}[5m])`. Sources sending initiations faster than `handshake_rate_per_ip`; a rising `wg_relay_rate_limit_buckets_used` against `wg_relay_rate_limit_buckets` means the flood comes from many sources.
+- **CPU budgets:** `rate(wg_relay_datagrams_dropped_total{reason=~"forwarding_budget|registration_budget"}[5m]) > 0`, with `wg_relay_handshake_budget_remaining_checks` at or below 0 and `rate(wg_relay_mac1_checks_total[5m])` near `wg_relay_forwarding_budget_checks_per_second`: legitimate handshakes are being dropped.
+- **Table fullness:** `wg_relay_sessions / wg_relay_sessions_max` and `wg_relay_sessions{state="pending"} / wg_relay_pending_sessions_max` above, say, 0.8, and any `too_many_sessions`, `too_many_pending` or `peer_quota` drops.
+- **Junk data:** `rate(wg_relay_datagrams_dropped_total{reason="unknown_index"}[5m])` well above its usual level (some always come from sessions that just expired or roamed); `no_mac1_match`, `malformed` and `invalid_source` are the same for handshakes and garbage.
+- **Control-plane pressure:** the `control` share of `wg_relay_datagrams_decided_total{plane}` rising: more of the traffic needs the lock.
+- **Operations:** `wg_relay_peer_registered == 0` for a server that should be up, and `wg_relay_config_last_reload_successful == 0`.
+
+#### Metrics
+
+Traffic, summed over the control plane and every forwarding thread:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `wg_relay_datagrams_received_total` | counter | | UDP datagrams received |
+| `wg_relay_received_bytes_total` | counter | | their UDP payload bytes |
+| `wg_relay_datagrams_forwarded_total` | counter | | datagrams forwarded unchanged |
+| `wg_relay_forwarded_bytes_total` | counter | | their bytes |
+| `wg_relay_datagrams_delivered_locally_total` | counter | | datagrams taken by the registration tunnels |
+| `wg_relay_delivered_locally_bytes_total` | counter | | their bytes |
+| `wg_relay_datagrams_dropped_total` | counter | `reason` | datagrams dropped, one series per reason in the table above |
+| `wg_relay_dropped_bytes_total` | counter | | their bytes |
+| `wg_relay_messages_received_total` | counter | `type` | received datagrams that parsed as a WireGuard message: `handshake_initiation`, `handshake_response`, `cookie_reply`, `transport_data` (not `invalid_source` or `malformed` drops) |
+| `wg_relay_messages_forwarded_total` | counter | `type` | messages forwarded; `cookie_reply` counts the cookie replies passed on |
+| `wg_relay_datagrams_decided_total` | counter | `plane` | datagrams by the plane that decided them: `data` (lock-free) or `control` (under its lock, handed over by the data plane) |
+| `wg_relay_tunnel_datagrams_sent_total` | counter | | datagrams the registration tunnels sent: handshake responses, keepalives, ping replies, cookie replies |
+| `wg_relay_tunnel_sent_bytes_total` | counter | | their bytes |
+| `wg_relay_socket_errors_total` | counter | `direction` | failed socket receives (`receive`) and sends (`send`) |
+
+Initiations seen, forwarded and rate-limited are `wg_relay_messages_received_total{type="handshake_initiation"}`, `wg_relay_messages_forwarded_total{type="handshake_initiation"}` and `wg_relay_datagrams_dropped_total{reason="rate_limited"}`; the first also counts registration initiations.
+
+Per forwarding thread, only what its data plane decided (datagrams it handed to the control plane count in the totals only), so skew between threads shows:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `wg_relay_worker_datagrams_total` | counter | `worker` | datagrams the data plane decided on this thread |
+| `wg_relay_worker_bytes_total` | counter | `worker` | their bytes |
+| `wg_relay_worker_datagrams_forwarded_total` | counter | `worker` | datagrams the data plane forwarded on this thread |
+| `wg_relay_worker_forwarded_bytes_total` | counter | `worker` | their bytes |
+| `wg_relay_worker_socket_errors_total` | counter | `worker`, `direction` | socket failures on this thread |
+
+Sessions and garbage collection:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `wg_relay_sessions` | gauge | `state` | session entries, `pending` or `established`, including expired ones not yet collected |
+| `wg_relay_sessions_max` | gauge | | `MAX_SESSIONS`, the cap on all entries; there is no separate cap on established ones |
+| `wg_relay_pending_sessions_max` | gauge | | `MAX_PENDING` |
+| `wg_relay_peer_sessions_max` | gauge | | `MAX_SESSIONS_PER_PEER` |
+| `wg_relay_peer_pending_sessions_max` | gauge | | `MAX_PENDING_PER_PEER` |
+| `wg_relay_sessions_expired_total` | counter | `state` | entries removed at the end of their lifetime; `pending` ones are half-open handshakes, never answered. Lifetimes are fixed, so established entries expire on schedule, not when idle |
+| `wg_relay_pending_sessions_evicted_total` | counter | | pending entries evicted by a newer initiation to the same configured peer |
+| `wg_relay_sessions_revoked_total` | counter | | entries removed by a reload with their configured peer |
+| `wg_relay_sessions_roamed_total` | counter | | entries rewritten because their configured peer moved |
+| `wg_relay_gc_runs_total` | counter | | garbage collection passes; what they remove is in the two `_expired_total` counters |
+
+Sessions refused because a table was full are the `too_many_sessions`, `too_many_pending` and `peer_quota` series of `wg_relay_datagrams_dropped_total`.
+
+Handshake cost: rate limiting, budgets, mac1 work and registration:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `wg_relay_handshake_rate_per_source` | gauge | | `handshake_rate_per_ip`, in initiations per second |
+| `wg_relay_rate_limit_buckets_used` | gauge | | per-source rate-limit buckets some source has used since startup; the table is fixed, so nothing is ever evicted and sources that hash to the same bucket share it |
+| `wg_relay_rate_limit_buckets` | gauge | | rate-limit buckets in all (65,536) |
+| `wg_relay_forwarding_budget_checks_per_second` | gauge | | `FORWARDING_WORK_PER_SEC` |
+| `wg_relay_registration_budget_checks_per_second` | gauge | | `REGISTRATION_WORK_PER_SEC` |
+| `wg_relay_handshake_budget_remaining_checks` | gauge | `budget` | mac1 checks the `forwarding` or `registration` budget would allow now; at or below 0 its initiations are dropped |
+| `wg_relay_mac1_scans_total` | counter | | scans of the configured peers' keys for a forwarded initiation's destination |
+| `wg_relay_mac1_checks_total` | counter | | mac1 keys hashed: every key a scan tried, plus the relay's own key once per initiation |
+| `wg_relay_registration_initiations_total` | counter | `result` | initiations to the relay itself that passed the rate limit: `accepted` by a registration tunnel, or `rejected` (registration budget, unknown key, failed authentication) |
+| `wg_relay_registration_key_exchanges_total` | counter | | X25519 operations spent identifying registration initiations' senders |
+| `wg_relay_tunnel_errors_total` | counter | `error` | datagrams a registration tunnel refused, grouped from boringtun's errors: `replay` (stale timestamp or counter), `authentication` (bad MAC, tag or key), `session` (unknown index, expired session), `under_load`, `other` |
+| `wg_relay_tunnel_cookie_replies_sent_total` | counter | | cookie replies the registration tunnels sent because they were under load |
+
+Budget exhaustion is the `forwarding_budget` and `registration_budget` series of `wg_relay_datagrams_dropped_total`.
+
+Configured peers and registrations:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `wg_relay_configured_peers` | gauge | | configured peers |
+| `wg_relay_registered_peers` | gauge | | configured peers with a live registration |
+| `wg_relay_reserved_prefixes` | gauge | | index prefixes reserved for registration tunnels, one per configured peer |
+| `wg_relay_registrations_total` | counter | `kind` | `new`: a peer registered while not registered; `roamed`: a registered peer moved to a new endpoint |
+| `wg_relay_registrations_expired_total` | counter | | registrations that timed out |
+| `wg_relay_peer_registered` | gauge | `peer` | 1 if the configured peer is registered |
+| `wg_relay_peer_last_authenticated_timestamp_seconds` | gauge | `peer` | when it last authenticated on its registration tunnel; absent while the registry holds nothing for it |
+| `wg_relay_peer_sessions` | gauge | `peer`, `state` | session entries routed to it; `pending` are initiations aimed at it awaiting its answer |
+| `wg_relay_peer_initiations_total` | counter | `peer`, `result` | initiations whose mac1 named it: `forwarded`, or `dropped` after the scan (not registered, at its quota, a loop, an index in use, a full table); since it was configured, so a removed and re-added peer starts again at 0 |
+
+The relay and the process:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `wg_relay_config_reloads_total` | counter | `result` | reloads, `success` or `failure` |
+| `wg_relay_config_last_reload_successful` | gauge | | 0 if the last reload failed and the previous config is still running; 1 before any reload |
+| `wg_relay_config_last_reload_success_timestamp_seconds` | gauge | | when the config was last applied, at startup or by a reload |
+| `wg_relay_workers` | gauge | | forwarding threads |
+| `wg_relay_build_info` | gauge | `version` | always 1 |
+| `process_start_time_seconds` | gauge | | when the process started |
+| `process_cpu_seconds_total` | counter | | user and system CPU time (Linux) |
+| `process_resident_memory_bytes` | gauge | | resident memory (Linux) |
+| `process_virtual_memory_bytes` | gauge | | virtual memory (Linux) |
+| `process_open_fds` | gauge | | open file descriptors (Linux) |
+| `process_max_fds` | gauge | | the soft limit on open files, unless unlimited (Linux) |
+
+Not exported, because counting them would add shared state to the lock-free forwarding path or a scan under the control plane's lock: forwarded traffic per configured peer (the data plane's established sessions do not record which configured peer they belong to), per-session or per-source figures, how many rate-limit buckets are empty right now (a scan of all 65,536), and whether an established session was idle when it expired (the relay never tracks idleness).
+
 ## Reload (SIGHUP)
 
-`relay.toml` is re-read and validated. If it is invalid, the current config stays in effect and an error is logged. Changes to `listen`, `workers` and `private_key` need a restart (a warning is logged). Everything else applies immediately:
+`relay.toml` is re-read and validated. If it is invalid, the current config stays in effect and an error is logged. Changes to `listen`, `workers`, `private_key` and `metrics_listen` need a restart (a warning is logged). Everything else applies immediately:
 
 * A **removed peer** loses its registration, its registration tunnel and every session routed to it. The next packet of any of those sessions is rejected (`unknown_index`), in both directions.
 * Sessions with peers that are still configured are untouched.
@@ -139,7 +262,7 @@ The reasons, in the order the relay checks them:
 * **Handshakes take turns.** The control plane is one `Mutex`: every datagram the data plane hands over (handshake messages, registration tunnel datagrams, and cookie replies on an index that is not a live established session), every timer tick and every reload holds it while it is decided, so that work does not scale with threads, and a thread waiting for it stops forwarding meanwhile. Under a flood of handshakes or of junk cookie replies (64 B each), that stalls every thread receiving part of the flood, not just one thread as before. Junk transport data with made-up indexes never takes the lock: the data plane drops it (`unknown_index`) after one lookup in the established sessions and one in the reserved prefixes, and only data aimed at a registration tunnel's prefix reaches the control plane. Each handshake also costs a mac1 scan over the configured peers, eight keys per SIMD batch, which is fine for thousands of keys.
 * **Changes reach other threads a little late.** After a reload removes a peer, garbage collection or a roam, a thread may forward the rest of a batch it is already deciding on the old entry; later lookups see the change. A session established by a handshake response is published before the response is sent on, so the initiator's first data always finds it.
 * **Failed GSO sends cost extra sends.** After `EIO` or `EINVAL` from a GSO send (a driver without UDP segmentation offload, for example), GSO stays off until a restart and forwarding continues with one send per datagram. Other failures leave GSO on: to a destination whose path MTU is smaller than the forwarded datagrams, every run first fails as a GSO send (`EMSGSIZE`) and then goes one datagram at a time, fragmented. If the kernel rejects the ECN control message itself (very old kernels), `quinn-udp` stops setting it and forwarded IPv4 datagrams lose their ECN bits.
-* The ICMP responder is IPv4-only, and metrics are logged rather than exported.
+* The ICMP responder is IPv4-only.
 
 ## The namespace integration test
 
@@ -153,7 +276,7 @@ docker run --rm --privileged -v "$PWD":/src:ro -w /src debian:trixie-slim bash -
 
 The test runs a server, two clients the server knows and a stranger. `relay.toml` lists the server and the second client `c2`, which both register; the first client `c1` and the stranger are unconfigured. The stranger knows the server's public key but is not one of the server's peers. Each host is behind its own MASQUERADE NAT and runs kernel WireGuard. The test asserts that:
 
-1. the server and `c2` register with the relay;
+1. the server and `c2` register with the relay, and a scrape of `/metrics` shows two registered peers;
 2. both clients ping the server;
 3. the stranger gets nothing through. A `tcpdump` on the server's LAN, decrypted offline with the server key by `examples/pcap_check.rs --initiators`, shows its handshakes reach the server, which drops them;
 4. pings still work after a **server-initiated** rekey towards the configured `c2` (the server removes and re-adds it), and after **client-initiated** rekeys from both clients;
@@ -187,11 +310,14 @@ What it can show is the relay's cost per datagram and per send, compared between
 | `src/relay/mod.rs` | `Relay` (no I/O), one handle per thread (`share`): `handle` asks the data plane without a lock, then locks the control plane for what it hands over; `record_verdict` turns an outcome into a `Verdict` and counts it |
 | `src/relay/data_plane.rs` | the data plane: `DataPlane::triage` forwards, drops or hands a datagram to the control plane, read only; `ReservedPrefixes`, which only the control plane writes |
 | `src/relay/control_plane/` | the control plane: `ControlPlane` and its state; `dispatch.rs` the per-source limit, `classify` into one `Class` per case and one `match` over the handlers; `forward.rs` forwarded handshakes and sessions, `registration.rs` registration tunnels, `reload.rs`, `timers.rs` the tick's throttle, registration tunnel timers and garbage collection |
-| `src/relay/verdict.rs`, `metrics.rs` | `DropReason`, `Verdict` and the counters each plane keeps |
-| `src/config/` | `relay.toml` parsing and validation, `Rate`, `--check-config` summary |
+| `src/relay/verdict.rs`, `metrics.rs`, `metrics/control.rs` | `DropReason`, `Verdict`, the datagram counters each plane keeps (`Metrics`) and those only the control plane keeps (`ControlMetrics`: lifecycles, mac1 work, registration tunnel errors) |
+| `src/relay/snapshot.rs`, `control_plane/snapshot.rs` | `ControlSnapshot`: the control plane's counters, session counts and configured peers, copied in one hold of its lock; `LIMITS` |
+| `src/config/` | `relay.toml` parsing and validation, `Rate`, `PublicEndpoint`, `RelayPeer` (the `[Peer]` section configured peers paste), `--check-config` summary |
 | `src/main.rs` | parse the CLI, set up logging, report errors |
-| `src/app.rs` | clap `Cli`, startup and shutdown, the main thread: it supervises the forwarding threads, logs stats and handles SIGHUP/SIGINT/SIGTERM |
-| `src/app/workers.rs` | the forwarding threads as a group: start, watch, stop and join them, their counters |
+| `src/app.rs` | clap `Cli` (`--check-config`, `--print-peer`, `--metrics-listen`), startup and shutdown |
+| `src/app/supervisor.rs` | the main thread's loop: it watches the forwarding threads, logs stats, applies reloads, answers scrapes and handles SIGHUP/SIGINT/SIGTERM |
+| `src/app/workers.rs` | the forwarding threads as a group: start, watch, stop and join them, their counters and the `Snapshot` shared by the stats line and scrapes |
+| `src/app/metrics/` | the Prometheus endpoint: the text encoder (`encoder.rs`), the metric families by topic (`traffic.rs`, `state.rs`, `handshakes.rs`, `peers.rs`, `process.rs`) and a minimal HTTP server on tokio's `TcpListener` (`http.rs`) |
 | `src/app/forwarding.rs` | one forwarding thread: batched receive, forwarding, timer ticks, the relay's own datagrams |
 | `src/udp.rs` | the `SO_REUSEPORT` socket group and batched socket I/O on `quinn-udp`: `recvmmsg` with GRO, GSO sends, ECN, the kernel settings kept |
 | `src/udp/runs.rs` | splitting GRO buffers into datagrams and grouping forwarded datagrams into GSO sends (pure, unit-tested) |

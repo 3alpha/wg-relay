@@ -29,6 +29,24 @@ impl ControlPlane {
         }
         // Anyone may initiate to a configured peer; its own WireGuard peer list decides.
         let peer = self.find_peer_by_mac1(datagram, now)?;
+        let outcome = self.forward_initiation_to(peer, src, sender_index, now);
+        if let Some(state) = self.peers.get_mut(&peer) {
+            match outcome {
+                Ok(_) => state.initiations_forwarded += 1,
+                Err(_) => state.initiations_dropped += 1,
+            }
+        }
+        outcome
+    }
+
+    /// Forward an initiation to `peer`, the configured peer its mac1 names.
+    fn forward_initiation_to(
+        &mut self,
+        peer: PublicKey,
+        src: SocketAddr,
+        sender_index: SessionIndex,
+        now: Instant,
+    ) -> Result<Accepted, DropReason> {
         if self.sessions.peer_at_quota(&peer) {
             return Err(DropReason::PeerQuota);
         }
@@ -104,6 +122,8 @@ impl ControlPlane {
         }
         let lookup = message::find_mac1(&self.mac1.keys, datagram);
         self.forwarding_budget.spend(lookup.tried);
+        self.counters.mac1_scans += 1;
+        self.counters.mac1_checks += lookup.tried as u64;
         lookup.found.map(|i| self.mac1.peers[i]).ok_or(DropReason::NoMac1Match)
     }
 

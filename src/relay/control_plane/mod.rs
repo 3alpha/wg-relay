@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use boringtun::noise::Tunn;
 use x25519_dalek::StaticSecret;
 
-use super::Metrics;
 use super::data_plane::DataPlane;
+use super::{ControlMetrics, Metrics};
 use crate::config::Config;
 use crate::key::PublicKey;
 use crate::message::{Mac1Key, SessionIndex};
@@ -23,9 +23,12 @@ mod dispatch;
 mod forward;
 mod registration;
 mod reload;
+mod snapshot;
 #[cfg(test)]
 mod tests;
 mod timers;
+
+pub use snapshot::LIMITS;
 
 use timers::Throttle;
 
@@ -65,6 +68,10 @@ struct PeerState {
     name: String,
     /// The peer's registration tunnel, where the relay is its WireGuard peer.
     tunnel: Box<Tunn>,
+    /// Forwarded initiations sent to this peer since it was configured.
+    initiations_forwarded: u64,
+    /// Initiations whose mac1 named this peer but were dropped after the scan.
+    initiations_dropped: u64,
 }
 
 /// The configured peers' mac1 keys in one contiguous list, for batched scans.
@@ -100,6 +107,8 @@ pub(super) struct ControlPlane {
     registration_budget: WorkBudget,
     /// What the control plane decided, and the registration tunnels' output.
     metrics: Metrics,
+    /// Session and registration lifecycles and handshake work.
+    counters: ControlMetrics,
     /// Datagrams the registration tunnels produced, for the caller to send.
     tx_queue: Vec<(SocketAddr, Vec<u8>)>,
     scratch: Vec<u8>,
@@ -134,6 +143,7 @@ impl ControlPlane {
             forwarding_budget: WorkBudget::new(FORWARDING_WORK_PER_SEC),
             registration_budget: WorkBudget::new(REGISTRATION_WORK_PER_SEC),
             metrics: Metrics::default(),
+            counters: ControlMetrics::default(),
             tx_queue: Vec::new(),
             scratch: vec![0; SCRATCH_BUFFER_LEN],
             ticks: Throttle::new(TICK_INTERVAL),
@@ -171,6 +181,7 @@ impl ControlPlane {
     pub(super) fn drain_tx_queue(&mut self) -> Vec<(SocketAddr, Vec<u8>)> {
         let out = std::mem::take(&mut self.tx_queue);
         self.metrics.tunnel_tx += out.len() as u64;
+        self.metrics.tunnel_tx_bytes += out.iter().map(|(_, d)| d.len() as u64).sum::<u64>();
         out
     }
 

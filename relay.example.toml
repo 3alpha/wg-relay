@@ -1,5 +1,6 @@
 # wg-relay configuration. Validate with: wg-relay --check-config -c relay.toml
-# Reload with SIGHUP (listen, workers and private_key changes need a restart).
+# Reload with SIGHUP (listen, workers, private_key and metrics_listen changes
+# need a restart).
 listen = "0.0.0.0:51820"
 # The relay's own WireGuard private key (wg genkey). Used only for the
 # registration tunnels; it can never decrypt traffic between peers.
@@ -13,6 +14,15 @@ handshake_rate_per_ip = "10/s"
 # keeps each flow on one of them. Default: one per CPU the relay may use.
 # Linux only; elsewhere the relay uses one.
 # workers = 4
+# Where peers reach the relay, "<host>:<port>" (hostname, IPv4 or [IPv6]).
+# Used verbatim as the Endpoint of the [Peer] section the relay prints at
+# startup and with --print-peer. Without it, a specific listen address is
+# used, or a placeholder if listen is a wildcard such as 0.0.0.0.
+# public_endpoint = "relay.example.com:51820"
+# Serve Prometheus metrics over HTTP at http://<metrics_listen>/metrics.
+# Off when unset. The endpoint has no authentication: keep it on loopback or a
+# private network.
+# metrics_listen = "127.0.0.1:9586"
 
 # The peers that must be reachable, usually the servers. Each one adds the
 # relay as a WireGuard peer and registers with it. Anyone may start a

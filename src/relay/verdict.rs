@@ -46,6 +46,31 @@ drop_reasons! {
     SessionNotPending => "session_not_pending",
 }
 
+impl DropReason {
+    /// Was the datagram parsed as a WireGuard message before it was dropped?
+    pub(crate) fn after_parse(self) -> bool {
+        match self {
+            DropReason::InvalidSource | DropReason::Malformed => false,
+            DropReason::RateLimited
+            | DropReason::RegistrationBudget
+            | DropReason::RegistrationUnknownKey
+            | DropReason::TunnelAuthFailed
+            | DropReason::ReservedIndex
+            | DropReason::TooManySessions
+            | DropReason::TooManyPending
+            | DropReason::ForwardingBudget
+            | DropReason::NoMac1Match
+            | DropReason::PeerQuota
+            | DropReason::PeerNotRegistered
+            | DropReason::Loop
+            | DropReason::IndexInUse
+            | DropReason::UnknownIndex
+            | DropReason::WrongSource
+            | DropReason::SessionNotPending => true,
+        }
+    }
+}
+
 /// What happened to one datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {

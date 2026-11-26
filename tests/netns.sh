@@ -12,7 +12,7 @@
 # relay.toml lists srv and c2, which register with the relay; c1 and st are
 # unconfigured. The server has c1 and c2 as peers; st (stranger) is not one of them,
 # although it knows the server's public key. The test asserts:
-#   1. srv and c2 register with the relay
+#   1. srv and c2 register with the relay, and /metrics shows both registered
 #   2. c1 (unconfigured) and c2 (configured) ping the server
 #   3. the stranger gets nothing through; a capture on the server's LAN shows
 #      its handshakes reach the server, which drops them
@@ -103,6 +103,7 @@ write_config() { # configured peers...
         echo "private_key = \"$(cat "$WORK/relay.key")\""
         echo "handshake_rate_per_ip = \"10/s\""
         echo "workers = 3"
+        echo "metrics_listen = \"127.0.0.1:9586\""
         for p in "$@"; do printf '[[peer]]\nname = "%s"\npubkey = "%s"\n' "$p" "$(pub "$p")"; done
     } >"$WORK/relay.toml"
 }
@@ -164,6 +165,7 @@ grep -q 'wg-relay started.*workers=3' "$LOG" || fail "relay did not start three 
 step "1. srv and c2 register"
 retry_ping srv 10.99.0.254 15 || fail "srv not registered"
 retry_ping c2 10.99.0.254 15 || fail "c2 not registered"
+x relay bash -c 'exec 3<>/dev/tcp/127.0.0.1/9586 && printf "GET /metrics HTTP/1.0\r\n\r\n" >&3 && cat <&3' | grep -x 'wg_relay_registered_peers 2' >/dev/null || fail "metrics do not show srv and c2 registered"
 
 step "2. c1 (unconfigured) and c2 (configured) ping the server"
 must_ping c1 10.99.0.1

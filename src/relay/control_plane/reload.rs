@@ -18,11 +18,16 @@ impl ControlPlane {
         self.limiter.set_rate(config.handshake_rate.per_sec());
         let mut old = std::mem::take(&mut self.peers);
         for p in &config.peers {
-            let tunnel = match old.remove(&p.pubkey) {
-                Some(o) => o.tunnel,
-                None => Box::new(self.new_tunnel(p.pubkey)),
+            let state = match old.remove(&p.pubkey) {
+                Some(o) => PeerState { name: p.name.clone(), ..o },
+                None => PeerState {
+                    name: p.name.clone(),
+                    tunnel: Box::new(self.new_tunnel(p.pubkey)),
+                    initiations_forwarded: 0,
+                    initiations_dropped: 0,
+                },
             };
-            self.peers.insert(p.pubkey, PeerState { name: p.name.clone(), tunnel });
+            self.peers.insert(p.pubkey, state);
         }
         self.mac1 = Mac1Table {
             peers: config.peers.iter().map(|p| p.pubkey).collect(),
@@ -36,6 +41,7 @@ impl ControlPlane {
         self.registry.retain(|k, _| peers.contains_key(k));
         let dropped =
             self.sessions.retain(|s| peers.contains_key(&s.peer), &self.data_plane.established);
+        self.counters.sessions_revoked += dropped as u64;
         info!(peers = peers.len(), dropped_sessions = dropped, "config applied");
     }
 

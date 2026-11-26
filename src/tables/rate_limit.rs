@@ -18,6 +18,8 @@ pub struct RateLimiter {
     hasher: RandomState,
     /// `None` is a bucket nobody has used yet, i.e. a full one.
     buckets: Vec<Option<TokenBucket>>,
+    /// Buckets some source has used since startup; they are never freed.
+    used: usize,
 }
 
 impl RateLimiter {
@@ -28,11 +30,17 @@ impl RateLimiter {
             per_sec,
             hasher: RandomState::new(),
             buckets: vec![None; RATE_LIMIT_BUCKETS],
+            used: 0,
         }
     }
 
     pub fn set_rate(&mut self, per_sec: f64) {
         (self.per_sec, self.burst) = (per_sec, (per_sec * 2.0).max(1.0));
+    }
+
+    /// How many buckets some source has used since startup, and how many there are.
+    pub fn occupancy(&self) -> (usize, usize) {
+        (self.used, RATE_LIMIT_BUCKETS)
     }
 
     fn bucket(&self, ip: IpAddr) -> usize {
@@ -48,6 +56,7 @@ impl RateLimiter {
     pub fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
         let (per_sec, burst) = (self.per_sec, self.burst);
         let i = self.bucket(ip);
+        self.used += usize::from(self.buckets[i].is_none());
         let b = self.buckets[i].get_or_insert(TokenBucket::full(burst, now));
         b.refill(now, per_sec, burst);
         let ok = b.tokens >= 1.0;
@@ -82,6 +91,7 @@ mod tests {
         assert!(l.allow(other, t0), "per-source buckets");
         assert!(l.allow(ip, t0 + secs(1)));
         assert!(!l.allow(ip, t0 + secs(1)));
+        assert_eq!(l.occupancy(), (2, 1 << 16), "two sources, two buckets");
     }
 
     #[test]

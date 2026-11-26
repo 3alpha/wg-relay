@@ -412,7 +412,7 @@ fn verdicts_are_counted_by_the_plane_that_decides() {
     assert_eq!((control.rx, control.forwarded, wrong_unknown(&control)), (3, 2, (0, 1)));
     let all = relay.metrics();
     assert_eq!((all.rx, all.forwarded), (6, 3));
-    assert!(all.to_string().starts_with("rx=6 forwarded=3 "), "{all}");
+    assert!(all.to_string().starts_with("rx=6 rx_bytes=448 forwarded=3 "), "{all}");
 }
 
 /// What one table makes of transport data outside the reserved prefixes: only

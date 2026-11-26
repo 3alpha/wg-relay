@@ -38,6 +38,7 @@ impl ControlPlane {
         now: Instant,
     ) -> Result<Accepted, DropReason> {
         self.admit_registration(src, now)?;
+        self.counters.registration_key_exchanges += 1;
         let half = match Tunn::parse_incoming_packet(datagram) {
             Ok(boringtun::noise::Packet::HandshakeInit(h)) => {
                 parse_handshake_anon(&self.secret, &self.public, &h).ok()
@@ -90,11 +91,12 @@ impl ControlPlane {
         datagram: &[u8],
         peer: PublicKey,
     ) -> Result<Proof, DropReason> {
-        let Some(PeerState { name, tunnel }) = self.peers.get_mut(&peer) else {
+        let Some(PeerState { name, tunnel, .. }) = self.peers.get_mut(&peer) else {
             return Err(DropReason::TunnelAuthFailed);
         };
         match tunnel.decapsulate(Some(src.ip()), datagram, &mut self.scratch) {
             TunnResult::Err(e) => {
+                self.counters.record_tunnel_error(&e);
                 debug!(%src, peer = %name, ?e, "registration tunnel rejected datagram");
                 Err(DropReason::TunnelAuthFailed)
             }
@@ -103,6 +105,8 @@ impl ControlPlane {
                 // out, proves the sender is live. Our response to an initiation does
                 // not (an initiation can be replayed), nor does a cookie reply under load.
                 let proof = Proof::of_transport(out);
+                // Under its own handshake load, the tunnel answers with a cookie reply (type 3).
+                self.counters.tunnel_cookie_replies += u64::from(out.first() == Some(&3));
                 self.tx_queue.push((src, out.to_vec()));
                 while let TunnResult::WriteToNetwork(queued) =
                     tunnel.decapsulate(None, &[], &mut self.scratch)
@@ -131,9 +135,13 @@ impl ControlPlane {
         let Some(old) = self.registry.update(peer, src, now) else { return };
         let name = self.peers.get(&peer).map_or("?", |p| &p.name);
         info!(peer = %name, addr = %src, old = ?old, "registered");
-        if let Some(old) = old {
-            self.sessions.roam(old, src, &self.data_plane.established);
-        }
+        let Some(old) = old else {
+            self.counters.registrations += 1;
+            return;
+        };
+        self.counters.registrations_roamed += 1;
+        let rewritten = self.sessions.roam(old, src, &self.data_plane.established);
+        self.counters.sessions_roamed += rewritten as u64;
     }
 }
 

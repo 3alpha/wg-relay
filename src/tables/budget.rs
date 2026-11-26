@@ -22,6 +22,14 @@ impl WorkBudget {
         b.tokens > 0.0
     }
 
+    /// Work the budget would allow at `now`; negative while in debt.
+    pub fn remaining(&self, now: Instant) -> f64 {
+        self.bucket.map_or(self.per_sec, |mut b| {
+            b.refill(now, self.per_sec, self.per_sec);
+            b.tokens
+        })
+    }
+
     /// Charge work already done.
     pub fn spend(&mut self, work: usize) {
         if let Some(b) = &mut self.bucket {
@@ -57,7 +65,9 @@ mod tests {
         assert!(b.available(t0 + Duration::from_millis(300)), "+1");
         b.spend(1000);
         assert!(b.available(t0 + secs(200)), "refills up to the burst");
+        assert_eq!(b.remaining(t0 + secs(200)), 10.0);
         b.spend(10);
         assert!(!b.available(t0 + secs(200)), "burst is one second's worth");
+        assert_eq!(b.remaining(t0 + secs(200)), 0.0);
     }
 }

@@ -13,7 +13,7 @@ quinn-udp = { version = "0.6.3", default-features = false }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "net", "time", "macros", "signal", "sync"] }
+tokio = { version = "1", features = ["rt", "net", "time", "macros", "signal", "sync", "io-util"] }
 toml = "1.2.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -21,7 +21,7 @@ x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["socket"] }
-rustix = { version = "1.1", default-features = false, features = ["std", "net"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "net", "param"] }
 
 [lints.clippy]
 unwrap_used = "deny"

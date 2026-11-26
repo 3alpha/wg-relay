@@ -21,7 +21,7 @@ The relay is configured with nothing more than the public keys of the peers that
 - **Many networks on one relay.** Adding a network means adding its server's public key. Networks are isolated from one another by their own WireGuard peer lists.
 - **Minimal configuration.** The relay lists only the peers that must be reachable. Who may connect to them is decided where it always is in WireGuard: in each peer's own config.
 - **Abuse resistance.** Only configured peers can register, and a session is established only when a configured peer answers. Handshakes are rate-limited per source and by separate CPU budgets for forwarding and registration, so a flood cannot stall forwarding and cannot stop registered peers from staying registered; pending handshakes and session entries have a quota per configured peer, so a flood aimed at one network does not refuse handshakes to the others and a misbehaving configured peer cannot fill the session table; session entries expire a fixed time after their handshake, however much traffic arrives; memory stays bounded however many sources appear; and the relay cannot be used as a reflector.
-- **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 3,200 lines of Rust.
+- **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The relay prints the `[Peer]` section servers paste, and can serve Prometheus metrics. The implementation is about 5,000 lines of Rust.
 
 ## How it works
 
@@ -70,14 +70,16 @@ listen = "0.0.0.0:51820"
 private_key = "<relay private key>"
 tunnel_ip = "10.99.0.254"         # the relay's address inside each configured peer's tunnel
 handshake_rate_per_ip = "10/s"
+public_endpoint = "relay.example.com:51820"  # where peers reach the relay
 # workers = 4                     # forwarding threads; default one per CPU
+# metrics_listen = "127.0.0.1:9586"  # Prometheus metrics at /metrics; off by default
 
 [[peer]]
 name = "main"
 pubkey = "<server public key>"
 ```
 
-**3. Configure the server.** Add the relay as a peer, and set the relay as the endpoint of every client peer:
+**3. Configure the server.** Add the relay as a peer, and set the relay as the endpoint of every client peer. The relay prints its own `[Peer]` section at startup, and `wg-relay --print-peer -c relay.toml` prints only that section, ready to paste:
 
 ```ini
 [Interface]
@@ -85,8 +87,8 @@ PrivateKey = <server private key>
 Address    = 10.99.0.1/24
 ListenPort = 51820            # any port; no port forward needed
 
-# The relay: registration tunnel only
 [Peer]
+# wg-relay: registration tunnel only
 PublicKey           = <relay public key>
 Endpoint            = relay.example.com:51820
 AllowedIPs          = 10.99.0.254/32
@@ -118,12 +120,15 @@ PersistentKeepalive = 25
 
 ```sh
 ./target/release/wg-relay --check-config -c relay.toml   # validate; prints roles and warnings
+./target/release/wg-relay --print-peer -c relay.toml     # the [Peer] section for each server
 RUST_LOG=info ./target/release/wg-relay -c relay.toml
 ping 10.99.0.254                                         # on the server: confirms registration
 ping 10.99.0.1                                           # on the client: confirms the tunnel
 ```
 
 Keep `PersistentKeepalive` on every peer. It keeps NAT mappings and registrations current.
+
+The printed `Endpoint` is `public_endpoint` verbatim. Without it, the relay uses `listen` if that names a specific address, and otherwise prints `<relay public address>:<port>` for you to fill in. The section changes only if a reload changes `public_endpoint` or `tunnel_ip`, and is then printed again. It never contains the private key.
 
 ## Access control
 
@@ -156,7 +161,7 @@ The relay's own private key opens only the registration tunnels, which carry kee
 - **The relay cannot cap who uses its bandwidth.** A configured peer can accept any number of unconfigured peers; only handshakes are rate-limited.
 - **WireGuard's handshake flood protection is weaker behind the relay.** The relay's per-source rate limit and forwarding budget compensate in part; see [section 3.5 of the guide](docs/how-it-works.md#35-under-load-cookies-and-mac2).
 - **A sustained handshake flood delays new sessions.** Existing sessions keep forwarding, but legitimate handshakes compete with the flood: junk initiations compete with all forwarded handshakes for the forwarding budget, a flood aimed at one configured peer can evict pending handshakes to that peer, and a registration flood delays peers that register from a new address.
-- **One flow is forwarded by one core.** The relay forwards on several threads, but the kernel keeps each flow (address pair) on one of them, and handshakes are decided one at a time. Ping replies are IPv4-only, and metrics are written to the log rather than exported.
+- **One flow is forwarded by one core.** The relay forwards on several threads, but the kernel keeps each flow (address pair) on one of them, and handshakes are decided one at a time. Ping replies are IPv4-only.
 
 The [reference](docs/reference.md#limitations) gives the complete list with the reasoning behind each item, and the [guide's security model](docs/how-it-works.md#15-security-model) covers threats and defences.
 
@@ -169,6 +174,35 @@ WG_RELAY_CONFIG=/etc/wg-relay.toml ./target/release/wg-relay    # every flag als
 ```
 
 Every rejected packet is counted under a named reason, such as `wrong_source` or `rate_limited`. The counters are logged every minute and at shutdown. The [reference](docs/reference.md) lists every reason, along with the exact forwarding and reload rules.
+
+## Metrics
+
+With `metrics_listen` set (for example `"127.0.0.1:9586"`), or `--metrics-listen` / `WG_RELAY_METRICS_LISTEN`, which override it, the relay serves Prometheus metrics over plain HTTP at `/metrics`. It is off by default, and changing it needs a restart. The endpoint has no authentication, so keep it on loopback or a private network, or firewall it.
+
+```yaml
+scrape_configs:
+  - job_name: wg-relay
+    static_configs:
+      - targets: ["127.0.0.1:9586"]
+```
+
+In Docker (here an image built with `docker build -t wg-relay .`), listen on all of the container's interfaces and publish the port only to the host's loopback or a private network, without editing the mounted config:
+
+```sh
+docker run -d --name wg-relay -p 51820:51820/udp -p 127.0.0.1:9586:9586 \
+  -e WG_RELAY_METRICS_LISTEN=0.0.0.0:9586 \
+  -v /etc/wg-relay/relay.toml:/etc/wg-relay/relay.toml:ro wg-relay
+```
+
+Every scrape takes a fresh snapshot: the stats line's counters, plus session counts against their limits, the cost of unauthenticated handshakes (rate limiting, CPU budgets, mac1 scans, registration attempts) and each configured peer's state, labelled by its name in `relay.toml`. Addresses, session indexes and keys never appear in labels. Worth graphing or alerting on:
+
+- `wg_relay_peer_registered{peer}`: 0 means that server cannot be reached through the relay.
+- `rate(wg_relay_sessions_expired_total{state="pending"}[5m])`: half-open handshakes, the clearest sign of an initiation flood; `wg_relay_peer_initiations_total{peer}` shows which server it targets.
+- `rate(wg_relay_datagrams_dropped_total{reason}[5m])`: floods show up as `rate_limited`, `no_mac1_match`, `unknown_index`, `forwarding_budget` or `registration_budget`; a full table as `too_many_sessions`, `too_many_pending` or `peer_quota`.
+- `rate(wg_relay_forwarded_bytes_total[5m])` and `wg_relay_sessions{state}` for load, `wg_relay_worker_datagrams_total{worker}` for skew between forwarding threads.
+- `wg_relay_config_last_reload_successful`: 0 after a `SIGHUP` that failed and left the old config running.
+
+The [reference](docs/reference.md#prometheus-metrics) lists every metric and what to alert on.
 
 ## Testing
 

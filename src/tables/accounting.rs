@@ -33,6 +33,16 @@ impl SessionAccounting {
         self.pending
     }
 
+    /// Entries routed to `peer`, live or not yet collected.
+    pub(super) fn count(&self, peer: &PublicKey) -> usize {
+        self.count_by_peer.get(peer).copied().unwrap_or_default()
+    }
+
+    /// Pending entries routed to `peer`, live or not yet collected.
+    pub(super) fn pending_of(&self, peer: &PublicKey) -> usize {
+        self.pending_by_peer.get(peer).map_or(0, VecDeque::len)
+    }
+
     /// Would another entry for `peer` exceed its quota?
     pub(super) fn at_quota(&self, peer: &PublicKey) -> bool {
         self.count_by_peer.get(peer).is_some_and(|n| *n >= self.limits.per_peer)
@@ -150,10 +160,6 @@ impl SessionAccounting {
     /// The pending indexes of `peer`, oldest first.
     pub(super) fn queue(&self, peer: &PublicKey) -> Vec<SessionIndex> {
         self.pending_by_peer.get(peer).map(|q| q.iter().copied().collect()).unwrap_or_default()
-    }
-
-    pub(super) fn count(&self, peer: &PublicKey) -> usize {
-        self.count_by_peer.get(peer).copied().unwrap_or_default()
     }
 
     /// How many peers have a pending queue and an entry count.

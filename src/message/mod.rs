@@ -82,6 +82,56 @@ impl Message {
     }
 }
 
+/// A message type, as the WireGuard spec numbers them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageType {
+    HandshakeInitiation,
+    HandshakeResponse,
+    CookieReply,
+    TransportData,
+}
+
+impl MessageType {
+    pub const ALL: [MessageType; 4] = [
+        MessageType::HandshakeInitiation,
+        MessageType::HandshakeResponse,
+        MessageType::CookieReply,
+        MessageType::TransportData,
+    ];
+
+    /// The type a datagram's first byte names, if any; whether the rest fits is `parse`'s job.
+    pub fn of(datagram: &[u8]) -> Option<Self> {
+        match datagram.first() {
+            Some(1) => Some(MessageType::HandshakeInitiation),
+            Some(2) => Some(MessageType::HandshakeResponse),
+            Some(3) => Some(MessageType::CookieReply),
+            Some(4) => Some(MessageType::TransportData),
+            _ => None,
+        }
+    }
+
+    /// Position in `ALL`, for per-type counters.
+    pub fn index(self) -> usize {
+        match self {
+            MessageType::HandshakeInitiation => 0,
+            MessageType::HandshakeResponse => 1,
+            MessageType::CookieReply => 2,
+            MessageType::TransportData => 3,
+        }
+    }
+}
+
+impl fmt::Display for MessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            MessageType::HandshakeInitiation => "handshake_initiation",
+            MessageType::HandshakeResponse => "handshake_response",
+            MessageType::CookieReply => "cookie_reply",
+            MessageType::TransportData => "transport_data",
+        })
+    }
+}
+
 /// Read the little-endian index at `off`.
 fn index(b: &[u8], off: usize) -> Result<SessionIndex, ParseError> {
     b.get(off..off + 4)
