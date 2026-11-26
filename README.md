@@ -197,6 +197,8 @@ The relay limits handshakes per source address, so it must see each peer's real 
 
 To check, watch `wg_relay_rate_limit_buckets_used` with several peers connected: it grows with the number of distinct source addresses, and stays at 1 if they are being rewritten.
 
+[`compose.yaml`](compose.yaml) runs the same thing with Docker Compose (`docker compose up -d`), with the metrics port published to the host's loopback; its comments say how to switch to the host network.
+
 ## Metrics
 
 With `metrics_listen` set (for example `"127.0.0.1:9586"`), or `--metrics-listen` / `WG_RELAY_METRICS_LISTEN`, which override it, the relay serves Prometheus metrics over plain HTTP at `/metrics`. It is off by default, and changing it needs a restart. The endpoint has no authentication, so keep it on loopback or a private network, or firewall it.

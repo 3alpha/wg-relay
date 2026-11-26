@@ -1,0 +1,38 @@
+# wg-relay with Docker Compose: docker compose up -d
+#
+# The relay limits handshakes per source address, so it must see each peer's
+# real address. Which network mode gives it that:
+#
+# - Bridge with published ports (the default below), rootful Docker on Linux:
+#   real addresses for IPv4; for IPv6 only if the network has IPv6 enabled and
+#   Docker manages ip6tables. The host kernel tracks every flow, which costs
+#   throughput, and a flood from many sources can fill its connection tracking
+#   table before the relay's own limits apply.
+# - Bridge on rootless Docker, Docker Desktop, or with iptables disabled: a
+#   userspace proxy makes every peer appear as one address. Forwarding still
+#   works, but all peers share one rate-limit bucket, so one abuser can starve
+#   the rest.
+# - Host network: real addresses, no NAT or connection tracking in front of
+#   the relay. The best choice for a relay that faces the internet under load.
+#   To use it, remove `ports` and uncomment `network_mode`.
+#
+# To check, watch wg_relay_rate_limit_buckets_used with several peers
+# connected: it grows with the number of distinct source addresses and stays
+# at 1 if they are being rewritten.
+services:
+  wg-relay:
+    image: ghcr.io/3alpha/wg-relay:latest
+    restart: unless-stopped
+    # network_mode: host
+    ports:
+      - "51820:51820/udp"
+      # Prometheus metrics have no authentication: publish them only to the
+      # host's loopback or a private network.
+      - "127.0.0.1:9586:9586"
+    environment:
+      # Remove to turn metrics off. With network_mode: host, bind loopback
+      # instead: 127.0.0.1:9586.
+      WG_RELAY_METRICS_LISTEN: "0.0.0.0:9586"
+    volumes:
+      # Must be readable by the container's user (uid 65532).
+      - ./relay.toml:/etc/wg-relay/relay.toml:ro
