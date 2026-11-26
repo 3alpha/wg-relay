@@ -175,6 +175,28 @@ WG_RELAY_CONFIG=/etc/wg-relay.toml ./target/release/wg-relay    # every flag als
 
 Every rejected packet is counted under a named reason, such as `wrong_source` or `rate_limited`. The counters are logged every minute and at shutdown. The [reference](docs/reference.md) lists every reason, along with the exact forwarding and reload rules.
 
+## Docker
+
+Release images are published as `ghcr.io/3alpha/wg-relay` for `linux/amd64` and `linux/arm64`; `docker build -t wg-relay .` builds the same image locally. The container runs as a non-root user (uid 65532), which must be able to read the mounted `relay.toml`.
+
+```sh
+docker run -d --name wg-relay --restart unless-stopped \
+  -p 51820:51820/udp \
+  -v /etc/wg-relay/relay.toml:/etc/wg-relay/relay.toml:ro \
+  ghcr.io/3alpha/wg-relay
+```
+
+The relay limits handshakes per source address, so it must see each peer's real address. Which network mode gives it that:
+
+| Network | Real source addresses | Notes |
+|---|---|---|
+| `--network host` | yes | No NAT or connection tracking in front of the relay. The best choice for a relay that faces the internet under load. |
+| Bridge with `-p` (the default), rootful Docker on Linux | yes for IPv4; for IPv6 only if the container network has IPv6 enabled and Docker manages ip6tables | The host kernel tracks every flow, which costs throughput, and a flood from many sources can fill its connection tracking table before the relay's own limits apply. |
+| Bridge with `-p` on rootless Docker, Docker Desktop, or with `iptables` disabled | no | A userspace proxy makes every peer appear as one address. Forwarding still works, but all peers share one rate-limit bucket, so one abuser can starve the rest. |
+| `macvlan` or `ipvlan` | yes | The container gets its own address on the network, without NAT. |
+
+To check, watch `wg_relay_rate_limit_buckets_used` with several peers connected: it grows with the number of distinct source addresses, and stays at 1 if they are being rewritten.
+
 ## Metrics
 
 With `metrics_listen` set (for example `"127.0.0.1:9586"`), or `--metrics-listen` / `WG_RELAY_METRICS_LISTEN`, which override it, the relay serves Prometheus metrics over plain HTTP at `/metrics`. It is off by default, and changing it needs a restart. The endpoint has no authentication, so keep it on loopback or a private network, or firewall it.
@@ -186,12 +208,12 @@ scrape_configs:
       - targets: ["127.0.0.1:9586"]
 ```
 
-In Docker (here an image built with `docker build -t wg-relay .`), listen on all of the container's interfaces and publish the port only to the host's loopback or a private network, without editing the mounted config:
+In [Docker](#docker), listen on all of the container's interfaces and publish the port only to the host's loopback or a private network, without editing the mounted config:
 
 ```sh
 docker run -d --name wg-relay -p 51820:51820/udp -p 127.0.0.1:9586:9586 \
   -e WG_RELAY_METRICS_LISTEN=0.0.0.0:9586 \
-  -v /etc/wg-relay/relay.toml:/etc/wg-relay/relay.toml:ro wg-relay
+  -v /etc/wg-relay/relay.toml:/etc/wg-relay/relay.toml:ro ghcr.io/3alpha/wg-relay
 ```
 
 Every scrape takes a fresh snapshot: the stats line's counters, plus session counts against their limits, the cost of unauthenticated handshakes (rate limiting, CPU budgets, mac1 scans, registration attempts) and each configured peer's state, labelled by its name in `relay.toml`. Addresses, session indexes and keys never appear in labels. Worth graphing or alerting on:
