@@ -1,0 +1,6732 @@
+{
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "bargauge",
+      "name": "Bar gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "table",
+      "name": "Table",
+      "version": ""
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "wg-relay, a UDP relay for WireGuard peers behind NAT: traffic, drops and abuse signals, sessions, configured peers, forwarding threads and the process.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 13,
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Version",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (version) (wg_relay_build_info{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "{{version}}",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "The running build, from wg_relay_build_info.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "name",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Started",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max(process_start_time_seconds{job=~\"$job\", instance=~\"$instance\"}) * 1000",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "When the relay process started; a recent time means a restart, which zeroes every counter and session.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Last reload",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "min(wg_relay_config_last_reload_successful{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Whether the last SIGHUP reload succeeded; failed means the previous config is still running.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "failed",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "OK",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Configured peers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_configured_peers{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Peers listed in the config.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Registered peers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_registered_peers{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Configured peers with a live registration; compare with configured peers.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Unregistered peers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_configured_peers{job=~\"$job\", instance=~\"$instance\"}) - sum(wg_relay_registered_peers{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Configured peers without a live registration: they cannot be reached through the relay. Should be 0.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Forwarded",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_forwarded_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Datagrams forwarded per second.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Forwarded throughput",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_forwarded_bytes_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval])) * 8",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "UDP payload forwarded, in bits per second.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 9,
+      "type": "stat",
+      "title": "Drop ratio",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_dropped_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval])) / sum(rate(wg_relay_datagrams_received_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Share of received datagrams dropped for any reason; a small steady share is normal (sessions that just expired or roamed), a jump means junk or a flood.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.5
+              }
+            ]
+          },
+          "mappings": [],
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Established sessions",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_sessions{job=~\"$job\", instance=~\"$instance\", state=\"established\"})",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Established session entries (two per forwarded handshake, one per direction), including expired ones not yet collected.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Pending sessions",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_sessions{job=~\"$job\", instance=~\"$instance\", state=\"pending\"})",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Forwarded initiations awaiting their response; a climb with few established sessions is an initiation flood.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Workers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max(wg_relay_workers{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Forwarding threads, each with its own socket.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "wideLayout": true,
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "showPercentChange": false,
+        "percentChangeColorMode": "standard"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 5,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Traffic",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Datagrams",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_received_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "received",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_forwarded_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "forwarded",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_delivered_locally_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "delivered locally",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_dropped_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "dropped",
+          "range": true,
+          "instant": false,
+          "refId": "D"
+        }
+      ],
+      "description": "Every received datagram is forwarded, delivered to a registration tunnel or dropped, so received is the sum of the other three.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "received"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "forwarded"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "delivered locally"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dropped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Bytes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_received_bytes_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "received",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_forwarded_bytes_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "forwarded",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_delivered_locally_bytes_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "delivered locally",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_dropped_bytes_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "dropped",
+          "range": true,
+          "instant": false,
+          "refId": "D"
+        }
+      ],
+      "description": "UDP payload bytes by outcome; forwarded bytes are the relay's useful work.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "received"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "forwarded"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "delivered locally"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dropped"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Messages received by type",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type) (rate(wg_relay_messages_received_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{type}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Received datagrams that parsed as WireGuard messages; transport data should dominate, a rise in handshake initiations alone is handshake pressure.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "transport_data"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "handshake_initiation"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "handshake_response"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cookie_reply"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "dark-orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Messages forwarded by type",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (type) (rate(wg_relay_messages_forwarded_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{type}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Messages passed on unchanged; compare with the received panel to see which types are being dropped.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "transport_data"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "handshake_initiation"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "handshake_response"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cookie_reply"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "dark-orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 18,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Decided by plane",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (plane) (rate(wg_relay_datagrams_decided_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval])) / ignoring (plane) group_left sum(rate(wg_relay_datagrams_decided_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{plane}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Share of datagrams decided by the lock-free data plane versus the control plane under its lock; a rising control share means handshake or junk pressure.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0,
+          "max": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "data"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "control"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Registration tunnel traffic",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_delivered_locally_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "tunnel received",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_tunnel_datagrams_sent_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "tunnel sent",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_tunnel_cookie_replies_sent_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "cookie replies sent",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        }
+      ],
+      "description": "Datagrams the relay's registration tunnels took and sent; cookie replies are sent only when a tunnel is under load.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tunnel received"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tunnel sent"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cookie replies sent"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 26,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "id": 32,
+      "type": "row",
+      "title": "Drops and abuse",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Drops by reason",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (reason) (rate(wg_relay_datagrams_dropped_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{reason}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Every dropped datagram, stacked by reason; a flood shows as one reason growing (rate_limited, no_mac1_match, unknown_index or a budget), a full table as too_many_sessions, too_many_pending or peer_quota.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 16,
+        "h": 8
+      }
+    },
+    {
+      "id": 22,
+      "type": "table",
+      "title": "Top drop reasons",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sort_desc(sum by (reason) (increase(wg_relay_datagrams_dropped_total{job=~\"$job\", instance=~\"$instance\"}[$__range])) > 0)",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (reason) (rate(wg_relay_datagrams_dropped_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "B",
+          "format": "table"
+        }
+      ],
+      "description": "Drops per reason over the selected time range, largest first, with the current rate.",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "reason": 0,
+              "Value #A": 1,
+              "Value #B": 2
+            },
+            "renameByName": {
+              "reason": "Reason",
+              "Value #A": "In range",
+              "Value #B": "Now"
+            },
+            "includeByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false,
+            "filterable": false
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "In range"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic",
+                  "valueDisplayMode": "text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Now"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "pps"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        },
+        "sortBy": [
+          {
+            "displayName": "In range",
+            "desc": true
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 35,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Half-open handshakes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_sessions_expired_total{job=~\"$job\", instance=~\"$instance\", state=\"pending\"}[$__rate_interval]))",
+          "legendFormat": "half-open (pending expired)",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_messages_forwarded_total{job=~\"$job\", instance=~\"$instance\", type=\"handshake_initiation\"}[$__rate_interval]))",
+          "legendFormat": "initiations forwarded",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "description": "Pending sessions that expired unanswered against initiations forwarded; half-open close to forwarded means spoofed or junk initiations to a configured peer.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "half-open (pending expired)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "initiations forwarded"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Pending evictions",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_pending_sessions_evicted_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "evicted",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Pending sessions pushed out by a newer initiation to the same configured peer; a steady rise is a flood aimed at one peer.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "eps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "evicted"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 43,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Unknown-index drops",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_dropped_total{job=~\"$job\", instance=~\"$instance\", reason=\"unknown_index\"}[$__rate_interval]))",
+          "legendFormat": "unknown_index",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Datagrams for an index with no live session; some always come from sessions that just expired or roamed, a level well above usual is junk data.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown_index"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 43,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Rate limited",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_messages_received_total{job=~\"$job\", instance=~\"$instance\", type=\"handshake_initiation\"}[$__rate_interval]))",
+          "legendFormat": "initiations received",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_datagrams_dropped_total{job=~\"$job\", instance=~\"$instance\", reason=\"rate_limited\"}[$__rate_interval]))",
+          "legendFormat": "rate limited",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "description": "Initiations dropped because their source (IPv4 address or IPv6 /64) exceeded the per-source handshake rate, against all initiations received.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "initiations received"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rate limited"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 51,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 27,
+      "type": "gauge",
+      "title": "Rate-limit buckets used",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max(wg_relay_rate_limit_buckets_used{job=~\"$job\", instance=~\"$instance\"}) / max(wg_relay_rate_limit_buckets{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Share of per-source rate-limit buckets any source has used since startup; they are never freed, so a fast climb means a flood from many sources and more sources sharing buckets.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.6
+              },
+              {
+                "color": "red",
+                "value": 0.8
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto",
+        "minVizWidth": 75,
+        "minVizHeight": 75
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 51,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Handshake budgets remaining",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (budget) (wg_relay_handshake_budget_remaining_checks{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "{{budget}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Mac1 checks each CPU budget would allow at scrape time; at or below 0 it drops initiations, including legitimate ones (the budget drop reasons confirm it between scrapes).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "forwarding"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "registration"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 51,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Mac1 work",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_mac1_checks_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "checks",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_mac1_scans_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "scans",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max(wg_relay_forwarding_budget_checks_per_second{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "forwarding budget",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        }
+      ],
+      "description": "Mac1 keys hashed and peer scans per second against the forwarding budget (dashed), which sits far above normal traffic; checks climbing toward it mean forwarded initiations are about to be dropped.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "checks"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "scans"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "forwarding budget"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8c8c8c"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Tunnel errors by kind",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (error) (rate(wg_relay_tunnel_errors_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval])) > 0",
+          "legendFormat": "{{error}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Datagrams a registration tunnel refused; authentication or replay errors are someone probing the relay's own key, under_load is its handshake limit.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 59,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Registration initiations",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (result) (rate(wg_relay_registration_initiations_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Initiations to the relay itself that passed the rate limit: accepted by a registration tunnel, or rejected (budget, unknown key, failed authentication).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "accepted"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rejected"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failure"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 59,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Sessions",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 67,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 33,
+      "type": "gauge",
+      "title": "Session table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_sessions{job=~\"$job\", instance=~\"$instance\"}) / max(wg_relay_sessions_max{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "All session entries against the table's cap; refusals (too_many_sessions) start at 100%.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.6
+              },
+              {
+                "color": "red",
+                "value": 0.8
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto",
+        "minVizWidth": 75,
+        "minVizHeight": 75
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 68,
+        "w": 4,
+        "h": 8
+      }
+    },
+    {
+      "id": 34,
+      "type": "gauge",
+      "title": "Pending table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_sessions{job=~\"$job\", instance=~\"$instance\", state=\"pending\"}) / max(wg_relay_pending_sessions_max{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "description": "Pending entries against their cap; refusals (too_many_pending) start at 100%.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.6
+              },
+              {
+                "color": "red",
+                "value": 0.8
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true,
+        "sizing": "auto",
+        "minVizWidth": 75,
+        "minVizHeight": 75
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 68,
+        "w": 4,
+        "h": 8
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "Sessions by state",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_sessions{job=~\"$job\", instance=~\"$instance\", state=\"established\"})",
+          "legendFormat": "established",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_sessions{job=~\"$job\", instance=~\"$instance\", state=\"pending\"})",
+          "legendFormat": "pending",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "description": "Session entries, stacked, so the top is the whole table; counts include expired entries until the next garbage collection.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "established"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pending"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 68,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 36,
+      "type": "timeseries",
+      "title": "Table fullness",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_sessions{job=~\"$job\", instance=~\"$instance\"}) / max(wg_relay_sessions_max{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "all entries",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(wg_relay_sessions{job=~\"$job\", instance=~\"$instance\", state=\"pending\"}) / max(wg_relay_pending_sessions_max{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "pending",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "description": "Both tables against their caps over time; the dashed line at 80% is where to start worrying.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.8
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0,
+          "max": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "all entries"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pending"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 68,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "Expirations by state",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (state) (rate(wg_relay_sessions_expired_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{state}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Sessions removed at the end of their fixed lifetime; established ones expire on schedule, pending ones are half-open handshakes.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "eps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "established"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pending"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 76,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "Roams and revocations",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_sessions_roamed_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "roamed",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_sessions_revoked_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "revoked",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "description": "Session entries rewritten because their configured peer moved, and entries removed by a reload that removed their peer.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "eps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "roamed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "revoked"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 76,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "Garbage collection",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_gc_runs_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "gc runs",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Garbage collection passes, which remove expired sessions and registrations; a flat line at zero means collection stopped.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "eps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gc runs"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 76,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 48,
+      "type": "row",
+      "title": "Peers",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "x": 0,
+        "y": 84,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 41,
+      "type": "table",
+      "title": "Configured peers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (peer) (wg_relay_peer_registered{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "A",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (peer) (wg_relay_peer_last_authenticated_timestamp_seconds{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\"}) * 1000",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "B",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (peer) (wg_relay_peer_sessions{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\", state=\"pending\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "C",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (peer) (wg_relay_peer_sessions{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\", state=\"established\"})",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "D",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (peer) (wg_relay_peer_sessions{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\"}) / scalar(max(wg_relay_peer_sessions_max{job=~\"$job\", instance=~\"$instance\"}))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "E",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (peer) (rate(wg_relay_peer_initiations_total{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\", result=\"forwarded\"}[$__rate_interval]))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "F",
+          "format": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (peer) (rate(wg_relay_peer_initiations_total{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\", result=\"dropped\"}[$__rate_interval]))",
+          "legendFormat": "__auto",
+          "range": false,
+          "instant": true,
+          "refId": "G",
+          "format": "table"
+        }
+      ],
+      "description": "One row per configured peer: unregistered peers cannot be reached; a pending count near its per-peer cap or many dropped initiations means a flood against that peer.",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "peer": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4,
+              "Value #E": 5,
+              "Value #F": 6,
+              "Value #G": 7
+            },
+            "renameByName": {
+              "peer": "Peer",
+              "Value #A": "Registered",
+              "Value #B": "Last authenticated",
+              "Value #C": "Pending",
+              "Value #D": "Established",
+              "Value #E": "Quota used",
+              "Value #F": "Initiations forwarded",
+              "Value #G": "Initiations dropped"
+            },
+            "includeByName": {}
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false,
+            "filterable": false
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Registered"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "no",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "yes",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last authenticated"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Pending"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Established"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Quota used"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 1
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 0.6
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.8
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic",
+                  "valueDisplayMode": "text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Initiations forwarded"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "pps"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Initiations dropped"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "pps"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.001
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        },
+        "sortBy": [
+          {
+            "displayName": "Peer",
+            "desc": false
+          }
+        ]
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 85,
+        "w": 24,
+        "h": 8
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Initiations forwarded by peer",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (peer) (rate(wg_relay_peer_initiations_total{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\", result=\"forwarded\"}[$__rate_interval]))",
+          "legendFormat": "{{peer}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Initiations whose mac1 named the peer and were forwarded to it; a spike against one peer singles out the target of a flood.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 93,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Initiations dropped by peer",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (peer) (rate(wg_relay_peer_initiations_total{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\", result=\"dropped\"}[$__rate_interval]))",
+          "legendFormat": "{{peer}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Initiations for the peer dropped after the scan: not registered, at its quota, a loop, an index in use or a full table.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 93,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "Time since last authenticated",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "time() - max by (peer) (wg_relay_peer_last_authenticated_timestamp_seconds{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\"})",
+          "legendFormat": "{{peer}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Climbs between authenticated datagrams on the peer's registration tunnel and drops back on each; a line that keeps climbing means the peer has gone quiet and its registration will time out.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 93,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "Pending sessions by peer",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (peer) (wg_relay_peer_sessions{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\", state=\"pending\"})",
+          "legendFormat": "{{peer}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max(wg_relay_peer_pending_sessions_max{job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "limit per peer",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "description": "Initiations aimed at each peer awaiting its answer, against the per-peer cap beyond which a new one evicts the oldest.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "limit per peer"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8c8c8c"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.stacking",
+                "value": {
+                  "mode": "none",
+                  "group": "A"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 101,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 46,
+      "type": "timeseries",
+      "title": "Established sessions by peer",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "max by (peer) (wg_relay_peer_sessions{job=~\"$job\", instance=~\"$instance\", peer=~\"$peer\", state=\"established\"})",
+          "legendFormat": "{{peer}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ],
+      "description": "Established session entries routed to each peer, two per connected client handshake.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 101,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 47,
+      "type": "timeseries",
+      "title": "Registrations",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (kind) (rate(wg_relay_registrations_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(wg_relay_registrations_expired_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "expired",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ],
+      "description": "New registrations, registered peers moving to a new endpoint, and registrations that timed out; expirations without new ones mean peers are dropping off.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "eps",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "gradientMode": "none",
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisCenteredZero": false,
+            "axisBorderShow": false,
+            "barAlignment": 0,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineStyle": {
+              "fill": "solid"
+            },
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "new"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "roamed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expired"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 101,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "id": 55,
+      "type": "row",
+      "title": "Workers",
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 49,
+          "type": "timeseries",
+          "title": "Datagrams per worker",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (worker) (rate(wg_relay_worker_datagrams_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+              "legendFormat": "worker {{worker}}",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            }
+          ],
+          "description": "Datagrams each thread's data plane decided; the kernel spreads flows by address pair, so a few heavy flows can load one thread more than the others.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "pps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 110,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 50,
+          "type": "timeseries",
+          "title": "Forwarded per worker",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (worker) (rate(wg_relay_worker_datagrams_forwarded_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+              "legendFormat": "worker {{worker}}",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            }
+          ],
+          "description": "Datagrams each thread's data plane forwarded.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "pps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 110,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 51,
+          "type": "bargauge",
+          "title": "Share per worker",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (worker) (increase(wg_relay_worker_datagrams_total{job=~\"$job\", instance=~\"$instance\"}[$__range])) / ignoring (worker) group_left sum(increase(wg_relay_worker_datagrams_total{job=~\"$job\", instance=~\"$instance\"}[$__range]))",
+              "legendFormat": "worker {{worker}}",
+              "range": false,
+              "instant": true,
+              "refId": "A"
+            }
+          ],
+          "description": "Each thread's share of the data plane's datagrams over the selected range; equal bars mean an even spread.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "min": 0,
+              "decimals": 1,
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "horizontal",
+            "displayMode": "gradient",
+            "valueMode": "color",
+            "namePlacement": "auto",
+            "showUnfilled": true,
+            "text": {
+              "titleSize": 13,
+              "valueSize": 16
+            },
+            "sizing": "auto",
+            "minVizWidth": 8,
+            "minVizHeight": 16,
+            "maxVizHeight": 300,
+            "legend": {
+              "showLegend": false,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            }
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 110,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 52,
+          "type": "timeseries",
+          "title": "Bytes per worker",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (worker) (rate(wg_relay_worker_bytes_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+              "legendFormat": "worker {{worker}}",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            }
+          ],
+          "description": "UDP payload bytes each thread's data plane decided.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 118,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 53,
+          "type": "timeseries",
+          "title": "Forwarded bytes per worker",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (worker) (rate(wg_relay_worker_forwarded_bytes_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+              "legendFormat": "worker {{worker}}",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            }
+          ],
+          "description": "UDP payload bytes each thread's data plane forwarded.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 118,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 54,
+          "type": "timeseries",
+          "title": "Socket errors per worker",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (worker, direction) (rate(wg_relay_worker_socket_errors_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval])) > 0",
+              "legendFormat": "worker {{worker}} {{direction}}",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            }
+          ],
+          "description": "Failed receives and sends on each thread's socket; a remote host can cause send errors, a burst on one thread points at one flow.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "pps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 118,
+            "w": 8,
+            "h": 8
+          }
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 109,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 62,
+      "type": "row",
+      "title": "Process",
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 56,
+          "type": "timeseries",
+          "title": "CPU",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum(rate(process_cpu_seconds_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+              "legendFormat": "cpu",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            }
+          ],
+          "description": "CPU time per second, user and system; 100% is one full core.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "cpu"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 111,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 57,
+          "type": "timeseries",
+          "title": "Memory",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum(process_resident_memory_bytes{job=~\"$job\", instance=~\"$instance\"})",
+              "legendFormat": "resident",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum(process_virtual_memory_bytes{job=~\"$job\", instance=~\"$instance\"})",
+              "legendFormat": "virtual",
+              "range": true,
+              "instant": false,
+              "refId": "B"
+            }
+          ],
+          "description": "Resident and virtual memory; resident grows with the session table and gives memory back when garbage collection finds it mostly empty.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "resident"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "virtual"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "purple"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 111,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 58,
+          "type": "timeseries",
+          "title": "Open file descriptors",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum(process_open_fds{job=~\"$job\", instance=~\"$instance\"})",
+              "legendFormat": "open",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "max(process_max_fds{job=~\"$job\", instance=~\"$instance\"})",
+              "legendFormat": "limit (soft max fds)",
+              "range": true,
+              "instant": false,
+              "refId": "B"
+            }
+          ],
+          "description": "Open file descriptors; the soft limit is in the legend and tooltip rather than plotted, since it dwarfs normal use (absent when unlimited).",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "open"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "limit (soft max fds)"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "#8c8c8c"
+                    }
+                  },
+                  {
+                    "id": "custom.lineStyle",
+                    "value": {
+                      "fill": "dash",
+                      "dash": [
+                        10,
+                        10
+                      ]
+                    }
+                  },
+                  {
+                    "id": "custom.fillOpacity",
+                    "value": 0
+                  },
+                  {
+                    "id": "custom.stacking",
+                    "value": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  {
+                    "id": "custom.hideFrom",
+                    "value": {
+                      "viz": true,
+                      "legend": false,
+                      "tooltip": false
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 111,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 59,
+          "type": "timeseries",
+          "title": "Socket errors",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (direction) (rate(wg_relay_socket_errors_total{job=~\"$job\", instance=~\"$instance\"}[$__rate_interval]))",
+              "legendFormat": "{{direction}}",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            }
+          ],
+          "description": "Failed socket receives and sends over all threads; logged individually only at debug level, since a remote host can cause them.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "pps",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "receive"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "blue"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "send"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 0,
+            "y": 119,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 60,
+          "type": "timeseries",
+          "title": "Config reloads",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "sum by (result) (wg_relay_config_reloads_total{job=~\"$job\", instance=~\"$instance\"})",
+              "legendFormat": "{{result}}",
+              "range": true,
+              "instant": false,
+              "refId": "A"
+            }
+          ],
+          "description": "Reloads since start by result, as a step count; a step in failure is a SIGHUP whose config was rejected while the old one kept running.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "lineInterpolation": "stepAfter",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "showPoints": "never",
+                "pointSize": 4,
+                "spanNulls": false,
+                "axisPlacement": "auto",
+                "axisLabel": "",
+                "axisCenteredZero": false,
+                "axisBorderShow": false,
+                "barAlignment": 0,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineStyle": {
+                  "fill": "solid"
+                },
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": [],
+              "min": 0,
+              "decimals": 0
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "accepted"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "rejected"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "success"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "green"
+                    }
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "failure"
+                },
+                "properties": [
+                  {
+                    "id": "color",
+                    "value": {
+                      "mode": "fixed",
+                      "fixedColor": "red"
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "options": {
+            "legend": {
+              "showLegend": true,
+              "displayMode": "list",
+              "placement": "bottom",
+              "calcs": []
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "gridPos": {
+            "x": 8,
+            "y": 119,
+            "w": 8,
+            "h": 8
+          }
+        },
+        {
+          "id": 61,
+          "type": "stat",
+          "title": "Config applied",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${DS_PROMETHEUS}"
+              },
+              "editorMode": "code",
+              "expr": "max(wg_relay_config_last_reload_success_timestamp_seconds{job=~\"$job\", instance=~\"$instance\"}) * 1000",
+              "legendFormat": "__auto",
+              "range": false,
+              "instant": true,
+              "refId": "A"
+            }
+          ],
+          "description": "When the running config was applied, at startup or by the last successful reload.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "dateTimeFromNow",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue",
+                    "value": null
+                  }
+                ]
+              },
+              "mappings": []
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "orientation": "auto",
+            "textMode": "auto",
+            "wideLayout": true,
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "center",
+            "showPercentChange": false,
+            "percentChangeColorMode": "standard",
+            "text": {
+              "valueSize": 36
+            }
+          },
+          "gridPos": {
+            "x": 16,
+            "y": 119,
+            "w": 8,
+            "h": 8
+          }
+        }
+      ],
+      "gridPos": {
+        "x": 0,
+        "y": 110,
+        "w": 24,
+        "h": 1
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "wg-relay",
+    "wireguard",
+    "udp",
+    "relay"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "DS_PROMETHEUS",
+        "label": "Data source",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1,
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "regex": "",
+        "current": {},
+        "options": []
+      },
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": {
+          "query": "label_values(wg_relay_build_info, job)",
+          "refId": "job",
+          "qryType": 1
+        },
+        "definition": "label_values(wg_relay_build_info, job)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "current": {},
+        "options": [],
+        "regex": ""
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": {
+          "query": "label_values(wg_relay_build_info{job=~\"$job\"}, instance)",
+          "refId": "instance",
+          "qryType": 1
+        },
+        "definition": "label_values(wg_relay_build_info{job=~\"$job\"}, instance)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "current": {},
+        "options": [],
+        "regex": ""
+      },
+      {
+        "name": "peer",
+        "label": "Peer",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": {
+          "query": "label_values(wg_relay_peer_registered{job=~\"$job\", instance=~\"$instance\"}, peer)",
+          "refId": "peer",
+          "qryType": 1
+        },
+        "definition": "label_values(wg_relay_peer_registered{job=~\"$job\", instance=~\"$instance\"}, peer)",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "hide": 0,
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "regex": ""
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h"
+    ]
+  },
+  "timezone": "",
+  "title": "wg-relay",
+  "uid": "wg-relay",
+  "version": 1,
+  "weekStart": ""
+}

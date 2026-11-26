@@ -204,6 +204,10 @@ Every scrape takes a fresh snapshot: the stats line's counters, plus session cou
 
 The [reference](docs/reference.md#prometheus-metrics) lists every metric and what to alert on.
 
+### Grafana dashboard and alerts
+
+[`grafana/wg-relay.json`](grafana/wg-relay.json) is a Grafana (10 or later) dashboard for these metrics: an overview, traffic, drops and abuse signals, sessions, configured peers, forwarding threads and the process. Import it under Dashboards > New > Import, or put it in a directory a dashboard provider loads. It has no fixed data source: pick the Prometheus data source, job and instance in the variables at the top. [`grafana/alerts.yml`](grafana/alerts.yml) holds Prometheus alerting rules for the signals in "What to alert on"; add it to `rule_files` in `prometheus.yml` and tune the thresholds marked as such to your traffic.
+
 ## Testing
 
 ```sh

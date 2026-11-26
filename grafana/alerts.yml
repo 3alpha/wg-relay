@@ -1,0 +1,176 @@
+# Prometheus alerting rules for wg-relay, following "What to alert on" in
+# docs/reference.md. Load with `rule_files: [alerts.yml]` in prometheus.yml.
+#
+# Thresholds marked "tune" depend on how busy a relay is; they are starting
+# points, not facts about the relay. Add a target-down alert on `up` for the
+# job that scrapes wg-relay as well: these rules cannot fire while it is down.
+groups:
+  - name: wg-relay
+    rules:
+      # Half-open handshakes: forwarded initiations that expired unanswered.
+      - alert: WgRelayHalfOpenHandshakes
+        expr: |
+          (
+            sum by (job, instance) (rate(wg_relay_sessions_expired_total{state="pending"}[10m]))
+            /
+            sum by (job, instance) (rate(wg_relay_messages_forwarded_total{type="handshake_initiation"}[10m]))
+          ) > 0.5
+          and
+          sum by (job, instance) (rate(wg_relay_sessions_expired_total{state="pending"}[10m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: most forwarded initiations go unanswered"
+          description: "{{ $value | humanizePercentage }} of forwarded initiations expired half-open over 10 minutes (tune: above 50% and 1/s). A flood of spoofed or junk initiations to a configured peer looks like this; wg_relay_peer_initiations_total and wg_relay_peer_sessions{state=\"pending\"} show which peer."
+
+      # Rate limiting: sources sending initiations faster than handshake_rate_per_ip.
+      - alert: WgRelayRateLimiting
+        expr: |
+          sum by (job, instance) (rate(wg_relay_datagrams_dropped_total{reason="rate_limited"}[5m])) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: initiations are being rate limited"
+          description: "{{ $value | humanize }} initiations per second dropped by the per-source rate limit (tune: above 1/s). Check wg_relay_rate_limit_buckets_used against wg_relay_rate_limit_buckets to see whether the flood comes from many sources."
+
+      # Rate-limit buckets are never freed, so this stays firing until a restart.
+      - alert: WgRelayRateLimitBucketsFilling
+        expr: |
+          max by (job, instance) (wg_relay_rate_limit_buckets_used)
+          /
+          max by (job, instance) (wg_relay_rate_limit_buckets)
+          > 0.8
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: most rate-limit buckets are in use"
+          description: "{{ $value | humanizePercentage }} of per-source rate-limit buckets have been used since startup. Buckets are never freed, so many sources now share buckets and limit each other; a restart empties the table."
+
+      # CPU budgets: legitimate handshakes are being dropped.
+      - alert: WgRelayHandshakeBudgetExhausted
+        expr: |
+          sum by (job, instance, reason) (rate(wg_relay_datagrams_dropped_total{reason=~"forwarding_budget|registration_budget"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: {{ $labels.reason }} is spent"
+          description: "{{ $value | humanize }} initiations per second dropped because the {{ $labels.reason }} is spent; legitimate handshakes are being dropped with them. See wg_relay_handshake_budget_remaining_checks and rate(wg_relay_mac1_checks_total[5m])."
+
+      # Table fullness.
+      - alert: WgRelaySessionTableFilling
+        expr: |
+          sum by (job, instance) (wg_relay_sessions)
+          /
+          max by (job, instance) (wg_relay_sessions_max)
+          > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: session table above 80%"
+          description: "The session table is {{ $value | humanizePercentage }} full; at 100% new handshakes are refused (too_many_sessions)."
+
+      - alert: WgRelayPendingTableFilling
+        expr: |
+          sum by (job, instance) (wg_relay_sessions{state="pending"})
+          /
+          max by (job, instance) (wg_relay_pending_sessions_max)
+          > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: pending table above 80%"
+          description: "The pending table is {{ $value | humanizePercentage }} full; at 100% new initiations are refused (too_many_pending)."
+
+      - alert: WgRelaySessionsRefused
+        expr: |
+          sum by (job, instance, reason) (rate(wg_relay_datagrams_dropped_total{reason=~"too_many_sessions|too_many_pending|peer_quota"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: sessions refused ({{ $labels.reason }})"
+          description: "{{ $value | humanize }} datagrams per second dropped because a session table or a peer's quota is full ({{ $labels.reason }})."
+
+      # Junk data: a reason well above its level over the previous day.
+      - alert: WgRelayJunkTraffic
+        expr: |
+          (
+            sum by (job, instance, reason) (rate(wg_relay_datagrams_dropped_total{reason=~"unknown_index|no_mac1_match|malformed|invalid_source"}[10m]))
+            >
+            5 * sum by (job, instance, reason) (rate(wg_relay_datagrams_dropped_total{reason=~"unknown_index|no_mac1_match|malformed|invalid_source"}[1d] offset 10m))
+          )
+          and
+          sum by (job, instance, reason) (rate(wg_relay_datagrams_dropped_total{reason=~"unknown_index|no_mac1_match|malformed|invalid_source"}[10m])) > 10
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: {{ $labels.reason }} drops well above usual"
+          description: "{{ $value | humanize }} {{ $labels.reason }} drops per second, more than five times the previous day's average (tune: and above 10/s). Some unknown_index drops are normal, from sessions that just expired or roamed."
+
+      # Control-plane pressure: more of the traffic needs the control plane's lock.
+      - alert: WgRelayControlPlanePressure
+        expr: |
+          (
+            sum by (job, instance) (rate(wg_relay_datagrams_decided_total{plane="control"}[10m]))
+            /
+            sum by (job, instance) (rate(wg_relay_datagrams_decided_total[10m]))
+          )
+          >
+          2 * (
+            sum by (job, instance) (rate(wg_relay_datagrams_decided_total{plane="control"}[1d] offset 10m))
+            /
+            sum by (job, instance) (rate(wg_relay_datagrams_decided_total[1d] offset 10m))
+          )
+          and
+          (
+            sum by (job, instance) (rate(wg_relay_datagrams_decided_total{plane="control"}[10m]))
+            /
+            sum by (job, instance) (rate(wg_relay_datagrams_decided_total[10m]))
+          ) > 0.2
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: control plane share rising"
+          description: "The control plane decided {{ $value | humanizePercentage }} of datagrams over 10 minutes, more than twice its share over the previous day (tune: and above 20%): handshake or junk pressure."
+
+      # Operations.
+      - alert: WgRelayPeerNotRegistered
+        expr: |
+          max by (job, instance, peer) (wg_relay_peer_registered) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: configured peer {{ $labels.peer }} is not registered"
+          description: "{{ $labels.peer }} has had no live registration for 10 minutes, so it cannot be reached through the relay. Silence this per peer for one that is not meant to be up."
+
+      - alert: WgRelayConfigReloadFailed
+        expr: |
+          max by (job, instance) (wg_relay_config_last_reload_successful) == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: config reload failed"
+          description: "The last SIGHUP reload failed and the previous config is still running; the relay logs the reason."
+
+      - alert: WgRelayFileDescriptorsNearLimit
+        expr: |
+          max by (job, instance) (process_open_fds)
+          /
+          max by (job, instance) (process_max_fds)
+          > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wg-relay {{ $labels.instance }}: open file descriptors above 80% of the limit"
+          description: "{{ $value | humanizePercentage }} of the soft open-files limit is in use."
