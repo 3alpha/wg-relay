@@ -51,9 +51,9 @@ impl Control {
         if initiation && !self.limiter.allow(src.ip(), now) {
             return Err(Reason::RateLimited);
         }
-        match self.classify(message, datagram) {
+        match self.classify(datagram, message) {
             Class::RegistrationInitiation => self.start_registration_handshake(src, datagram, now),
-            Class::RegistrationTunnel { peer } => self.feed_tunnel(peer, src, datagram, now),
+            Class::RegistrationTunnel { peer } => self.feed_tunnel(src, datagram, peer, now),
             Class::ForwardedInitiation { sender } => {
                 self.forward_initiation(src, datagram, sender, now)
             }
@@ -68,7 +68,7 @@ impl Control {
     }
 
     /// Name the case a message falls in. Changes nothing and costs at most one mac1 check.
-    pub(super) fn classify(&self, message: Message, datagram: &[u8]) -> Class {
+    pub(super) fn classify(&self, datagram: &[u8], message: Message) -> Class {
         if let Some(peer) = message.receiver().and_then(|idx| self.tunnel_owner(idx)) {
             return Class::RegistrationTunnel { peer };
         }
@@ -83,10 +83,5 @@ impl Control {
             Message::CookieReply { receiver } => Class::ForwardedCookieReply { receiver },
             Message::TransportData { receiver } => Class::ForwardedData { receiver },
         }
-    }
-
-    /// Find the listed peer whose registration tunnel owns this index.
-    fn tunnel_owner(&self, idx: SessionIdx) -> Option<PeerKey> {
-        self.reserved.get(&idx.prefix()).copied()
     }
 }

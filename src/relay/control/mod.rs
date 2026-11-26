@@ -1,3 +1,6 @@
+//! The control half, its `impl` split by topic: dispatch, forwarded
+//! handshakes, registration, reload and timers.
+
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -10,9 +13,9 @@ use super::Metrics;
 use super::forwarder::Forwarder;
 use crate::config::Config;
 use crate::key::PeerKey;
-use crate::packet::{IdxPrefix, Mac1Key};
+use crate::packet::{IdxPrefix, Mac1Key, SessionIdx};
 use crate::tables::{
-    PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SESSION_TTL, SessionLimits, SessionTable,
+    OPEN_TTL, PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SessionLimits, SessionTable,
     WorkBudget,
 };
 
@@ -26,6 +29,7 @@ mod timers;
 
 use timers::Cadence;
 
+/// Room for any datagram a registration tunnel decrypts or builds.
 const SCRATCH_LEN: usize = 65536 + 256;
 /// How often the registration tunnels' timers run. Every forwarding thread
 /// offers a tick this often, and the control half takes one per interval.
@@ -109,8 +113,8 @@ impl Control {
         let secret = cfg.private_key.secret().clone();
         let public = PublicKey::from(&secret);
         let sessions = SessionTable::new(
-            SESSION_TTL,
             PENDING_TTL,
+            OPEN_TTL,
             SessionLimits {
                 pending_per_peer: MAX_PENDING_PER_PEER,
                 per_peer: MAX_SESSIONS_PER_PEER,
@@ -172,6 +176,12 @@ impl Control {
         out
     }
 
+    /// Find the listed peer whose registration tunnel owns this index, if
+    /// it is in a reserved prefix.
+    fn tunnel_owner(&self, idx: SessionIdx) -> Option<PeerKey> {
+        self.reserved.get(&idx.prefix()).copied()
+    }
+
     /// Panic unless the session table's accounts are exact, the forwarding half
     /// holds exactly its open sessions, and none of them is in a reserved prefix.
     #[cfg(test)]
@@ -179,8 +189,7 @@ impl Control {
         assert!(self.sessions.accounts_exact(), "session accounts diverged");
         assert!(self.sessions.matches_view(&self.forwarder.open), "open sessions diverged");
         // The forwarding half relies on it to leave registration tunnels' messages alone.
-        let in_reserved =
-            self.sessions.open_pairs().any(|(i, ..)| self.reserved.contains_key(&i.prefix()));
+        let in_reserved = self.sessions.open_pairs().any(|(i, ..)| self.tunnel_owner(i).is_some());
         assert!(!in_reserved, "an open session in a reserved prefix");
     }
 }

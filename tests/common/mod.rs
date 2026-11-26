@@ -36,14 +36,16 @@ pub fn tunn(me: &Key, peer: &Key) -> Tunn {
     )
 }
 
-pub fn b64(k: &PublicKey) -> String {
-    wg_relay::key::PeerKey::from(*k).to_string()
+/// Config text: the relay's private key `r`, then `extra`.
+pub fn head(r: &Key, extra: &str) -> String {
+    use base64::Engine;
+    let sk = base64::engine::general_purpose::STANDARD.encode(r.sk.to_bytes());
+    format!("private_key = \"{sk}\"\n{extra}")
 }
 
-/// The private key as base64, as written in a config file.
-pub fn b64_sk(k: &Key) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(k.sk.to_bytes())
+/// Config text listing peer `name` with the public key of `k`.
+pub fn peer(name: &str, k: &Key) -> String {
+    format!("[[peer]]\nname = \"{name}\"\npubkey = \"{}\"\n", k.id())
 }
 
 pub fn initiation(t: &mut Tunn) -> Vec<u8> {

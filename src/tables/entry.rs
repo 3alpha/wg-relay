@@ -53,15 +53,15 @@ impl Session {
 /// Fixed lifetimes per session state, counted from `Session::since`.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Ttls {
-    pub(super) open: Duration,
     pub(super) pending: Duration,
+    pub(super) open: Duration,
 }
 
 impl Ttls {
     pub(super) fn live(self, s: &Session, now: Instant) -> bool {
         let ttl = match s.state {
-            SessionState::Open => self.open,
             SessionState::Pending => self.pending,
+            SessionState::Open => self.open,
         };
         live(s.since, now, ttl)
     }

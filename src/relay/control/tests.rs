@@ -2,6 +2,7 @@ use super::dispatch::Class;
 use super::*;
 use crate::packet::{self, SessionIdx};
 use crate::relay::forwarder::Triage;
+use crate::relay::testing::{cookie, data, initiation, response};
 use crate::relay::{Reason, Relay, Verdict};
 use crate::tables::SessionState;
 use base64::Engine;
@@ -39,17 +40,12 @@ fn src(i: u8) -> SocketAddr {
 
 /// A handshake initiation matching no listed key, so it costs a scan of all three.
 fn junk() -> Vec<u8> {
-    let mut p = vec![0u8; packet::INIT_LEN];
-    p[0] = 1;
-    p
+    initiation(0)
 }
 
 /// A handshake initiation whose mac1 is for the relay but whose body is garbage.
 fn junk_for_relay(relay: &Relay) -> Vec<u8> {
-    let mut p = junk();
-    let mac = relay.control().relay_mac1.mac(&p[..116]);
-    p[116..132].copy_from_slice(&mac);
-    p
+    init_keyed(&relay.control().relay_mac1, 0)
 }
 
 #[test]
@@ -155,7 +151,7 @@ fn full_pending_table_refuses_initiations_before_the_scan() {
 fn limited(limits: SessionLimits, t0: Instant) -> Relay {
     let relay = relay();
     // Still empty, so the forwarding half's empty view, of the same lifetime, stays in step.
-    relay.control().sessions = SessionTable::new(SESSION_TTL, PENDING_TTL, limits);
+    relay.control().sessions = SessionTable::new(PENDING_TTL, OPEN_TTL, limits);
     let mut control = relay.control();
     for (i, peer) in control.mac1.peers.clone().into_iter().take(2).enumerate() {
         control.registry.update(peer, listed(i), t0);
@@ -176,35 +172,9 @@ fn init_for(relay: &Relay, i: usize, sender: u32) -> Vec<u8> {
 
 /// A handshake initiation for the holder of `key`, announcing `sender`.
 fn init_keyed(key: &Mac1Key, sender: u32) -> Vec<u8> {
-    let mut p = junk();
-    p[4..8].copy_from_slice(&sender.to_le_bytes());
+    let mut p = initiation(sender);
     let mac = key.mac(&p[..116]);
     p[116..132].copy_from_slice(&mac);
-    p
-}
-
-/// A handshake-response-shaped datagram; the relay never checks its contents.
-fn response(sender: u32, receiver: u32) -> Vec<u8> {
-    let mut p = vec![0u8; 92];
-    p[0] = 2;
-    p[4..8].copy_from_slice(&sender.to_le_bytes());
-    p[8..12].copy_from_slice(&receiver.to_le_bytes());
-    p
-}
-
-/// A transport data message for `receiver`.
-fn data(receiver: u32) -> Vec<u8> {
-    let mut p = vec![0u8; 48];
-    p[0] = 4;
-    p[4..8].copy_from_slice(&receiver.to_le_bytes());
-    p
-}
-
-/// A cookie reply for `receiver`.
-fn cookie(receiver: u32) -> Vec<u8> {
-    let mut p = vec![0u8; 64];
-    p[0] = 3;
-    p[4..8].copy_from_slice(&receiver.to_le_bytes());
     p
 }
 
@@ -304,7 +274,7 @@ fn forwarding_never_writes_to_the_session_entry() {
         assert_eq!(entries(&relay, t), open, "data at {s} s");
     }
     let expired = Verdict::Drop(Reason::UnknownIndex);
-    assert_eq!(relay.handle(listed(0), &data(0x20), t0 + SESSION_TTL), expired);
+    assert_eq!(relay.handle(listed(0), &data(0x20), t0 + OPEN_TTL), expired);
     relay.control().assert_forwarder_in_step();
 }
 
@@ -407,7 +377,7 @@ fn forwarder_follows_every_control_change() {
     relay.control().assert_forwarder_in_step();
 
     // Expiry withdraws the rest, and lookups stop before the sweep.
-    let late = t0 + SESSION_TTL;
+    let late = t0 + OPEN_TTL;
     assert_eq!(fast(&relay, moved, &data(0x10), late), to_control(&data(0x10)));
     assert_eq!(relay.handle(moved, &data(0x10), late), Verdict::Drop(Reason::UnknownIndex));
     relay.tick(late);
@@ -526,7 +496,7 @@ fn classify_names_every_case() {
     let (prefix, owner) = relay.control().reserved.iter().map(|(p, k)| (*p, *k)).next().unwrap();
     let in_tunnel = prefix.get() << 8 | 1;
     let class =
-        |datagram: &[u8]| relay.control().classify(packet::parse(datagram).unwrap(), datagram);
+        |datagram: &[u8]| relay.control().classify(datagram, packet::parse(datagram).unwrap());
     assert_eq!(class(&junk_for_relay(&relay)), Class::RegistrationInitiation);
     for datagram in [data(in_tunnel), cookie(in_tunnel), response(0x99, in_tunnel)] {
         assert_eq!(class(&datagram), Class::RegistrationTunnel { peer: owner });

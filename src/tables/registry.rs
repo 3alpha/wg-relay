@@ -44,6 +44,7 @@ impl Registry {
         Some(old)
     }
 
+    /// Where `k` is registered, unless its registration's lifetime is over.
     pub fn addr(&self, k: &PeerKey, now: Instant) -> Option<SocketAddr> {
         self.by_key.get(k).filter(|(_, t)| live(*t, now, self.ttl)).map(|(a, _)| *a)
     }
@@ -53,28 +54,27 @@ impl Registry {
         self.by_addr.get(&addr).is_some_and(|k| self.addr(k, now) == Some(addr))
     }
 
-    pub fn remove(&mut self, k: &PeerKey) -> bool {
-        let Some((a, _)) = self.by_key.remove(k) else { return false };
-        self.by_addr.remove(&a);
-        true
-    }
-
-    pub fn keys(&self) -> Vec<PeerKey> {
-        self.by_key.keys().copied().collect()
-    }
-
-    /// Drop stale entries, returning the expired keys.
-    pub fn expire(&mut self, now: Instant) -> Vec<PeerKey> {
-        let gone: Vec<PeerKey> = self
-            .by_key
-            .iter()
-            .filter(|(_, (_, t))| !live(*t, now, self.ttl))
-            .map(|(k, _)| *k)
-            .collect();
-        for k in &gone {
-            self.remove(k);
+    /// Keep only the registrations `keep` accepts, given each key and when it
+    /// last authenticated; returns the keys removed.
+    pub fn retain(&mut self, mut keep: impl FnMut(&PeerKey, Instant) -> bool) -> Vec<PeerKey> {
+        let mut gone = Vec::new();
+        self.by_key.retain(|k, (addr, seen)| {
+            let kept = keep(k, *seen);
+            if !kept {
+                gone.push((*k, *addr));
+            }
+            kept
+        });
+        for (_, addr) in &gone {
+            self.by_addr.remove(addr);
         }
-        gone
+        gone.into_iter().map(|(k, _)| k).collect()
+    }
+
+    /// Drop expired registrations; returns the keys removed.
+    pub fn expire(&mut self, now: Instant) -> Vec<PeerKey> {
+        let ttl = self.ttl;
+        self.retain(|_, seen| live(seen, now, ttl))
     }
 }
 
@@ -117,9 +117,9 @@ mod tests {
         assert!(r.is_registered(a1, t0 + secs(179)));
         assert!(!r.is_registered(a1, t0 + secs(180)), "expired");
         assert!(!r.is_registered(a2, t0), "address of an expired registration");
-        assert!(r.remove(&key(3)));
+        assert_eq!(r.retain(|k, _| *k != key(3)), vec![key(3)]);
         assert!(!r.is_registered(a1, t0));
-        assert!(!r.remove(&key(3)));
+        assert_eq!(r.retain(|k, _| *k != key(3)), vec![]);
         assert_eq!(r.addr(&key(3), t0), None);
     }
 }

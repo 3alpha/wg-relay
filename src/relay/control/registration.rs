@@ -50,7 +50,7 @@ impl Control {
             debug!(%src, key = %peer, "registration from unlisted key");
             return Err(Reason::RegistrationUnknownKey);
         }
-        self.feed_tunnel(peer, src, datagram, now)
+        self.feed_tunnel(src, datagram, peer, now)
     }
 
     /// Decide whether a registration attempt may cost an X25519 operation.
@@ -71,12 +71,12 @@ impl Control {
     /// peer live, register the source address.
     pub(super) fn feed_tunnel(
         &mut self,
-        peer: PeerKey,
         src: SocketAddr,
         datagram: &[u8],
+        peer: PeerKey,
         now: Instant,
     ) -> Result<Accepted, Reason> {
-        match self.decapsulate(peer, src, datagram)? {
+        match self.decapsulate(src, datagram, peer)? {
             Proof::Live => self.register(peer, src, now),
             Proof::Unproven => {}
         }
@@ -87,9 +87,9 @@ impl Control {
     /// the tunnel answers, including echo replies to pings for the relay.
     fn decapsulate(
         &mut self,
-        peer: PeerKey,
         src: SocketAddr,
         datagram: &[u8],
+        peer: PeerKey,
     ) -> Result<Proof, Reason> {
         let Some(PeerState { name, tunnel }) = self.peers.get_mut(&peer) else {
             return Err(Reason::TunnelAuthFailed);
@@ -167,6 +167,7 @@ fn icmp_echo_reply(ip: &[u8], me: Ipv4Addr) -> Option<Vec<u8>> {
     Some(r)
 }
 
+/// The Internet checksum (RFC 1071) of `b`.
 fn checksum(b: &[u8]) -> u16 {
     let mut sum: u32 =
         b.chunks(2).map(|c| u32::from(u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]))).sum();

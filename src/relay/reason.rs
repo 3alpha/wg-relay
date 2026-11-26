@@ -5,7 +5,9 @@ use crate::packet::ParseError;
 use crate::tables::Refusal;
 
 // Generates the enum, its `ALL` list and its `Display` names from one table,
-// so a new reason cannot be added without a counter name.
+// so a new reason cannot be added without a counter name. In the order the
+// relay checks them: the forwarding half's checks, the per-source limit, then
+// registration, forwarded initiations and the session lookups.
 macro_rules! reasons {
     ($($v:ident => $s:literal),* $(,)?) => {
         /// Why a datagram was dropped. Each has its own counter.
@@ -27,28 +29,28 @@ reasons! {
     InvalidSource => "invalid_source",
     Malformed => "malformed",
     RateLimited => "rate_limited",
-    ForwardingBudget => "forwarding_budget",
     RegistrationBudget => "registration_budget",
+    RegistrationUnknownKey => "registration_unknown_key",
+    TunnelAuthFailed => "tunnel_auth_failed",
     ReservedIndex => "reserved_index",
+    TooManySessions => "too_many_sessions",
+    TooManyPending => "too_many_pending",
+    ForwardingBudget => "forwarding_budget",
     NoMac1Match => "no_mac1_match",
+    PeerQuota => "peer_quota",
     PeerNotRegistered => "peer_not_registered",
     Loop => "loop",
-    TooManyPending => "too_many_pending",
-    TooManySessions => "too_many_sessions",
-    PeerQuota => "peer_quota",
     IndexInUse => "index_in_use",
     UnknownIndex => "unknown_index",
     WrongSource => "wrong_source",
     SessionNotPending => "session_not_pending",
     SessionNotOpen => "session_not_open",
-    RegistrationUnknownKey => "registration_unknown_key",
-    TunnelAuthFailed => "tunnel_auth_failed",
 }
 
 /// What happened to one datagram.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// Send the datagram, unchanged, to this address.
+    /// Send it, unchanged, to this address.
     Forward(SocketAddr),
     /// Taken by a listed peer's registration tunnel with the relay.
     Consumed,

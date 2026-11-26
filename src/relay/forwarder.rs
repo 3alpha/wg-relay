@@ -81,27 +81,12 @@ fn replyable(src: SocketAddr) -> bool {
 mod tests {
     use super::*;
     use crate::key::PeerKey;
-    use crate::tables::{PENDING_TTL, SESSION_TTL, Session, SessionLimits, SessionTable};
+    use crate::relay::testing::{cookie, data, initiation, response};
+    use crate::tables::{OPEN_TTL, PENDING_TTL, Session, SessionLimits, SessionTable};
     use std::time::Duration;
 
     fn addr(i: u8) -> SocketAddr {
         SocketAddr::from(([192, 0, 2, i], 1))
-    }
-
-    /// A datagram of WireGuard message type `kind` and length `len`, carrying `idx` at offset 4.
-    fn datagram_of(kind: u8, len: usize, idx: u32) -> Vec<u8> {
-        let mut p = vec![0u8; len];
-        p[0] = kind;
-        p[4..8].copy_from_slice(&idx.to_le_bytes());
-        p
-    }
-
-    fn data(receiver: u32) -> Vec<u8> {
-        datagram_of(4, 48, receiver)
-    }
-
-    fn cookie(receiver: u32) -> Vec<u8> {
-        datagram_of(3, packet::COOKIE_LEN, receiver)
     }
 
     const OPEN: u32 = 0x10;
@@ -113,7 +98,7 @@ mod tests {
     /// `RESERVED` is a registration tunnel's index, which no session takes.
     fn setup(t0: Instant) -> Forwarder {
         let limits = SessionLimits { pending_per_peer: 8, per_peer: 8, total: 8 };
-        let mut table = SessionTable::new(SESSION_TTL, PENDING_TTL, limits);
+        let mut table = SessionTable::new(PENDING_TTL, OPEN_TTL, limits);
         let fwd = Forwarder::new(table.new_view());
         let peer = PeerKey::from([1; 32]);
         for (idx, s) in [
@@ -129,7 +114,7 @@ mod tests {
     fn forwards_data_and_cookie_replies_on_open_sessions_from_the_expected_source_only() {
         let t0 = Instant::now();
         let fwd = setup(t0);
-        let later = t0 + SESSION_TTL - Duration::from_secs(1);
+        let later = t0 + OPEN_TTL - Duration::from_secs(1);
         for datagram in [data(OPEN), cookie(OPEN)] {
             assert_eq!(fwd.triage(addr(1), &datagram, t0), Triage::Forward(addr(2)));
             assert_eq!(fwd.triage(addr(1), &datagram, later), Triage::Forward(addr(2)));
@@ -146,17 +131,14 @@ mod tests {
     fn hands_everything_else_to_the_control_half() {
         let t0 = Instant::now();
         let fwd = setup(t0);
-        let init = datagram_of(1, packet::INIT_LEN, OPEN);
-        let mut response = datagram_of(2, packet::RESP_LEN, 0x99);
-        response[8..12].copy_from_slice(&OPEN.to_le_bytes());
         let cases = [
-            (init, t0, "handshake initiation"),
-            (response, t0, "handshake response, even to an open index"),
+            (initiation(OPEN), t0, "handshake initiation"),
+            (response(0x99, OPEN), t0, "handshake response, even to an open index"),
             (data(PENDING), t0, "transport data on a pending index"),
             (cookie(PENDING), t0, "cookie reply on a pending index"),
             (data(0x99), t0, "unknown index"),
             (data(RESERVED), t0, "a registration tunnel's index"),
-            (data(OPEN), t0 + SESSION_TTL, "expired, not yet swept"),
+            (data(OPEN), t0 + OPEN_TTL, "expired, not yet swept"),
         ];
         for (datagram, now, what) in cases {
             let message = packet::parse(&datagram).unwrap();

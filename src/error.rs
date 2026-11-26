@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::config::ConfigError;
 
+/// Why the relay could not start or stopped, in the order things happen.
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("invalid config {path}")]
@@ -13,8 +14,6 @@ pub enum AppError {
         #[source]
         source: ConfigError,
     },
-    #[error("failed to start the async runtime")]
-    Runtime(#[source] std::io::Error),
     #[error("failed to bind {addr}")]
     Bind {
         addr: SocketAddr,
@@ -27,9 +26,20 @@ pub enum AppError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to start the async runtime")]
+    Runtime {
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to start forwarding thread {index}")]
     WorkerSpawn {
         index: usize,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to install the {signal} handler")]
+    Signal {
+        signal: &'static str,
         #[source]
         source: std::io::Error,
     },
@@ -43,12 +53,6 @@ pub enum AppError {
     WorkerPanicked { index: usize },
     #[error("forwarding thread {index} exited unexpectedly")]
     WorkerExited { index: usize },
-    #[error("failed to install the {signal} handler")]
-    Signal {
-        signal: &'static str,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 /// Display an error followed by its `source()` chain, joined with ": ".

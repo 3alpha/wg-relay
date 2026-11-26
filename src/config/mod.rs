@@ -29,7 +29,8 @@ struct RawConfig {
     tunnel_ip: Ipv4Addr,
     #[serde(default)]
     handshake_rate_per_ip: Rate,
-    workers: Option<usize>,
+    #[serde(default = "default_workers")]
+    workers: usize,
     #[serde(default)]
     peer: Vec<Peer>,
 }
@@ -43,9 +44,8 @@ fn default_tunnel_ip() -> Ipv4Addr {
 }
 
 /// One forwarding worker per core the process may use, up to `MAX_WORKERS`.
-fn default_workers() -> NonZeroUsize {
-    let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    NonZeroUsize::new(cores.min(MAX_WORKERS)).unwrap_or(NonZeroUsize::MIN)
+fn default_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, NonZeroUsize::get).min(MAX_WORKERS)
 }
 
 /// Check a configured worker count against `1..=MAX_WORKERS`.
@@ -63,6 +63,7 @@ pub struct Peer {
     pub pubkey: PeerKey,
 }
 
+/// The validated contents of `relay.toml`.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub listen: SocketAddr,
@@ -83,7 +84,7 @@ impl Config {
     /// Parse and validate config text.
     pub fn parse(s: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
-        let workers = raw.workers.map_or_else(|| Ok(default_workers()), parse_workers)?;
+        let workers = parse_workers(raw.workers)?;
         if raw.peer.is_empty() {
             return Err(ConfigError::NoPeer);
         }

@@ -632,7 +632,7 @@ Together these guarantee the two kinds of index never collide, and a message who
 | Peer keepalive | 25 s | node configs (`PersistentKeepalive`) | keeps NAT mappings open, refreshes registrations |
 | WireGuard rekey | about 2 min | WireGuard itself | new keys and new indexes |
 | Registration TTL | 180 s | `REGISTRY_TTL` | a listed peer silent for 3 min is forgotten |
-| Session lifetime | 200 s after the handshake, not extended by traffic | `SESSION_TTL` | indexes from old handshakes age out; nobody can keep an entry alive by sending |
+| Open lifetime | 200 s after the handshake, not extended by traffic | `OPEN_TTL` | indexes from old handshakes age out; nobody can keep an entry alive by sending |
 | Pending lifetime | 10 s after the initiation, not extended by cookie replies | `PENDING_TTL` | unanswered initiations do not pile up |
 | Relay tick | 250 ms | `TICK_INTERVAL` | runs registration tunnel timers; every forwarding thread offers one, and the control half takes at most one per interval |
 | Table sweep | 1 s | `SWEEP_INTERVAL` | expires tables, shrinks them when mostly empty |
@@ -772,17 +772,17 @@ flowchart TD
 
 Following one transport data message through the code:
 
-1. `app/forwarding.rs` `forward_batch()`, on whichever thread's socket the kernel picked for the flow, receives it in a batch with `Socket::try_recv` (`recvmmsg`, in `udp.rs`), either alone in a receive buffer or as one segment of a GRO buffer, which `udp::runs::segments()` splits at the reported size. It calls `relay.handle(src, bytes, now)`.
+1. `app/forwarding.rs` `Batch::forward()`, on whichever thread's socket the kernel picked for the flow, receives it in a batch with `Socket::try_recv` (`recvmmsg`, in `udp.rs`), either alone in a receive buffer or as one segment of a GRO buffer, which `udp::runs::segments()` splits at the reported size. It calls `relay.handle(src, bytes, now)`.
 2. `handle()` asks the forwarding half: `Forwarder::triage()` checks that the source can be replied to and calls `packet::parse()`, which gives `Message::TransportData { receiver }`.
 3. `open.get(receiver, now)` finds a live open session whose `expected_src` is the source, without any lock: other threads may be reading the same map, and the control half writing it. Nothing is written: the entry's lifetime is fixed.
 4. `triage()` returns `Triage::Forward(dest)`, and `settle()` records `Verdict::Forward(dest)` in the forwarding half's counters. Had the index been pending or unknown, `triage()` would have answered `Triage::ToControl`, `classify()` would have named it `ForwardedData`, and `forward_data()` would have decided against the full session table (`session_not_open` or `unknown_index`).
-5. `Plan::make()` in `udp/runs.rs` groups it with the neighbouring datagrams that go to the same address, and `forward()` sends the group as one GSO send of the original, unmodified bytes (or alone, with a plain send). If the GSO send fails, the datagrams go again one by one.
+5. `Plan::make()` in `udp/runs.rs` groups it with the neighbouring datagrams that go to the same address, and `Wire::send_run()` sends the group as one GSO send of the original, unmodified bytes (or alone, with a plain send). If the GSO send fails, the datagrams go again one by one.
 
 ## 17. How it is tested
 
 | Layer | What | Where |
 |---|---|---|
-| Unit | session table: fixed lifetimes, per-peer pending eviction, per-peer quota, global cap and exact counts, with its per-peer accounts and open-session view checked after every change; the forwarding half alone: forwarding on open sessions, the expected source, and everything it hands to the control half; the forwarding half kept in step with the control half after each kind of change and through 20,000 random operations, with both halves reaching the same verdict; reader threads triaging while another thread changes the sessions, never seeing a route the session table never held; the control half's classification of every case; read-only forwarding, source validation, eviction counter, counters merged from both halves; registry, rate limiter, the forwarding and registration budgets and their independence, `Rate` parsing, ICMP reply; splitting GRO buffers and grouping datagrams into GSO sends | `#[cfg(test)]` modules in `src/` |
+| Unit | session table: fixed lifetimes, per-peer pending eviction, per-peer quota, global cap and exact counts, with its per-peer accounts and open-session view checked after every change; the forwarding half alone: forwarding on open sessions, the expected source, and everything it hands to the control half; the forwarding half kept in step with the control half after each kind of change and through 20,000 random operations, with both halves reaching the same verdict; reader threads triaging while another thread changes the sessions, never seeing a route the session table never held; the control half's classification of every case; read-only forwarding, source validation, eviction counter, counters merged from both halves; registry, rate limiter, the forwarding and registration budgets and their independence, `Rate` parsing, ICMP reply; splitting GRO buffers and grouping datagrams into GSO sends; the cadence of timer ticks | `#[cfg(test)]` modules in `src/` |
 | Packet | parsing, size checks, mac1 matching and batched search on real packets made by boringtun | `tests/packet.rs` |
 | Config | defaults, exact `ConfigError` for each bad input, `--check-config` | `tests/config.rs` |
 | Relay, in-process | full handshakes between boringtun peers through `Relay::handle` (unlisted to listed, listed to listed, listed to unlisted refused), reload, roaming, reserved indexes, index takeover, re-sent initiations, fixed session lifetimes under traffic, IPv4-mapped sources, rate limits, registration and pending floods, 10 000 mutated packets | `tests/relay.rs` |

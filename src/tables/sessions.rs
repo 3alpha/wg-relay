@@ -40,9 +40,9 @@ pub struct SessionTable {
 }
 
 impl SessionTable {
-    pub fn new(open_ttl: Duration, pending_ttl: Duration, limits: SessionLimits) -> Self {
+    pub fn new(pending_ttl: Duration, open_ttl: Duration, limits: SessionLimits) -> Self {
         SessionTable {
-            ttls: Ttls { open: open_ttl, pending: pending_ttl },
+            ttls: Ttls { pending: pending_ttl, open: open_ttl },
             total: limits.total,
             map: HashMap::new(),
             ledger: Ledger::new(limits),
@@ -102,9 +102,9 @@ impl SessionTable {
         }
         self.ledger.added(idx, &s);
         match s.state {
-            SessionState::Open => view.publish(idx, Route::from(&s)),
             // It may replace a stale open entry, which forwarding must forget.
             SessionState::Pending => view.withdraw(idx),
+            SessionState::Open => view.publish(idx, Route::from(&s)),
         }
     }
 
@@ -117,6 +117,7 @@ impl SessionTable {
         Some(oldest)
     }
 
+    /// The session `idx` names, unless its lifetime is over.
     pub fn get(&self, idx: SessionIdx, now: Instant) -> Option<Session> {
         self.map.get(&idx).filter(|s| self.ttls.live(s, now)).copied()
     }
@@ -152,7 +153,7 @@ impl SessionTable {
         }
     }
 
-    /// Keep only matching sessions; returns how many were removed.
+    /// Keep only the sessions `keep` accepts; returns how many were removed.
     pub fn retain(&mut self, mut keep: impl FnMut(&Session) -> bool, view: &OpenSessions) -> usize {
         let before = self.map.len();
         self.ledger.retain(&mut self.map, |idx, s| {
@@ -166,6 +167,7 @@ impl SessionTable {
         before - self.map.len()
     }
 
+    /// Drop expired sessions; returns how many were removed.
     pub fn expire(&mut self, now: Instant, view: &OpenSessions) -> usize {
         let ttls = self.ttls;
         self.retain(|s| ttls.live(s, now), view)
@@ -176,6 +178,7 @@ impl SessionTable {
         self.map.keys().any(|i| i.prefix() == prefix)
     }
 
+    /// How many sessions there are, pending or open.
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -221,7 +224,7 @@ impl SessionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tables::{PENDING_TTL, SESSION_TTL};
+    use crate::tables::{OPEN_TTL, PENDING_TTL};
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().unwrap()
@@ -251,7 +254,7 @@ mod tests {
         SessionLimits { pending_per_peer: usize::MAX, per_peer: usize::MAX, total: usize::MAX };
 
     fn table() -> Checked {
-        Checked::new(SessionTable::new(SESSION_TTL, PENDING_TTL, UNLIMITED))
+        Checked::new(SessionTable::new(PENDING_TTL, OPEN_TTL, UNLIMITED))
     }
 
     /// A table and its open view, checking after every change that they agree.
@@ -376,10 +379,10 @@ mod tests {
         let other = pending("192.0.2.3:3", "192.0.2.4:4", t0 + secs(2));
         assert_eq!(t.insert(idx(7), other), Err(Refusal::IndexInUse));
         assert_eq!(t.get(idx(7), t0 + secs(2)), Some(open("192.0.2.1:1", "192.0.2.2:2", t0)));
-        assert_eq!(t.get(idx(7), t0 + SESSION_TTL), None, "still expires on time");
-        let late = pending("192.0.2.5:5", "192.0.2.6:6", t0 + SESSION_TTL);
+        assert_eq!(t.get(idx(7), t0 + OPEN_TTL), None, "still expires on time");
+        let late = pending("192.0.2.5:5", "192.0.2.6:6", t0 + OPEN_TTL);
         assert_eq!(t.insert(idx(7), late), Ok(None), "stale");
-        assert_eq!(t.get(idx(7), t0 + SESSION_TTL).map(|s| s.dest), Some(addr("192.0.2.5:5")));
+        assert_eq!(t.get(idx(7), t0 + OPEN_TTL).map(|s| s.dest), Some(addr("192.0.2.5:5")));
         assert_eq!(t.len(), 2);
         assert!(counts_exact(&t));
     }
@@ -432,7 +435,7 @@ mod tests {
     fn pending_over_quota_evicts_that_peers_oldest_only() {
         let t0 = Instant::now();
         let limits = SessionLimits { pending_per_peer: 2, ..UNLIMITED };
-        let mut t = Checked::new(SessionTable::new(SESSION_TTL, PENDING_TTL, limits));
+        let mut t = Checked::new(SessionTable::new(PENDING_TTL, OPEN_TTL, limits));
         let for_peer = |n: u8, port: u16| {
             Session::pending(addr(&format!("192.0.2.1:{port}")), addr("192.0.2.9:9"), key(n), t0)
         };
@@ -513,7 +516,7 @@ mod tests {
     fn peer_quota_counts_pending_and_open_and_spares_other_peers() {
         let t0 = Instant::now();
         let limits = SessionLimits { pending_per_peer: 2, per_peer: 3, total: usize::MAX };
-        let mut t = Checked::new(SessionTable::new(SESSION_TTL, PENDING_TTL, limits));
+        let mut t = Checked::new(SessionTable::new(PENDING_TTL, OPEN_TTL, limits));
         let s = |n: u8, port: u16, state: SessionState| Session {
             state,
             ..Session::pending(addr(&format!("192.0.2.1:{port}")), addr("192.0.2.9:9"), key(n), t0)
@@ -532,7 +535,7 @@ mod tests {
         assert_eq!(t.insert(idx(10), s(2, 10, o)), Ok(None));
         // A stale entry of peer 1 taken over by peer 2 moves the count.
         assert_eq!(t.insert(idx(1), s(2, 1, p)), Err(Refusal::IndexInUse), "live");
-        let late = Session { since: t0 + SESSION_TTL, ..s(2, 1, p) };
+        let late = Session { since: t0 + OPEN_TTL, ..s(2, 1, p) };
         assert_eq!(t.insert(idx(1), late), Ok(None), "stale");
         assert!(counts_exact(&t));
         assert!(!t.peer_at_quota(&key(1)) && t.ledger.count(&key(2)) == 2);
@@ -547,7 +550,7 @@ mod tests {
     fn total_cap_refuses_new_indexes_but_not_replacements() {
         let t0 = Instant::now();
         let limits = SessionLimits { pending_per_peer: 1, per_peer: usize::MAX, total: 3 };
-        let mut t = Checked::new(SessionTable::new(SESSION_TTL, PENDING_TTL, limits));
+        let mut t = Checked::new(SessionTable::new(PENDING_TTL, OPEN_TTL, limits));
         let for_peer = |n: u8, port: u16| {
             Session::pending(addr(&format!("192.0.2.1:{port}")), addr("192.0.2.9:9"), key(n), t0)
         };
@@ -569,7 +572,7 @@ mod tests {
     fn pending_eviction_keeps_peer_counts_exact() {
         let t0 = Instant::now();
         let limits = SessionLimits { pending_per_peer: 2, per_peer: 4, total: usize::MAX };
-        let mut t = Checked::new(SessionTable::new(SESSION_TTL, PENDING_TTL, limits));
+        let mut t = Checked::new(SessionTable::new(PENDING_TTL, OPEN_TTL, limits));
         let mut evicted = 0;
         for i in 0..100 {
             let s = Session::pending(addr("192.0.2.1:1"), addr("192.0.2.9:9"), key(1), t0);

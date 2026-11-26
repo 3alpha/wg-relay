@@ -268,13 +268,19 @@ struct Server {
     state: UdpSocketState,
 }
 
+/// A client socket sending one flow.
+struct Client {
+    sock: UdpSocket,
+    state: UdpSocketState,
+}
+
 /// The parties and their sockets.
 struct World {
     relay_key: Key,
     client_key: Key,
     relay: SocketAddr,
     servers: Vec<Server>,
-    clients: Vec<UdpSocket>,
+    clients: Vec<Client>,
 }
 
 impl World {
@@ -313,9 +319,9 @@ impl World {
 
     /// Complete a handshake from `client` to `server` through the relay and
     /// return the client's tunnel, ready to encrypt data for the server.
-    fn connect(&self, client: &UdpSocket, server: &Server) -> Result<Tunn, BenchError> {
+    fn connect(&self, client: &Client, server: &Server) -> Result<Tunn, BenchError> {
         let deadline = Instant::now() + STEP_TIMEOUT;
-        let sock = &server.sock;
+        let (client, sock) = (&client.sock, &server.sock);
         while Instant::now() < deadline {
             let (mut c, mut s) =
                 (tunn(&self.client_key, &server.key), tunn(&server.key, &self.client_key));
@@ -400,10 +406,9 @@ fn count_received(
     Ok(())
 }
 
-/// One flow as a sender sees it: its socket and its data packet.
+/// One flow as a sender sees it: its client and its data packet.
 struct Flow<'a> {
-    sock: &'a UdpSocket,
-    state: &'a UdpSocketState,
+    client: &'a Client,
     pkt: &'a [u8],
 }
 
@@ -433,7 +438,7 @@ fn send_loop(
                 src_ip: None,
             };
             // A full send buffer or a refused GSO send is part of the load test.
-            if flow.state.try_send(flow.sock.into(), &transmit).is_ok() {
+            if flow.client.state.try_send((&flow.client.sock).into(), &transmit).is_ok() {
                 sent.fetch_add(*burst as u64, Ordering::Relaxed);
             }
         }
@@ -451,7 +456,6 @@ struct Counts {
 /// Run senders and the counter for one window and report what got through.
 fn measure(
     world: &World,
-    states: &States,
     pkts: &[Vec<u8>],
     process: &RelayProcess,
     args: &Args,
@@ -473,7 +477,7 @@ fn measure(
         for i in 0..args.senders {
             let flows: Vec<Flow<'_>> = (i % pkts.len()..pkts.len())
                 .step_by(args.senders)
-                .map(|f| Flow { sock: &world.clients[f], state: &states.clients[f], pkt: &pkts[f] })
+                .map(|f| Flow { client: &world.clients[f], pkt: &pkts[f] })
                 .collect();
             let (stop, sent) = (&stop, &sent);
             s.spawn(move || send_loop(&flows, args.gso, world.relay, stop, sent));
@@ -502,11 +506,6 @@ fn measure(
     })
 }
 
-/// Batched I/O state for the client sockets.
-struct States {
-    clients: Vec<UdpSocketState>,
-}
-
 /// Bind a server's socket and set it up for counting.
 fn server(key: Key) -> Result<Server, BenchError> {
     let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
@@ -521,6 +520,15 @@ fn server(key: Key) -> Result<Server, BenchError> {
     nix::sys::socket::setsockopt(&sock, nix::sys::socket::sockopt::ReceiveTimestampns, &false)
         .map_err(io::Error::from)?;
     Ok(Server { key, sock, state })
+}
+
+/// Bind a client's socket and set it up for sending.
+fn client() -> Result<Client, BenchError> {
+    let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+    sock.set_read_timeout(Some(Duration::from_millis(20)))?;
+    // The socket turns non-blocking here; `recv_until` copes with either.
+    let state = UdpSocketState::new((&sock).into())?;
+    Ok(Client { sock, state })
 }
 
 fn run(args: &Args) -> Result<(), BenchError> {
@@ -559,20 +567,7 @@ fn run(args: &Args) -> Result<(), BenchError> {
         client_key,
         relay,
         servers,
-        clients: (0..args.flows)
-            .map(|_| UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)))
-            .collect::<Result<_, _>>()?,
-    };
-    for sock in &world.clients {
-        sock.set_read_timeout(Some(Duration::from_millis(20)))?;
-    }
-    // The sockets turn non-blocking here; `recv_until` copes with either.
-    let states = States {
-        clients: world
-            .clients
-            .iter()
-            .map(|c| UdpSocketState::new(c.into()))
-            .collect::<Result<_, _>>()?,
+        clients: (0..args.flows).map(|_| client()).collect::<Result<_, _>>()?,
     };
 
     println!(
@@ -599,7 +594,7 @@ fn run(args: &Args) -> Result<(), BenchError> {
             .zip(servers)
             .map(|(c, server)| encrypt(&mut world.connect(c, server)?, &ip_packet(size)))
             .collect::<Result<Vec<_>, _>>()?;
-        let sample = measure(&world, &states, &pkts, &process, args)?;
+        let sample = measure(&world, &pkts, &process, args)?;
         process.check_running()?;
         let secs = sample.elapsed.as_secs_f64();
         let pps = sample.received as f64 / secs;

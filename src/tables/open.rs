@@ -48,10 +48,12 @@ impl OpenSessions {
         self.map.len()
     }
 
+    /// Make `route` the open session at `idx`.
     pub(super) fn publish(&self, idx: SessionIdx, route: Route) {
         self.map.pin().insert(idx, route);
     }
 
+    /// Remove the open session at `idx`, if there is one.
     pub(super) fn withdraw(&self, idx: SessionIdx) {
         self.map.pin().remove(&idx);
     }

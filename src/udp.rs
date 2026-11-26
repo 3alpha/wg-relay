@@ -110,6 +110,7 @@ impl Socket {
         self.state.max_gso_segments().min(MAX_GSO_SEGMENTS)
     }
 
+    /// Wait until there is something to receive.
     pub async fn readable(&self) -> io::Result<()> {
         self.io.readable().await
     }

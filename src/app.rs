@@ -20,9 +20,10 @@ mod workers;
 
 use workers::Workers;
 
-const STATS_INTERVAL: Duration = Duration::from_secs(60);
 /// How often the main thread checks that every forwarding thread still runs.
 const CHECK_INTERVAL: Duration = Duration::from_millis(250);
+/// How often the main thread logs every counter.
+const STATS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Pubkey-routed WireGuard relay for peers behind NAT.
 #[derive(Debug, Parser)]
@@ -47,6 +48,7 @@ pub fn run(cli: Cli) -> Result<(), AppError> {
     serve(cfg, cli.config)
 }
 
+/// Read and validate the config file at `path`.
 fn load(path: &Path) -> Result<Config, AppError> {
     Config::load(path).map_err(|source| AppError::Config { path: path.to_owned(), source })
 }
@@ -56,7 +58,7 @@ fn load(path: &Path) -> Result<Config, AppError> {
 fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
     let (listen, sockets) = udp::bind_group(cfg.listen, workers::count(&cfg))?;
     let (gro, gso) = (sockets.iter().all(Bound::gro), sockets.iter().all(Bound::gso));
-    let rt = runtime().map_err(AppError::Runtime)?;
+    let rt = runtime().map_err(|source| AppError::Runtime { source })?;
     let relay = Relay::new(&cfg);
     let workers = Workers::start(sockets, &relay)?;
     info!(
@@ -92,9 +94,9 @@ async fn supervise(
     path: &Path,
 ) -> Result<(), AppError> {
     let on = |kind, name| signal(kind).map_err(|source| AppError::Signal { signal: name, source });
-    let mut term = on(SignalKind::terminate(), "SIGTERM")?;
-    let mut int = on(SignalKind::interrupt(), "SIGINT")?;
     let mut hup = on(SignalKind::hangup(), "SIGHUP")?;
+    let mut int = on(SignalKind::interrupt(), "SIGINT")?;
+    let mut term = on(SignalKind::terminate(), "SIGTERM")?;
     let mut checks = tokio::time::interval(CHECK_INTERVAL);
     let mut stats = tokio::time::interval(STATS_INTERVAL);
     loop {

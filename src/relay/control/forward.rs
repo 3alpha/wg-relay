@@ -17,7 +17,7 @@ impl Control {
         sender: SessionIdx,
         now: Instant,
     ) -> Result<Accepted, Reason> {
-        if self.is_reserved(sender) {
+        if self.tunnel_owner(sender).is_some() {
             return Err(Reason::ReservedIndex);
         }
         // Checked before the scan, so a full table also spares the forwarding budget.
@@ -57,7 +57,7 @@ impl Control {
             // An open session could otherwise mint new entries.
             SessionState::Open => return Err(Reason::SessionNotPending),
         }
-        if self.is_reserved(sender) {
+        if self.tunnel_owner(sender).is_some() {
             return Err(Reason::ReservedIndex);
         }
         let responder = Session::open(initiator.expected_src, initiator.dest, initiator.peer, now);
@@ -66,8 +66,8 @@ impl Control {
         Ok(Accepted::Forward(initiator.dest))
     }
 
-    /// Forward a cookie reply. A pending session passes it too, so a peer
-    /// under load can still answer an initiation.
+    /// Forward a cookie reply on a pending or open session: a pending one
+    /// passes it too, so a peer under load can still answer an initiation.
     pub(super) fn forward_cookie_reply(
         &self,
         src: SocketAddr,
@@ -104,11 +104,6 @@ impl Control {
             return Err(Reason::WrongSource);
         }
         Ok(session)
-    }
-
-    /// Is `idx` in a reserved prefix, where forwarded sessions may not go?
-    fn is_reserved(&self, idx: SessionIdx) -> bool {
-        self.reserved.contains_key(&idx.prefix())
     }
 
     /// Find the listed peer whose key the initiation's mac1 was made for,

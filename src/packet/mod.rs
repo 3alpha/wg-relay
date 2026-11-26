@@ -82,6 +82,7 @@ impl Message {
     }
 }
 
+/// Read the little-endian index at `off`.
 fn idx(b: &[u8], off: usize) -> Result<SessionIdx, ParseError> {
     b.get(off..off + 4)
         .and_then(|s| <[u8; 4]>::try_from(s).ok())

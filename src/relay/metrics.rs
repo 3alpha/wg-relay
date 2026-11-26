@@ -12,8 +12,8 @@ pub struct Metrics {
     pub tunnel_rx: u64,
     /// Datagrams the registration tunnels sent: handshake responses, keepalives, ping replies.
     pub tunnel_tx: u64,
-    pub send_errors: u64,
     pub recv_errors: u64,
+    pub send_errors: u64,
     /// Pending sessions evicted by newer forwarded initiations to the same
     /// listed peer; a steady rise means a flood aimed at that peer.
     pub pending_evicted: u64,
@@ -21,6 +21,7 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    /// How many datagrams were dropped for `r`.
     pub fn rejected(&self, r: Reason) -> u64 {
         self.rejects[r as usize]
     }
@@ -45,8 +46,8 @@ impl AddAssign<&Metrics> for Metrics {
             forwarded,
             tunnel_rx,
             tunnel_tx,
-            send_errors,
             recv_errors,
+            send_errors,
             pending_evicted,
             rejects,
         } = other;
@@ -54,8 +55,8 @@ impl AddAssign<&Metrics> for Metrics {
         self.forwarded += forwarded;
         self.tunnel_rx += tunnel_rx;
         self.tunnel_tx += tunnel_tx;
-        self.send_errors += send_errors;
         self.recv_errors += recv_errors;
+        self.send_errors += send_errors;
         self.pending_evicted += pending_evicted;
         for (mine, theirs) in self.rejects.iter_mut().zip(rejects) {
             *mine += theirs;
@@ -67,14 +68,14 @@ impl fmt::Display for Metrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "rx={} forwarded={} tunnel_rx={} tunnel_tx={} send_errors={} recv_errors={} \
+            "rx={} forwarded={} tunnel_rx={} tunnel_tx={} recv_errors={} send_errors={} \
              pending_evicted={}",
             self.rx,
             self.forwarded,
             self.tunnel_rx,
             self.tunnel_tx,
-            self.send_errors,
             self.recv_errors,
+            self.send_errors,
             self.pending_evicted
         )?;
         for r in Reason::ALL.iter().filter(|r| self.rejected(**r) > 0) {

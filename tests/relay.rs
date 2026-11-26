@@ -33,11 +33,8 @@ struct W {
 
 /// A config listing these peers.
 fn config(r: &Key, peers: &[(&str, &Key)]) -> Config {
-    let mut s = format!("private_key = \"{}\"\n", b64_sk(r));
-    for (name, k) in peers {
-        s += &format!("[[peer]]\nname = \"{name}\"\npubkey = \"{}\"\n", b64(&k.pk));
-    }
-    Config::parse(&s).unwrap()
+    let text = peers.iter().fold(head(r, ""), |text, (name, k)| text + &peer(name, k));
+    Config::parse(&text).unwrap()
 }
 
 fn world() -> W {
@@ -82,49 +79,50 @@ impl W {
         }
     }
 
+    /// How many datagrams were dropped for `r`.
     fn n(&self, r: Reason) -> u64 {
         self.relay.metrics().rejected(r)
     }
-}
 
-/// Handshake initiator -> responder through the relay; returns where the
-/// relay sent the initiation, the response, and the initiator's first keepalive.
-fn hs(w: &mut W, it: &mut Tunn, ia: &str, rt: &mut Tunn, ra: &str) -> [Option<SocketAddr>; 3] {
-    let init = initiation(it);
-    let a = w.fwd(ia, &init);
-    let resp = reply(rt, &init).expect("responder answers");
-    let b = w.fwd(ra, &resp);
-    let ka = reply(it, &resp).expect("initiator keepalive");
-    let c = w.fwd(ia, &ka);
-    if c.is_some() {
-        reply(rt, &ka); // responder confirms the session
+    /// Handshake initiator -> responder through the relay; returns where the
+    /// relay sent the initiation, the response, and the initiator's first keepalive.
+    fn hs(&mut self, it: &mut Tunn, ia: &str, rt: &mut Tunn, ra: &str) -> [Option<SocketAddr>; 3] {
+        let init = initiation(it);
+        let a = self.fwd(ia, &init);
+        let resp = reply(rt, &init).expect("responder answers");
+        let b = self.fwd(ra, &resp);
+        let ka = reply(it, &resp).expect("initiator keepalive");
+        let c = self.fwd(ia, &ka);
+        if c.is_some() {
+            reply(rt, &ka); // responder confirms the session
+        }
+        [a, b, c]
     }
-    [a, b, c]
-}
 
-/// Send a ping through the relay; returns where it went (and checks it decrypts).
-fn data(w: &mut W, from: &mut Tunn, fa: &str, to: &mut Tunn) -> Option<SocketAddr> {
-    data_at(w, from, fa, to, Instant::now())
-}
-
-/// `data`, with the packet arriving at the relay at `now`.
-fn data_at(
-    w: &mut W,
-    from: &mut Tunn,
-    fa: &str,
-    to: &mut Tunn,
-    now: Instant,
-) -> Option<SocketAddr> {
-    let p = ping([10, 99, 0, 11], [10, 99, 0, 1]);
-    let pkt = encrypt(from, &p);
-    assert_eq!(pkt[0], 4, "sender has no session");
-    let dst = w.fwd_at(fa, &pkt, now)?;
-    let mut buf = vec![0u8; 2048];
-    match to.decapsulate(None, &pkt, &mut buf) {
-        TunnResult::WriteToTunnelV4(got, _) => assert_eq!(got, &p[..]),
-        other => panic!("forwarded data did not decrypt: {other:?}"),
+    /// Send a ping through the relay; returns where it went (and checks it decrypts).
+    fn data(&mut self, from: &mut Tunn, fa: &str, to: &mut Tunn) -> Option<SocketAddr> {
+        self.data_at(from, fa, to, Instant::now())
     }
-    Some(dst)
+
+    /// `data`, with the packet arriving at the relay at `now`.
+    fn data_at(
+        &mut self,
+        from: &mut Tunn,
+        fa: &str,
+        to: &mut Tunn,
+        now: Instant,
+    ) -> Option<SocketAddr> {
+        let p = ping([10, 99, 0, 11], [10, 99, 0, 1]);
+        let pkt = encrypt(from, &p);
+        assert_eq!(pkt[0], 4, "sender has no session");
+        let dst = self.fwd_at(fa, &pkt, now)?;
+        let mut buf = vec![0u8; 2048];
+        match to.decapsulate(None, &pkt, &mut buf) {
+            TunnResult::WriteToTunnelV4(got, _) => assert_eq!(got, &p[..]),
+            other => panic!("forwarded data did not decrypt: {other:?}"),
+        }
+        Some(dst)
+    }
 }
 
 fn ok3(a: &str, b: &str) -> [Option<SocketAddr>; 3] {
@@ -153,25 +151,25 @@ fn cookie(receiver: u32) -> Vec<u8> {
 fn unlisted_peer_reaches_listed_peer() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
-    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), Some(addr(SRV)));
-    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(C1)));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.data(&mut c1s, C1, &mut sc1), Some(addr(SRV)));
+    assert_eq!(w.data(&mut sc1, SRV, &mut c1s), Some(addr(C1)));
     // Client-initiated rekey.
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
-    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(C1)));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.data(&mut sc1, SRV, &mut c1s), Some(addr(C1)));
 
     // A peer that moves network loses data until it re-handshakes.
     let moved = "198.51.100.11:49999";
-    assert_eq!(data(&mut w, &mut c1s, moved, &mut sc1), None);
+    assert_eq!(w.data(&mut c1s, moved, &mut sc1), None);
     assert_eq!(w.n(Reason::WrongSource), 1);
-    assert_eq!(hs(&mut w, &mut c1s, moved, &mut sc1, SRV), ok3(SRV, moved));
+    assert_eq!(w.hs(&mut c1s, moved, &mut sc1, SRV), ok3(SRV, moved));
 }
 
 #[test]
 fn listed_peer_cannot_initiate_to_unlisted_peer() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     // The relay has no key to match the initiation's mac1 against.
     assert_eq!(w.fwd(SRV, &initiation(&mut sc1)), None);
     assert_eq!(w.n(Reason::NoMac1Match), 1);
@@ -181,10 +179,10 @@ fn listed_peer_cannot_initiate_to_unlisted_peer() {
 fn listed_peers_reach_each_other_both_ways() {
     let mut w = world();
     let (mut ab, mut ba) = (tunn(&w.srv, &w.srv2), tunn(&w.srv2, &w.srv));
-    assert_eq!(hs(&mut w, &mut ab, SRV, &mut ba, SRV2), ok3(SRV2, SRV));
-    assert_eq!(data(&mut w, &mut ab, SRV, &mut ba), Some(addr(SRV2)));
-    assert_eq!(hs(&mut w, &mut ba, SRV2, &mut ab, SRV), ok3(SRV, SRV2));
-    assert_eq!(data(&mut w, &mut ba, SRV2, &mut ab), Some(addr(SRV)));
+    assert_eq!(w.hs(&mut ab, SRV, &mut ba, SRV2), ok3(SRV2, SRV));
+    assert_eq!(w.data(&mut ab, SRV, &mut ba), Some(addr(SRV2)));
+    assert_eq!(w.hs(&mut ba, SRV2, &mut ab, SRV), ok3(SRV, SRV2));
+    assert_eq!(w.data(&mut ba, SRV2, &mut ab), Some(addr(SRV)));
 }
 
 #[test]
@@ -234,21 +232,21 @@ fn reload_revokes_removed_peer_immediately() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     let (mut c2o, mut oc2) = (tunn(&w.c2, &w.srv2), tunn(&w.srv2, &w.c2));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
-    assert_eq!(hs(&mut w, &mut c2o, C2, &mut oc2, SRV2), ok3(SRV2, C2));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.hs(&mut c2o, C2, &mut oc2, SRV2), ok3(SRV2, C2));
 
     // Remove `main`: its registration and every session routed to it go.
     let cfg = config(&w.r, &[("other", &w.srv2)]);
     w.relay.reload(&cfg);
     assert_eq!(w.relay.registered_addr(&w.srv.id(), Instant::now()), None);
-    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), None);
-    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), None);
+    assert_eq!(w.data(&mut c1s, C1, &mut sc1), None);
+    assert_eq!(w.data(&mut sc1, SRV, &mut c1s), None);
     assert_eq!(w.n(Reason::UnknownIndex), 2);
     assert_eq!(w.fwd(C1, &initiation(&mut c1s)), None);
     assert_eq!(w.n(Reason::NoMac1Match), 1);
     // Sessions with `other` are untouched.
-    assert_eq!(data(&mut w, &mut c2o, C2, &mut oc2), Some(addr(SRV2)));
-    assert_eq!(data(&mut w, &mut oc2, SRV2, &mut c2o), Some(addr(C2)));
+    assert_eq!(w.data(&mut c2o, C2, &mut oc2), Some(addr(SRV2)));
+    assert_eq!(w.data(&mut oc2, SRV2, &mut c2o), Some(addr(C2)));
 }
 
 #[test]
@@ -301,8 +299,8 @@ fn open_session_cannot_mint_or_take_over_indexes() {
     }
     assert_eq!(w.n(Reason::IndexInUse), 2);
     assert_eq!(w.relay.session_count(), sessions);
-    assert_eq!(data(&mut w, &mut c2s, C2, &mut sc2), Some(addr(SRV)));
-    assert_eq!(data(&mut w, &mut sc2, SRV, &mut c2s), Some(addr(C2)));
+    assert_eq!(w.data(&mut c2s, C2, &mut sc2), Some(addr(SRV)));
+    assert_eq!(w.data(&mut sc2, SRV, &mut c2s), Some(addr(C2)));
 }
 
 #[test]
@@ -334,12 +332,12 @@ fn pending_session_expires_quickly() {
 fn listed_peer_roaming_migrates_sessions() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     let srv = w.srv.clone();
     let moved = "198.51.100.1:60000";
     w.register(&srv, moved);
-    assert_eq!(data(&mut w, &mut c1s, C1, &mut sc1), Some(addr(moved)));
-    assert_eq!(data(&mut w, &mut sc1, moved, &mut c1s), Some(addr(C1)));
+    assert_eq!(w.data(&mut c1s, C1, &mut sc1), Some(addr(moved)));
+    assert_eq!(w.data(&mut sc1, moved, &mut c1s), Some(addr(C1)));
 }
 
 #[test]
@@ -368,7 +366,7 @@ fn relay_key_cannot_open_forwarded_initiation_and_ping_works() {
 fn expiry_and_rate_limit() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     w.relay.tick(Instant::now() + Duration::from_secs(181));
     assert_eq!(
         w.relay.registered_addr(&w.srv.id(), Instant::now() + Duration::from_secs(181)),
@@ -449,7 +447,7 @@ fn registration_flood_does_not_block_registered_peers() {
     assert_eq!(w.relay.handle(moved, &initiation(&mut t), now), shed);
     // Forwarded handshakes have their own budget.
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
 }
 
 #[test]
@@ -493,16 +491,16 @@ fn pending_flood_aimed_at_one_peer_evicts_only_its_oldest() {
 fn open_session_expires_on_time_however_busy() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    assert_eq!(hs(&mut w, &mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
+    assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     let opened = Instant::now();
     let at = |s: u64| opened + Duration::from_secs(s);
     for s in (10..200).step_by(10).chain([199]) {
-        assert_eq!(data_at(&mut w, &mut c1s, C1, &mut sc1, at(s)), Some(addr(SRV)), "{s} s");
-        assert_eq!(data_at(&mut w, &mut sc1, SRV, &mut c1s, at(s)), Some(addr(C1)), "{s} s");
+        assert_eq!(w.data_at(&mut c1s, C1, &mut sc1, at(s)), Some(addr(SRV)), "{s} s");
+        assert_eq!(w.data_at(&mut sc1, SRV, &mut c1s, at(s)), Some(addr(C1)), "{s} s");
     }
     // WireGuard has rekeyed by now and never uses this session's keys again.
-    assert_eq!(data_at(&mut w, &mut c1s, C1, &mut sc1, at(200)), None);
-    assert_eq!(data_at(&mut w, &mut sc1, SRV, &mut c1s, at(200)), None);
+    assert_eq!(w.data_at(&mut c1s, C1, &mut sc1, at(200)), None);
+    assert_eq!(w.data_at(&mut sc1, SRV, &mut c1s, at(200)), None);
     assert_eq!(w.n(Reason::UnknownIndex), 2);
 }
 
@@ -543,7 +541,7 @@ fn resent_initiation_cannot_reset_an_open_session() {
     assert_eq!(w.fwd(C1, &init), None);
     assert_eq!(w.fwd(C1, &reuse), None);
     assert_eq!(w.n(Reason::IndexInUse), 2);
-    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(C1)));
+    assert_eq!(w.data(&mut sc1, SRV, &mut c1s), Some(addr(C1)));
 }
 
 #[test]
@@ -551,8 +549,8 @@ fn ipv4_mapped_source_is_a_normal_peer() {
     let mut w = world();
     let mapped = "[::ffff:198.51.100.11]:40001";
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
-    assert_eq!(hs(&mut w, &mut c1s, mapped, &mut sc1, SRV), ok3(SRV, mapped));
-    assert_eq!(data(&mut w, &mut sc1, SRV, &mut c1s), Some(addr(mapped)));
+    assert_eq!(w.hs(&mut c1s, mapped, &mut sc1, SRV), ok3(SRV, mapped));
+    assert_eq!(w.data(&mut sc1, SRV, &mut c1s), Some(addr(mapped)));
     assert_eq!(w.fwd("[::ffff:255.255.255.255]:40001", &initiation(&mut c1s)), None);
     assert_eq!(w.n(Reason::InvalidSource), 1);
 }

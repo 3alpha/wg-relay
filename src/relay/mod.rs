@@ -21,6 +21,8 @@ mod control;
 mod forwarder;
 mod metrics;
 mod reason;
+#[cfg(test)]
+mod testing;
 
 use control::Control;
 pub use control::TICK_INTERVAL;
@@ -38,6 +40,7 @@ pub struct Relay {
 }
 
 impl Relay {
+    /// Build the relay for `cfg`, with nothing registered yet.
     pub fn new(cfg: &Config) -> Self {
         let control = Control::new(cfg);
         Relay {
@@ -62,14 +65,17 @@ impl Relay {
         self.control.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The relay's own public key.
     pub fn public_key(&self) -> PeerKey {
         self.control().public_key()
     }
 
+    /// How many listed peers the config has.
     pub fn peer_count(&self) -> usize {
         self.control().peer_count()
     }
 
+    /// How many sessions, pending or open, the relay holds.
     pub fn session_count(&self) -> usize {
         self.control().session_count()
     }
@@ -96,14 +102,14 @@ impl Relay {
         self.control().take_outbox()
     }
 
-    /// Count a datagram the caller failed to send.
-    pub fn record_send_error(&mut self) {
-        self.counters.send_errors += 1;
-    }
-
     /// Count a failed receive on the caller's socket.
     pub fn record_recv_error(&mut self) {
         self.counters.recv_errors += 1;
+    }
+
+    /// Count a datagram the caller failed to send.
+    pub fn record_send_error(&mut self) {
+        self.counters.send_errors += 1;
     }
 
     /// Decide one datagram, counting and logging the outcome: the forwarding

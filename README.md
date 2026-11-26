@@ -21,7 +21,7 @@ The relay is configured with nothing more than the public keys of the peers that
 - **Many networks on one relay.** Adding a network means adding its server's public key. Networks are isolated from one another by their own WireGuard peer lists.
 - **Minimal configuration.** The relay lists only the peers that must be reachable. Who may connect to them is decided where it always is in WireGuard: in each peer's own config.
 - **Abuse resistance.** Only listed peers can register, and a session opens only when a listed peer answers. Handshakes are rate-limited per source and by separate CPU budgets for forwarding and registration, so a flood cannot stall forwarding and cannot stop registered peers from staying registered; pending handshakes and session entries have a quota per listed peer, so a flood aimed at one network does not refuse handshakes to the others and a misbehaving listed peer cannot fill the session table; session entries expire a fixed time after their handshake, however much traffic arrives; memory stays bounded however many sources appear; and the relay cannot be used as a reflector.
-- **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 3,100 lines of Rust.
+- **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 3,200 lines of Rust.
 
 ## How it works
 

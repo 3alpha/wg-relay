@@ -6,13 +6,6 @@ use common::*;
 use std::process::Command;
 use wg_relay::config::{Config, ConfigError, Peer};
 
-fn head(r: &Key, extra: &str) -> String {
-    format!("private_key = \"{}\"\n{extra}", b64_sk(r))
-}
-fn peer(name: &str, k: &Key) -> String {
-    format!("[[peer]]\nname = \"{name}\"\npubkey = \"{}\"\n", b64(&k.pk))
-}
-
 #[test]
 fn peers_and_defaults() {
     let (r, a, b) = (key(), key(), key());

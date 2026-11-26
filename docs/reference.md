@@ -23,7 +23,7 @@ Each listed peer has the relay as a `[Peer]` with `AllowedIPs = <tunnel_ip>/32` 
 
 `receiver_idx → { dest_addr, expected_src_addr, open, since, peer }`, where `since` is when the entry entered its current state and `peer` is the listed peer the session was routed to, used to revoke sessions on reload. **Every type 2, 3 and 4 packet must arrive from `expected_src_addr`.**
 
-Lifetimes are fixed and never extended by traffic. An open entry expires 200 s after its handshake was accepted (`SESSION_TTL`), however busy it is: WireGuard never uses a key older than 180 s (`REJECT_AFTER_TIME`) and has moved to a newer session's indexes by then, so the extra 20 s only cover the round trip. A pending entry (an initiation without an accepted response) expires 10 s after the initiation (`PENDING_TTL`), whatever cookie replies pass through it. Types 3 and 4 are forwarded by the forwarding half, which only reads its copy of the open entries, or, on a pending or unknown index, by the control half, which only reads the table. Expired entries are removed by a sweep every second.
+Lifetimes are fixed and never extended by traffic. An open entry expires 200 s after its handshake was accepted (`OPEN_TTL`), however busy it is: WireGuard never uses a key older than 180 s (`REJECT_AFTER_TIME`) and has moved to a newer session's indexes by then, so the extra 20 s only cover the round trip. A pending entry (an initiation without an accepted response) expires 10 s after the initiation (`PENDING_TTL`), whatever cookie replies pass through it. Types 3 and 4 are forwarded by the forwarding half, which only reads its copy of the open entries, or, on a pending or unknown index, by the control half, which only reads the table. Expired entries are removed by a sweep every second.
 
 Quotas bound the table:
 
@@ -85,29 +85,31 @@ On Linux the sockets are bound with `SO_REUSEPORT`; before binding them the rela
 
 ## Rejects and metrics
 
-Every rejected datagram increments a per-reason counter and logs `reject reason=<reason> src=<addr>` at `debug` level. Per-packet logs are kept at debug because otherwise anyone could flood the log. Counters are logged every 60 s and at shutdown, for example `rx=74 forwarded=60 … pending_evicted=0 reject.peer_not_registered=1 reject.unknown_index=4`. Besides the rejects, `forwarded` counts datagrams forwarded, `tunnel_rx` and `tunnel_tx` count datagrams taken and sent by the registration tunnels, `send_errors` and `recv_errors` count socket failures (logged individually only at `debug`, since a remote host can cause them at packet rate), and `pending_evicted` counts pending entries evicted by a newer initiation to the same listed peer: a steady rise means a flood aimed at one peer, which otherwise shows up only as later `unknown_index` drops.
+Every rejected datagram increments a per-reason counter and logs `reject reason=<reason> src=<addr>` at `debug` level. Per-packet logs are kept at debug because otherwise anyone could flood the log. Counters are logged every 60 s and at shutdown, for example `rx=74 forwarded=60 … pending_evicted=0 reject.peer_not_registered=1 reject.unknown_index=4`. Besides the rejects, `forwarded` counts datagrams forwarded, `tunnel_rx` and `tunnel_tx` count datagrams taken and sent by the registration tunnels, `recv_errors` and `send_errors` count socket failures (logged individually only at `debug`, since a remote host can cause them at packet rate), and `pending_evicted` counts pending entries evicted by a newer initiation to the same listed peer: a steady rise means a flood aimed at one peer, which otherwise shows up only as later `unknown_index` drops.
+
+The reasons, in the order the relay checks them:
 
 | Reason | Meaning |
 |---|---|
 | `invalid_source` | the source can never be a reply destination: port 0, unspecified, multicast or IPv4 broadcast |
 | `malformed` | wrong size, type or reserved bytes |
 | `rate_limited` | the source (IPv4 address or IPv6 /64) exceeded `handshake_rate_per_ip` |
-| `forwarding_budget` | the forwarding budget is spent; the forwarded initiation was dropped before the mac1 scan. Called `handshake_budget` before, a name that hid that registration has its own budget |
 | `registration_budget` | the registration budget is spent and the registration initiation did not come from a registered address; dropped before any X25519 work |
+| `registration_unknown_key` | the registration initiation came from a key that is not listed |
+| `tunnel_auth_failed` | a datagram to a registration tunnel failed authentication |
 | `reserved_index` | a forwarded handshake picked an index in the relay's range |
+| `too_many_sessions` | the session table holds 917,504 entries |
+| `too_many_pending` | 262,144 handshakes already await a response, across all listed peers |
+| `forwarding_budget` | the forwarding budget is spent; the forwarded initiation was dropped before the mac1 scan. Called `handshake_budget` before, a name that hid that registration has its own budget |
 | `no_mac1_match` | the initiation is not for any listed peer or the relay |
+| `peer_quota` | the target listed peer already has 65,536 session entries |
 | `peer_not_registered` | the target listed peer has no current registration |
 | `loop` | the initiation came from the target's own address |
-| `too_many_pending` | 262,144 handshakes already await a response, across all listed peers |
-| `too_many_sessions` | the session table holds 917,504 entries |
-| `peer_quota` | the target listed peer already has 65,536 session entries |
 | `index_in_use` | the handshake's `sender_idx` belongs to a live session of another address pair, or to a live open session |
 | `unknown_index` | no live session for `receiver_idx` |
 | `wrong_source` | the packet is not from the session's `expected_src_addr` |
 | `session_not_pending` | a response to a handshake that was already answered |
 | `session_not_open` | data on a session whose handshake has not completed |
-| `registration_unknown_key` | the registration initiation came from a key that is not listed |
-| `tunnel_auth_failed` | a datagram to a registration tunnel failed authentication |
 
 ## Reload (SIGHUP)
 
