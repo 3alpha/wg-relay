@@ -2,6 +2,7 @@
 name = "wg-relay"
 version = "0.2.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 base64 = "0.22"

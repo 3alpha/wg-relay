@@ -207,3 +207,7 @@ The end-to-end test builds NATed hosts in Linux network namespaces and checks th
 - [How wg-relay works](docs/how-it-works.md): the design, with diagrams.
 - [Reference](docs/reference.md): configuration, forwarding rules, drop reasons, metrics, reload, limitations, tests and code layout.
 - [`relay.example.toml`](relay.example.toml): a config template.
+
+## License
+
+[MIT](LICENSE).
