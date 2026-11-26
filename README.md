@@ -20,15 +20,15 @@ The relay is configured with nothing more than the public keys of the peers that
 - **End-to-end encryption is preserved.** The relay holds no session keys and forwards datagrams byte for byte. A compromised relay can drop traffic, but cannot read or modify it, and cannot add peers.
 - **Many networks on one relay.** Adding a network means adding its server's public key. Networks are isolated from one another by their own WireGuard peer lists.
 - **Minimal configuration.** The relay lists only the peers that must be reachable. Who may connect to them is decided where it always is in WireGuard: in each peer's own config.
-- **Abuse resistance.** Only listed peers can register, and a session is established only when a listed peer answers. Handshakes are rate-limited per source and by separate CPU budgets for forwarding and registration, so a flood cannot stall forwarding and cannot stop registered peers from staying registered; pending handshakes and session entries have a quota per listed peer, so a flood aimed at one network does not refuse handshakes to the others and a misbehaving listed peer cannot fill the session table; session entries expire a fixed time after their handshake, however much traffic arrives; memory stays bounded however many sources appear; and the relay cannot be used as a reflector.
+- **Abuse resistance.** Only configured peers can register, and a session is established only when a configured peer answers. Handshakes are rate-limited per source and by separate CPU budgets for forwarding and registration, so a flood cannot stall forwarding and cannot stop registered peers from staying registered; pending handshakes and session entries have a quota per configured peer, so a flood aimed at one network does not refuse handshakes to the others and a misbehaving configured peer cannot fill the session table; session entries expire a fixed time after their handshake, however much traffic arrives; memory stays bounded however many sources appear; and the relay cannot be used as a reflector.
 - **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 3,200 lines of Rust.
 
 ## How it works
 
 WireGuard leaves a few header fields readable by design. wg-relay routes using only those fields.
 
-1. **Registration.** Each listed peer, typically a server, adds the relay as an ordinary WireGuard peer. This tunnel proves to the relay, cryptographically, at which address the peer can currently be reached, and keeps its NAT mapping open.
-2. **Destination by mac1.** Every handshake carries a MAC keyed with the recipient's public key. The relay tests it against the listed keys and identifies the destination without decrypting anything.
+1. **Registration.** Each configured peer, typically a server, adds the relay as an ordinary WireGuard peer. This tunnel proves to the relay, cryptographically, at which address the peer can currently be reached, and keeps its NAT mapping open.
+2. **Destination by mac1.** Every handshake carries a MAC keyed with the recipient's public key. The relay tests it against the configured keys and identifies the destination without decrypting anything.
 3. **Sessions by index.** Each side announces a random session index in its handshake, in cleartext. The relay records which index belongs to which address, and routes the rest of the session by index.
 
 [How wg-relay works](docs/how-it-works.md) describes the design in detail, with diagrams: the WireGuard protocol, every packet path, the state the relay keeps, roaming and the security model.
@@ -47,11 +47,11 @@ name = "bob-office"
 pubkey = "<bob's server public key>"
 ```
 
-- **Isolation.** A session is established only if the listed peer accepts the other side in its own WireGuard config. Alice's laptop is not a peer of Bob's server, so Bob's server drops its handshakes.
-- **Clients are not listed.** Each network's owner adds and removes their own clients in their server's WireGuard config, without involving the relay operator.
+- **Isolation.** A session is established only if the configured peer accepts the other side in its own WireGuard config. Alice's laptop is not a peer of Bob's server, so Bob's server drops its handshakes.
+- **Clients are not configured on the relay.** Each network's owner adds and removes their own clients in their server's WireGuard config, without involving the relay operator.
 - **Private keys stay private.** The relay operator never sees any network's private keys, and cannot read or join any network's traffic.
 - **Independent addressing.** The relay never sees the addresses inside the tunnels, so networks may use overlapping subnets. The only shared address is the relay's own `tunnel_ip` (`10.99.0.254` by default), which no network should assign to a peer.
-- **Scale.** The relay tests each handshake against the listed keys, eight at a time with SIMD, which is fast enough for thousands of keys. Each listed peer costs about 11 KB of memory for its registration tunnel.
+- **Scale.** The relay tests each handshake against the configured keys, eight at a time with SIMD, which is fast enough for thousands of keys. Each configured peer costs about 11 KB of memory for its registration tunnel.
 
 Changes take effect on `SIGHUP`, without a restart and without disturbing other networks.
 
@@ -68,7 +68,7 @@ cargo build --release
 ```toml
 listen = "0.0.0.0:51820"
 private_key = "<relay private key>"
-tunnel_ip = "10.99.0.254"         # the relay's address inside each listed peer's tunnel
+tunnel_ip = "10.99.0.254"         # the relay's address inside each configured peer's tunnel
 handshake_rate_per_ip = "10/s"
 # workers = 4                     # forwarding threads; default one per CPU
 
@@ -100,7 +100,7 @@ AllowedIPs          = 10.99.0.11/32
 PersistentKeepalive = 25
 ```
 
-**4. Configure the client.** The client is not listed in `relay.toml`. It uses an ordinary configuration in which the server's endpoint is the relay:
+**4. Configure the client.** The client has no entry in `relay.toml`. It uses an ordinary configuration in which the server's endpoint is the relay:
 
 ```ini
 [Interface]
@@ -127,15 +127,15 @@ Keep `PersistentKeepalive` on every peer. It keeps NAT mappings and registration
 
 ## Access control
 
-There is a single rule: **a session is established only when a listed peer answers from its registered address.** Anyone may send a handshake to a listed peer, and the peer's own WireGuard peer list decides whether to answer, so a handshake from an unknown host is dropped there.
+There is a single rule: **a session is established only when a configured peer answers from its endpoint.** Anyone may send a handshake to a configured peer, and the peer's own WireGuard peer list decides whether to answer, so a handshake from an unknown host is dropped there.
 
 | To | Edit |
 |---|---|
 | add or remove a client | the server's WireGuard config |
 | add or remove a network, or make a peer reachable | `relay.toml`, then `SIGHUP` |
-| cut a listed peer off immediately | remove it from `relay.toml`, then `SIGHUP` |
+| cut a configured peer off immediately | remove it from `relay.toml`, then `SIGHUP` |
 
-Listed peers can reach one another in both directions. An unlisted peer can start a handshake with a listed peer, but cannot receive one, so a peer that must be reachable, for example a laptop that a server calls first, can be listed too.
+Configured peers can reach one another in both directions. An unconfigured peer can start a handshake with a configured peer, but cannot receive one, so a peer that must be reachable, for example a laptop that a server calls first, can be added to `relay.toml` too.
 
 ## Trust model
 
@@ -143,7 +143,7 @@ Listed peers can reach one another in both directions. An unlisted peer can star
 |---|---|
 | see which keys communicate, when, and how much | decrypt any traffic |
 | see each host's public IP address and port | inject or modify packets: WireGuard rejects them |
-| drop or delay packets | add a peer: each listed peer's own config decides |
+| drop or delay packets | add a peer: each configured peer's own config decides |
 
 The relay's own private key opens only the registration tunnels, which carry keepalives and pings to `10.99.0.254` and nothing else.
 
@@ -152,10 +152,10 @@ The relay's own private key opens only the registration tunnels, which carry kee
 - **All traffic passes through the relay.** There is no direct peer-to-peer path, so the relay's latency and bandwidth apply.
 - **Network changes interrupt traffic briefly.** When a client changes network, for example from Wi-Fi to mobile data, traffic stops for about 5–15 s until WireGuard performs a new handshake.
 - **A single relay is a single point of failure.** There is no failover.
-- **A listed peer cannot initiate a handshake to an unlisted peer.** Clients normally initiate handshakes themselves, so this rarely matters; a peer that must be reachable can be listed.
-- **The relay cannot cap who uses its bandwidth.** A listed peer can accept any number of unlisted peers; only handshakes are rate-limited.
+- **A configured peer cannot initiate a handshake to an unconfigured peer.** Clients normally initiate handshakes themselves, so this rarely matters; a peer that must be reachable can be added to `relay.toml`.
+- **The relay cannot cap who uses its bandwidth.** A configured peer can accept any number of unconfigured peers; only handshakes are rate-limited.
 - **WireGuard's handshake flood protection is weaker behind the relay.** The relay's per-source rate limit and forwarding budget compensate in part; see [section 3.5 of the guide](docs/how-it-works.md#35-under-load-cookies-and-mac2).
-- **A sustained handshake flood delays new sessions.** Existing sessions keep forwarding, but legitimate handshakes compete with the flood: junk initiations compete with all forwarded handshakes for the forwarding budget, a flood aimed at one listed peer can evict pending handshakes to that peer, and a registration flood delays peers that register from a new address.
+- **A sustained handshake flood delays new sessions.** Existing sessions keep forwarding, but legitimate handshakes compete with the flood: junk initiations compete with all forwarded handshakes for the forwarding budget, a flood aimed at one configured peer can evict pending handshakes to that peer, and a registration flood delays peers that register from a new address.
 - **One flow is forwarded by one core.** The relay forwards on several threads, but the kernel keeps each flow (address pair) on one of them, and handshakes are decided one at a time. Ping replies are IPv4-only, and metrics are written to the log rather than exported.
 
 The [reference](docs/reference.md#limitations) gives the complete list with the reasoning behind each item, and the [guide's security model](docs/how-it-works.md#15-security-model) covers threats and defences.
@@ -178,7 +178,7 @@ cargo build --bins --examples && sudo tests/netns.sh   # end-to-end, with kernel
 cargo build --release --bins --examples && target/release/examples/bench_forward  # throughput on loopback
 ```
 
-The end-to-end test builds a network in Linux network namespaces: a server, two clients and a stranger, each behind its own NAT and running kernel WireGuard. It verifies that both clients connect and the stranger does not, that rekeys work in both directions, including one the server starts towards a listed client, and that `SIGHUP` revokes a removed peer immediately. A packet capture at the relay verifies that the relay's key cannot open forwarded handshakes and that every forwarded packet is byte-identical. The [reference](docs/reference.md#the-namespace-integration-test) explains how to run the test in Docker without root on the host. The benchmark forwards encrypted data packets through a real relay process and prints packets per second and Mbit/s, so builds can be compared; the [reference](docs/reference.md#the-throughput-benchmark) explains what it can and cannot show.
+The end-to-end test builds a network in Linux network namespaces: a server, two clients and a stranger, each behind its own NAT and running kernel WireGuard. It verifies that both clients connect and the stranger does not, that rekeys work in both directions, including one the server starts towards a configured client, and that `SIGHUP` revokes a removed peer immediately. A packet capture at the relay verifies that the relay's key cannot open forwarded handshakes and that every forwarded packet is byte-identical. The [reference](docs/reference.md#the-namespace-integration-test) explains how to run the test in Docker without root on the host. The benchmark forwards encrypted data packets through a real relay process and prints packets per second and Mbit/s, so builds can be compared; the [reference](docs/reference.md#the-throughput-benchmark) explains what it can and cannot show.
 
 ## Documentation
 

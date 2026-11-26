@@ -3,21 +3,21 @@ use std::time::{Duration, Instant};
 use boringtun::noise::TunnResult;
 use tracing::{debug, info};
 
-use super::Control;
+use super::ControlPlane;
 
 /// A step that runs at most once per interval, however often it is offered.
-pub(super) struct Cadence {
+pub(super) struct Throttle {
     interval: Duration,
     last: Option<Instant>,
 }
 
-impl Cadence {
+impl Throttle {
     pub(super) fn new(interval: Duration) -> Self {
-        Cadence { interval, last: None }
+        Throttle { interval, last: None }
     }
 
-    /// Is the step due at `now`? If it is, it counts as run.
-    fn due(&mut self, now: Instant) -> bool {
+    /// May the step run at `now`? If it may, it counts as run.
+    fn try_run(&mut self, now: Instant) -> bool {
         let due = self.last.is_none_or(|t| now.saturating_duration_since(t) >= self.interval);
         if due {
             self.last = Some(now);
@@ -26,16 +26,16 @@ impl Cadence {
     }
 }
 
-impl Control {
+impl ControlPlane {
     /// Run the registration tunnels' timers and, less often, expire soft state.
     /// A tick that comes sooner than `TICK_INTERVAL` after the last one does nothing.
     pub(in crate::relay) fn tick(&mut self, now: Instant) {
-        if !self.ticks.due(now) {
+        if !self.ticks.try_run(now) {
             return;
         }
         self.run_tunnel_timers(now);
-        if self.sweeps.due(now) {
-            self.sweep(now);
+        if self.gc.try_run(now) {
+            self.collect_garbage(now);
         }
     }
 
@@ -46,18 +46,18 @@ impl Control {
             else {
                 continue;
             };
-            if let Some(addr) = self.registry.addr(key, now) {
-                self.outbox.push((addr, out.to_vec()));
+            if let Some(endpoint) = self.registry.endpoint(key, now) {
+                self.tx_queue.push((endpoint, out.to_vec()));
             }
         }
     }
 
     /// Expire stale registrations and sessions.
-    fn sweep(&mut self, now: Instant) {
+    fn collect_garbage(&mut self, now: Instant) {
         for k in self.registry.expire(now) {
             info!(peer = %self.peers.get(&k).map_or("?", |p| &p.name), "registration expired");
         }
-        let gone = self.sessions.expire(now, &self.forwarder.established);
+        let gone = self.sessions.expire(now, &self.data_plane.established);
         if gone > 0 {
             debug!(gone, live = self.sessions.len(), "expired sessions");
         }
@@ -69,11 +69,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cadence_takes_one_offer_per_interval() {
+    fn throttle_takes_one_offer_per_interval() {
         let (t0, ms) = (Instant::now(), Duration::from_millis);
-        let mut cadence = Cadence::new(ms(250));
+        let mut throttle = Throttle::new(ms(250));
         let offered = [0, 10, 249, 250, 260, 499, 500, 900, 900];
-        let due = offered.map(|t| cadence.due(t0 + ms(t)));
-        assert_eq!(due, [true, false, false, true, false, false, true, true, false]);
+        let ran = offered.map(|t| throttle.try_run(t0 + ms(t)));
+        assert_eq!(ran, [true, false, false, true, false, false, true, true, false]);
     }
 }

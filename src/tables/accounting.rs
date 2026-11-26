@@ -1,27 +1,27 @@
 use std::collections::{HashMap, VecDeque};
 
-use super::entry::{Session, SessionState};
+use super::session::{Session, SessionState};
 use super::sessions::SessionLimits;
 use super::shrink_if_sparse;
-use crate::key::PeerKey;
-use crate::packet::SessionIdx;
+use crate::key::PublicKey;
+use crate::message::SessionIndex;
 
 /// The per-peer and pending accounts of a session table, kept exact so its
 /// quotas never need a scan.
-pub(super) struct Ledger {
+pub(super) struct SessionAccounting {
     limits: SessionLimits,
-    /// Entries in the pending state, live or not yet swept.
+    /// Entries in the pending state, live or not yet collected.
     pending: usize,
-    /// Each listed peer's pending indexes, oldest first, so a flood aimed at one
+    /// Each configured peer's pending indexes, oldest first, so a flood aimed at one
     /// peer evicts its own entries instead of crowding out other peers.
-    pending_by_peer: HashMap<PeerKey, VecDeque<SessionIdx>>,
-    /// Entries of any state, live or not yet swept, per listed peer.
-    count_by_peer: HashMap<PeerKey, usize>,
+    pending_by_peer: HashMap<PublicKey, VecDeque<SessionIndex>>,
+    /// Entries of any state, live or not yet collected, per configured peer.
+    count_by_peer: HashMap<PublicKey, usize>,
 }
 
-impl Ledger {
+impl SessionAccounting {
     pub(super) fn new(limits: SessionLimits) -> Self {
-        Ledger {
+        SessionAccounting {
             limits,
             pending: 0,
             pending_by_peer: HashMap::new(),
@@ -34,27 +34,27 @@ impl Ledger {
     }
 
     /// Would another entry for `peer` exceed its quota?
-    pub(super) fn at_quota(&self, peer: &PeerKey) -> bool {
+    pub(super) fn at_quota(&self, peer: &PublicKey) -> bool {
         self.count_by_peer.get(peer).is_some_and(|n| *n >= self.limits.per_peer)
     }
 
-    /// Count an entry just stored at `idx`.
-    pub(super) fn added(&mut self, idx: SessionIdx, s: &Session) {
+    /// Count an entry just stored at `index`.
+    pub(super) fn added(&mut self, index: SessionIndex, s: &Session) {
         *self.count_by_peer.entry(s.peer).or_default() += 1;
         match s.state {
             SessionState::Pending => {
                 self.pending += 1;
-                self.pending_by_peer.entry(s.peer).or_default().push_back(idx);
+                self.pending_by_peer.entry(s.peer).or_default().push_back(index);
             }
             SessionState::Established => {}
         }
     }
 
-    /// Account for the entry at `idx`, routed to `peer`, no longer being pending.
-    pub(super) fn left_pending(&mut self, idx: SessionIdx, peer: &PeerKey) {
+    /// Account for the entry at `index`, routed to `peer`, no longer being pending.
+    pub(super) fn left_pending(&mut self, index: SessionIndex, peer: &PublicKey) {
         self.pending -= 1;
         let Some(queue) = self.pending_by_peer.get_mut(peer) else { return };
-        if let Some(i) = queue.iter().position(|q| *q == idx) {
+        if let Some(i) = queue.iter().position(|q| *q == index) {
             queue.remove(i);
         }
         if queue.is_empty() {
@@ -62,17 +62,17 @@ impl Ledger {
         }
     }
 
-    /// Uncount the entry at `idx`, just replaced or evicted.
-    pub(super) fn removed(&mut self, idx: SessionIdx, s: &Session) {
+    /// Uncount the entry at `index`, just replaced or evicted.
+    pub(super) fn removed(&mut self, index: SessionIndex, s: &Session) {
         match s.state {
-            SessionState::Pending => self.left_pending(idx, &s.peer),
+            SessionState::Pending => self.left_pending(index, &s.peer),
             SessionState::Established => {}
         }
         self.uncount(&s.peer);
     }
 
     /// The pending entry `peer` must give up, its oldest, if it is over its pending quota.
-    pub(super) fn evictable(&self, peer: &PeerKey) -> Option<SessionIdx> {
+    pub(super) fn evictable(&self, peer: &PublicKey) -> Option<SessionIndex> {
         let queue = self.pending_by_peer.get(peer)?;
         queue.front().copied().filter(|_| queue.len() > self.limits.pending_per_peer)
     }
@@ -81,12 +81,12 @@ impl Ledger {
     /// Queues are pruned in one pass afterwards, not searched once per entry.
     pub(super) fn retain(
         &mut self,
-        map: &mut HashMap<SessionIdx, Session>,
-        mut keep: impl FnMut(SessionIdx, &Session) -> bool,
+        map: &mut HashMap<SessionIndex, Session>,
+        mut keep: impl FnMut(SessionIndex, &Session) -> bool,
     ) {
         let pending_before = self.pending;
-        map.retain(|idx, s| {
-            let kept = keep(*idx, s);
+        map.retain(|index, s| {
+            let kept = keep(*index, s);
             if !kept {
                 self.forget(s);
             }
@@ -113,7 +113,7 @@ impl Ledger {
         self.uncount(&s.peer);
     }
 
-    fn uncount(&mut self, peer: &PeerKey) {
+    fn uncount(&mut self, peer: &PublicKey) {
         let Some(n) = self.count_by_peer.get_mut(peer) else { return };
         *n -= 1;
         if *n == 0 {
@@ -126,18 +126,18 @@ impl Ledger {
 use std::collections::HashSet;
 
 #[cfg(test)]
-impl Ledger {
+impl SessionAccounting {
     /// Do the accounts describe `map` exactly, with no duplicate, empty queue or zero count?
-    pub(super) fn matches(&self, map: &HashMap<SessionIdx, Session>) -> bool {
-        let mut counts: HashMap<PeerKey, usize> = HashMap::new();
-        let mut pending: HashMap<PeerKey, HashSet<SessionIdx>> = HashMap::new();
-        for (idx, s) in map {
+    pub(super) fn matches(&self, map: &HashMap<SessionIndex, Session>) -> bool {
+        let mut counts: HashMap<PublicKey, usize> = HashMap::new();
+        let mut pending: HashMap<PublicKey, HashSet<SessionIndex>> = HashMap::new();
+        for (index, s) in map {
             *counts.entry(s.peer).or_default() += 1;
             if s.state == SessionState::Pending {
-                pending.entry(s.peer).or_default().insert(*idx);
+                pending.entry(s.peer).or_default().insert(*index);
             }
         }
-        let queued: HashMap<PeerKey, HashSet<SessionIdx>> = self
+        let queued: HashMap<PublicKey, HashSet<SessionIndex>> = self
             .pending_by_peer
             .iter()
             .map(|(peer, queue)| (*peer, queue.iter().copied().collect()))
@@ -148,11 +148,11 @@ impl Ledger {
     }
 
     /// The pending indexes of `peer`, oldest first.
-    pub(super) fn queue(&self, peer: &PeerKey) -> Vec<SessionIdx> {
+    pub(super) fn queue(&self, peer: &PublicKey) -> Vec<SessionIndex> {
         self.pending_by_peer.get(peer).map(|q| q.iter().copied().collect()).unwrap_or_default()
     }
 
-    pub(super) fn count(&self, peer: &PeerKey) -> usize {
+    pub(super) fn count(&self, peer: &PublicKey) -> usize {
         self.count_by_peer.get(peer).copied().unwrap_or_default()
     }
 
@@ -174,11 +174,11 @@ mod tests {
     }
 
     #[test]
-    fn ledger_tracks_counts_queues_and_the_entry_to_evict() {
+    fn accounting_tracks_counts_queues_and_the_entry_to_evict() {
         let limits = SessionLimits { pending_per_peer: 2, per_peer: 3, total: usize::MAX };
-        let mut l = Ledger::new(limits);
+        let mut l = SessionAccounting::new(limits);
         let (p, e) = (SessionState::Pending, SessionState::Established);
-        let peer = PeerKey::from([1; 32]);
+        let peer = PublicKey::from([1; 32]);
         for i in 1..=3u32 {
             l.added(i.into(), &entry(1, p));
         }

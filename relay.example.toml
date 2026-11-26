@@ -16,8 +16,8 @@ handshake_rate_per_ip = "10/s"
 
 # The peers that must be reachable, usually the servers. Each one adds the
 # relay as a WireGuard peer and registers with it. Anyone may start a
-# handshake with a listed peer; its own WireGuard peer list decides who gets
-# in. Unlisted peers (laptops, phones) need no entry here.
+# handshake with a configured peer; its own WireGuard peer list decides who
+# gets in. Unconfigured peers (laptops, phones) need no entry here.
 [[peer]]
 name = "home"
 pubkey = "<base64 public key of the server>"

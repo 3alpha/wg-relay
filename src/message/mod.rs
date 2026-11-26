@@ -8,50 +8,50 @@ use blake2s_simd::many::{HashManyJob, hash_many};
 pub mod error;
 pub use error::ParseError;
 
-pub const INIT_LEN: usize = 148;
-pub const RESP_LEN: usize = 92;
-pub const COOKIE_LEN: usize = 64;
-pub const DATA_MIN_LEN: usize = 32;
+pub const HANDSHAKE_INITIATION_LEN: usize = 148;
+pub const HANDSHAKE_RESPONSE_LEN: usize = 92;
+pub const COOKIE_REPLY_LEN: usize = 64;
+pub const TRANSPORT_DATA_MIN_LEN: usize = 32;
 /// Offset of mac1 = number of bytes the MAC covers.
-const INIT_MAC1_OFF: usize = 116;
-const RESP_MAC1_OFF: usize = 60;
+const HANDSHAKE_INITIATION_MAC1_OFFSET: usize = 116;
+const HANDSHAKE_RESPONSE_MAC1_OFFSET: usize = 60;
 const MAC1_LEN: usize = 16;
 /// Keys tried per SIMD batch: the widest lane count blake2s_simd uses (AVX2).
 const MAC1_BATCH: usize = 8;
 
-/// A WireGuard index, as carried in `sender_idx` and `receiver_idx`. Each
-/// side picks one per handshake; later messages to it carry it as `receiver_idx`.
+/// A WireGuard index, as carried in `sender_index` and `receiver_index`. Each
+/// side picks one per handshake; later messages to it carry it as `receiver_index`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SessionIdx(u32);
+pub struct SessionIndex(u32);
 
-impl SessionIdx {
+impl SessionIndex {
     /// The upper 24 bits, which tell whether a registration tunnel owns the index.
-    pub fn prefix(self) -> IdxPrefix {
-        IdxPrefix(self.0 >> 8)
+    pub fn prefix(self) -> IndexPrefix {
+        IndexPrefix(self.0 >> 8)
     }
 }
 
-impl fmt::Display for SessionIdx {
+impl fmt::Display for SessionIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:#010x}", self.0)
     }
 }
 
-impl From<u32> for SessionIdx {
-    fn from(idx: u32) -> Self {
-        SessionIdx(idx)
+impl From<u32> for SessionIndex {
+    fn from(index: u32) -> Self {
+        SessionIndex(index)
     }
 }
 
 /// The upper 24 bits of a session index. boringtun numbers a tunnel's
 /// sessions `prefix << 8 | counter`, so each prefix covers 256 indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct IdxPrefix(u32);
+pub struct IndexPrefix(u32);
 
-impl IdxPrefix {
+impl IndexPrefix {
     /// Build a prefix from any 32-bit value, keeping its low 24 bits.
     pub fn from_bits(bits: u32) -> Self {
-        IdxPrefix(bits & 0x00ff_ffff)
+        IndexPrefix(bits & 0x00ff_ffff)
     }
 
     /// The value boringtun's `Tunn::new` takes as its index.
@@ -64,29 +64,29 @@ impl IdxPrefix {
 /// the WireGuard spec. Types 1 and 2 are handshake messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Message {
-    HandshakeInitiation { sender: SessionIdx },
-    HandshakeResponse { sender: SessionIdx, receiver: SessionIdx },
-    CookieReply { receiver: SessionIdx },
-    TransportData { receiver: SessionIdx },
+    HandshakeInitiation { sender_index: SessionIndex },
+    HandshakeResponse { sender_index: SessionIndex, receiver_index: SessionIndex },
+    CookieReply { receiver_index: SessionIndex },
+    TransportData { receiver_index: SessionIndex },
 }
 
 impl Message {
     /// The index this message is addressed to; a handshake initiation has none yet.
-    pub fn receiver(self) -> Option<SessionIdx> {
+    pub fn receiver_index(self) -> Option<SessionIndex> {
         match self {
             Message::HandshakeInitiation { .. } => None,
-            Message::HandshakeResponse { receiver, .. }
-            | Message::CookieReply { receiver }
-            | Message::TransportData { receiver } => Some(receiver),
+            Message::HandshakeResponse { receiver_index, .. }
+            | Message::CookieReply { receiver_index }
+            | Message::TransportData { receiver_index } => Some(receiver_index),
         }
     }
 }
 
 /// Read the little-endian index at `off`.
-fn idx(b: &[u8], off: usize) -> Result<SessionIdx, ParseError> {
+fn index(b: &[u8], off: usize) -> Result<SessionIndex, ParseError> {
     b.get(off..off + 4)
         .and_then(|s| <[u8; 4]>::try_from(s).ok())
-        .map(|b| SessionIdx(u32::from_le_bytes(b)))
+        .map(|b| SessionIndex(u32::from_le_bytes(b)))
         .ok_or(ParseError::TooShort)
 }
 
@@ -102,19 +102,22 @@ pub fn parse(b: &[u8]) -> Result<Message, ParseError> {
     let exact = |n: usize| if b.len() == n { Ok(()) } else { Err(bad_length) };
     match b[0] {
         1 => {
-            exact(INIT_LEN)?;
-            Ok(Message::HandshakeInitiation { sender: idx(b, 4)? })
+            exact(HANDSHAKE_INITIATION_LEN)?;
+            Ok(Message::HandshakeInitiation { sender_index: index(b, 4)? })
         }
         2 => {
-            exact(RESP_LEN)?;
-            Ok(Message::HandshakeResponse { sender: idx(b, 4)?, receiver: idx(b, 8)? })
+            exact(HANDSHAKE_RESPONSE_LEN)?;
+            Ok(Message::HandshakeResponse {
+                sender_index: index(b, 4)?,
+                receiver_index: index(b, 8)?,
+            })
         }
         3 => {
-            exact(COOKIE_LEN)?;
-            Ok(Message::CookieReply { receiver: idx(b, 4)? })
+            exact(COOKIE_REPLY_LEN)?;
+            Ok(Message::CookieReply { receiver_index: index(b, 4)? })
         }
-        4 if b.len() < DATA_MIN_LEN => Err(bad_length),
-        4 => Ok(Message::TransportData { receiver: idx(b, 4)? }),
+        4 if b.len() < TRANSPORT_DATA_MIN_LEN => Err(bad_length),
+        4 => Ok(Message::TransportData { receiver_index: index(b, 4)? }),
         t => Err(ParseError::BadType(t)),
     }
 }
@@ -147,35 +150,35 @@ impl Mac1Key {
 /// Split a handshake message into the bytes mac1 covers and mac1 itself.
 fn mac1_parts(datagram: &[u8]) -> Option<(&[u8], &[u8])> {
     let off = match (datagram.first(), datagram.len()) {
-        (Some(1), INIT_LEN) => INIT_MAC1_OFF,
-        (Some(2), RESP_LEN) => RESP_MAC1_OFF,
+        (Some(1), HANDSHAKE_INITIATION_LEN) => HANDSHAKE_INITIATION_MAC1_OFFSET,
+        (Some(2), HANDSHAKE_RESPONSE_LEN) => HANDSHAKE_RESPONSE_MAC1_OFFSET,
         _ => return None,
     };
     Some((&datagram[..off], &datagram[off..off + MAC1_LEN]))
 }
 
-/// The outcome of searching keys for the one a handshake message's mac1 was made for.
+/// The outcome of looking up the key a handshake message's mac1 was made for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Mac1Search {
+pub struct Mac1Lookup {
     /// Index of the matching key.
     pub found: Option<usize>,
-    /// How many keys were hashed, the cost of the search.
+    /// How many keys were hashed, the cost of the lookup.
     pub tried: usize,
 }
 
 /// Find the key `datagram`'s mac1 was made for, hashing several keys at once with SIMD.
-pub fn find_mac1(keys: &[Mac1Key], datagram: &[u8]) -> Mac1Search {
-    let mut search = Mac1Search { found: None, tried: 0 };
-    let Some((covered, tag)) = mac1_parts(datagram) else { return search };
+pub fn find_mac1(keys: &[Mac1Key], datagram: &[u8]) -> Mac1Lookup {
+    let mut lookup = Mac1Lookup { found: None, tried: 0 };
+    let Some((covered, tag)) = mac1_parts(datagram) else { return lookup };
     for (n, batch) in keys.chunks(MAC1_BATCH).enumerate() {
         let mut jobs: [Option<HashManyJob<'_>>; MAC1_BATCH] =
             std::array::from_fn(|i| batch.get(i).map(|k| HashManyJob::new(&k.0, covered)));
         hash_many(jobs.iter_mut().flatten());
-        search.tried += batch.len();
+        lookup.tried += batch.len();
         if let Some(i) = jobs.iter().flatten().position(|j| j.to_hash() == *tag) {
-            search.found = Some(n * MAC1_BATCH + i);
+            lookup.found = Some(n * MAC1_BATCH + i);
             break;
         }
     }
-    search
+    lookup
 }

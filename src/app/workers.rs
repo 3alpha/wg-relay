@@ -20,7 +20,7 @@ pub(super) struct Workers {
     threads: Vec<JoinHandle<io::Result<()>>>,
     /// Each thread's counters as of its last batch.
     counters: Vec<Arc<Mutex<Metrics>>>,
-    /// A handle on the relay the threads share, for the control half's counters.
+    /// A handle on the relay the threads share, for the control plane's counters.
     relay: Relay,
     stop: watch::Sender<bool>,
 }
@@ -39,7 +39,7 @@ impl Workers {
         for (index, (socket, counters)) in sockets.into_iter().zip(counters).enumerate() {
             let (relay, stopped) = (relay.share(), stopped.clone());
             let spawned = thread::Builder::new()
-                .name(format!("forward-{index}"))
+                .name(format!("worker-{index}"))
                 .spawn(move || forwarding::run(socket, relay, stopped, &counters));
             match spawned {
                 Ok(thread) => workers.threads.push(thread),
@@ -62,7 +62,7 @@ impl Workers {
         self.threads.iter().position(JoinHandle::is_finished)
     }
 
-    /// Every thread's counters as of its last batch, and the control half's, merged.
+    /// Every thread's counters as of its last batch, and the control plane's, merged.
     pub(super) fn metrics(&self) -> Metrics {
         let mut all = self.relay.metrics();
         for c in &self.counters {
@@ -92,10 +92,10 @@ fn join(index: usize, thread: JoinHandle<io::Result<()>>) -> Result<(), AppError
 }
 
 /// The configured thread count, or one where `SO_REUSEPORT` does not spread UDP flows.
-pub(super) fn count(cfg: &Config) -> NonZeroUsize {
-    if cfg!(target_os = "linux") || cfg.workers == NonZeroUsize::MIN {
-        return cfg.workers;
+pub(super) fn count(config: &Config) -> NonZeroUsize {
+    if cfg!(target_os = "linux") || config.workers == NonZeroUsize::MIN {
+        return config.workers;
     }
-    warn!(workers = cfg.workers, "only Linux spreads one port's flows across sockets, using 1");
+    warn!(workers = config.workers, "only Linux spreads one port's flows across sockets, using 1");
     NonZeroUsize::MIN
 }

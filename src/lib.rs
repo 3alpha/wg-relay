@@ -4,6 +4,6 @@
 pub mod config;
 pub mod error;
 pub mod key;
-pub mod packet;
+pub mod message;
 pub mod relay;
 pub(crate) mod tables;

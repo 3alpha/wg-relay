@@ -1,6 +1,6 @@
 //! One forwarding thread: it receives a batch, decides each datagram, sends
 //! the forwarded ones in GSO runs, offers the relay a timer tick every
-//! `TICK_INTERVAL`, and after either sends whatever the control half queued.
+//! `TICK_INTERVAL`, and after either sends whatever the control plane queued.
 
 use std::io;
 use std::sync::{Mutex, PoisonError};
@@ -16,7 +16,7 @@ use crate::udp::runs::{self, Datagram, Limits, Piece, Plan, Run};
 use crate::udp::{Bound, MAX_GSO_BYTES, RecvBatch, Socket};
 
 /// Run one forwarding thread on a runtime of its own until `stop` changes,
-/// keeping `counters` at its relay handle's counters as of its last wake-up.
+/// keeping `counters` at its relay handle's local metrics as of its last wake-up.
 pub(super) fn run(
     socket: Bound,
     relay: Relay,
@@ -24,7 +24,7 @@ pub(super) fn run(
     counters: &Mutex<Metrics>,
 ) -> io::Result<()> {
     super::runtime()?.block_on(async {
-        let mut wire = Wire { sock: socket.register()?, relay };
+        let mut worker = Worker { sock: socket.into_async()?, relay };
         let mut batch = Batch::default();
         let mut ticks = tokio::time::interval(TICK_INTERVAL);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -35,33 +35,33 @@ pub(super) fn run(
                 _ = stop.changed() => return Ok(()),
                 // The time the tick was due, not when it ran: one thread's ticks are
                 // then exactly `TICK_INTERVAL` apart, and the relay never skips one.
-                due = ticks.tick() => wire.relay.tick(due.into_std()),
-                readable = wire.sock.readable() => match readable {
-                    Ok(()) => batch.forward(&mut wire).await,
-                    Err(e) => wire.recv_failed(&e),
+                due = ticks.tick() => worker.relay.tick(due.into_std()),
+                readable = worker.sock.readable() => match readable {
+                    Ok(()) => batch.forward(&mut worker).await,
+                    Err(e) => worker.recv_failed(&e),
                 },
             }
-            wire.send_outbox().await;
+            worker.send_tx_queue().await;
             counters
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .clone_from(wire.relay.counters());
+                .clone_from(worker.relay.local_metrics());
         }
     })
 }
 
 /// One thread's socket and its handle on the relay, which decides the
 /// socket's datagrams and counts its failures.
-struct Wire {
+struct Worker {
     sock: Socket,
     relay: Relay,
 }
 
-impl Wire {
+impl Worker {
     /// Send what the registration tunnels queued, whichever thread's datagram
     /// or tick made them: every socket has the same address.
-    async fn send_outbox(&mut self) {
-        for (dst, datagram) in self.relay.take_outbox() {
+    async fn send_tx_queue(&mut self) {
+        for (dst, datagram) in self.relay.drain_tx_queue() {
             let t = Transmit {
                 destination: dst,
                 ecn: None,
@@ -99,7 +99,7 @@ impl Wire {
     /// peer can make them happen at packet rate (e.g. an unreachable destination).
     async fn send(&mut self, t: &Transmit<'_>) {
         if let Err(e) = self.sock.send(t).await {
-            self.relay.record_send_error();
+            self.relay.record_tx_error();
             debug!(dst = %t.destination, error = %e, "send failed");
         }
     }
@@ -107,7 +107,7 @@ impl Wire {
     /// Count a failed receive and log it at debug: whether ICMP errors surface
     /// here depends on the platform and socket options, so a remote host may drive it.
     fn recv_failed(&mut self, e: &io::Error) {
-        self.relay.record_recv_error();
+        self.relay.record_rx_error();
         debug!(error = %e, "recv failed");
     }
 }
@@ -124,31 +124,31 @@ struct Batch {
 }
 
 impl Batch {
-    /// Receive one batch on `wire` and forward what it holds. Doing one batch
+    /// Receive one batch on `worker` and forward what it holds. Doing one batch
     /// per wake-up and charging the runtime's cooperative budget per buffer
     /// makes the thread yield regularly under load.
-    async fn forward(&mut self, wire: &mut Wire) {
+    async fn forward(&mut self, worker: &mut Worker) {
         let Batch { rx, datagrams, plan, joined } = self;
-        match wire.sock.try_recv(rx) {
+        match worker.sock.try_recv(rx) {
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
-            Err(e) => return wire.recv_failed(&e),
+            Err(e) => return worker.recv_failed(&e),
         }
         let now = Instant::now();
         datagrams.clear();
         for (buf, (meta, data)) in rx.received().enumerate() {
             for seg in runs::segments(data.len(), meta.stride) {
                 let datagram = data.get(seg).unwrap_or_default();
-                let verdict = wire.relay.handle(meta.addr, datagram, now);
+                let verdict = worker.relay.handle(meta.addr, datagram, now);
                 datagrams.push(Datagram { buf, len: datagram.len(), verdict, ecn: meta.ecn });
             }
             tokio::task::consume_budget().await;
         }
-        let limits = Limits { max_segments: wire.sock.gso_segments(), max_bytes: MAX_GSO_BYTES };
+        let limits = Limits { max_segments: worker.sock.gso_segments(), max_bytes: MAX_GSO_BYTES };
         plan.make(datagrams, limits);
         for run in &plan.runs {
             let pieces = plan.pieces.get(run.pieces.clone()).unwrap_or_default();
-            wire.send_run(gather(rx, pieces, joined), run).await;
+            worker.send_run(gather(rx, pieces, joined), run).await;
         }
     }
 }

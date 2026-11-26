@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
-use x25519_dalek::{PublicKey, StaticSecret};
+use x25519_dalek::StaticSecret;
 
 pub mod error;
 pub use error::KeyError;
@@ -18,41 +18,41 @@ fn decode(s: &str) -> Result<[u8; 32], KeyError> {
 /// A peer's X25519 public key; displays as base64.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(try_from = "String")]
-pub struct PeerKey([u8; 32]);
+pub struct PublicKey([u8; 32]);
 
-impl PeerKey {
+impl PublicKey {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
 
-impl From<[u8; 32]> for PeerKey {
+impl From<[u8; 32]> for PublicKey {
     fn from(bytes: [u8; 32]) -> Self {
-        PeerKey(bytes)
+        PublicKey(bytes)
     }
 }
 
-impl From<PublicKey> for PeerKey {
-    fn from(pk: PublicKey) -> Self {
-        PeerKey(pk.to_bytes())
+impl From<x25519_dalek::PublicKey> for PublicKey {
+    fn from(pk: x25519_dalek::PublicKey) -> Self {
+        PublicKey(pk.to_bytes())
     }
 }
 
-impl From<PeerKey> for PublicKey {
-    fn from(k: PeerKey) -> Self {
-        PublicKey::from(k.0)
+impl From<PublicKey> for x25519_dalek::PublicKey {
+    fn from(k: PublicKey) -> Self {
+        x25519_dalek::PublicKey::from(k.0)
     }
 }
 
-impl FromStr for PeerKey {
+impl FromStr for PublicKey {
     type Err = KeyError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        decode(s).map(PeerKey)
+        decode(s).map(PublicKey)
     }
 }
 
-impl TryFrom<String> for PeerKey {
+impl TryFrom<String> for PublicKey {
     type Error = KeyError;
 
     fn try_from(s: String) -> Result<Self, Self::Error> {
@@ -60,15 +60,15 @@ impl TryFrom<String> for PeerKey {
     }
 }
 
-impl fmt::Display for PeerKey {
+impl fmt::Display for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&STANDARD.encode(self.0))
     }
 }
 
-impl fmt::Debug for PeerKey {
+impl fmt::Debug for PublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PeerKey({self})")
+        write!(f, "PublicKey({self})")
     }
 }
 
@@ -82,8 +82,8 @@ impl PrivateKey {
         &self.0
     }
 
-    pub fn public_key(&self) -> PeerKey {
-        PublicKey::from(&self.0).into()
+    pub fn public_key(&self) -> PublicKey {
+        x25519_dalek::PublicKey::from(&self.0).into()
     }
 }
 

@@ -10,13 +10,13 @@
 # inbound dropped). Tunnel IPs: srv 10.99.0.1, c1 .11, c2 .12, st .13, relay .254.
 # The relay runs three forwarding threads, each with its own socket.
 # relay.toml lists srv and c2, which register with the relay; c1 and st are
-# unlisted. The server has c1 and c2 as peers; st (stranger) is not one of them,
+# unconfigured. The server has c1 and c2 as peers; st (stranger) is not one of them,
 # although it knows the server's public key. The test asserts:
 #   1. srv and c2 register with the relay
-#   2. c1 (unlisted) and c2 (listed) ping the server
+#   2. c1 (unconfigured) and c2 (configured) ping the server
 #   3. the stranger gets nothing through; a capture on the server's LAN shows
 #      its handshakes reach the server, which drops them
-#   4. pings still work after rekeys: server-initiated towards c2 (listed),
+#   4. pings still work after rekeys: server-initiated towards c2 (configured),
 #      client-initiated for c1 and c2
 #   5. SIGHUP after removing srv cuts its sessions off immediately
 #   6. the relay capture: forwarded handshakes cannot be opened with the relay
@@ -98,7 +98,7 @@ for k in relay "${HOSTS[@]}"; do
 done
 pub() { cat "$WORK/$1.pub"; }
 
-write_config() { # listed peers...
+write_config() { # configured peers...
     {
         echo "private_key = \"$(cat "$WORK/relay.key")\""
         echo "handshake_rate_per_ip = \"10/s\""
@@ -119,7 +119,7 @@ setup_wg() {
         local peers
         case $h in
             srv) peers="relay c1 c2" ;; # the server does not know the stranger
-            c2) peers="relay srv" ;;    # listed, so it registers too
+            c2) peers="relay srv" ;;    # configured, so it registers too
             *) peers="srv" ;;
         esac
         x "$h" ip link del wg0 2>/dev/null || true
@@ -165,14 +165,14 @@ step "1. srv and c2 register"
 retry_ping srv 10.99.0.254 15 || fail "srv not registered"
 retry_ping c2 10.99.0.254 15 || fail "c2 not registered"
 
-step "2. c1 (unlisted) and c2 (listed) ping the server"
+step "2. c1 (unconfigured) and c2 (configured) ping the server"
 must_ping c1 10.99.0.1
 must_ping c2 10.99.0.1
 
 step "3. the stranger gets nothing through"
 no_ping st 10.99.0.1
 
-step "4a. server-initiated rekey towards c2 (listed)"
+step "4a. server-initiated rekey towards c2 (configured)"
 x srv wg set wg0 peer "$(pub c2)" remove
 # shellcheck disable=SC2046
 x srv wg set wg0 $(peer_args c2)

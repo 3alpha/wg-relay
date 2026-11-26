@@ -3,7 +3,7 @@
 
 use boringtun::noise::{Tunn, TunnResult};
 use rand_core::OsRng;
-use wg_relay::packet::Mac1Key;
+use wg_relay::message::Mac1Key;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 #[derive(Clone)]
@@ -14,7 +14,7 @@ pub struct Key {
 
 impl Key {
     /// The public key as the relay identifies peers.
-    pub fn id(&self) -> wg_relay::key::PeerKey {
+    pub fn id(&self) -> wg_relay::key::PublicKey {
         self.pk.into()
     }
 }
@@ -94,20 +94,20 @@ pub fn ping(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
 }
 
 /// Overwrite an initiation's sender index and recompute mac1 for `recipient`.
-pub fn with_sender(init: &[u8], sender: u32, recipient: &PublicKey) -> Vec<u8> {
+pub fn with_sender(init: &[u8], sender_index: u32, recipient: &PublicKey) -> Vec<u8> {
     let mut p = init.to_vec();
-    p[4..8].copy_from_slice(&sender.to_le_bytes());
+    p[4..8].copy_from_slice(&sender_index.to_le_bytes());
     let mac = Mac1Key::new(recipient.as_bytes()).mac(&p[..116]);
     p[116..132].copy_from_slice(&mac);
     p
 }
 
 /// A response-shaped datagram with chosen indexes and a valid mac1 for `recipient`.
-pub fn forged_response(sender: u32, receiver: u32, recipient: &PublicKey) -> Vec<u8> {
+pub fn forged_response(sender_index: u32, receiver_index: u32, recipient: &PublicKey) -> Vec<u8> {
     let mut p = vec![0u8; 92];
     p[0] = 2;
-    p[4..8].copy_from_slice(&sender.to_le_bytes());
-    p[8..12].copy_from_slice(&receiver.to_le_bytes());
+    p[4..8].copy_from_slice(&sender_index.to_le_bytes());
+    p[8..12].copy_from_slice(&receiver_index.to_le_bytes());
     let mac = Mac1Key::new(recipient.as_bytes()).mac(&p[..60]);
     p[60..76].copy_from_slice(&mac);
     p

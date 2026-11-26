@@ -1,31 +1,31 @@
 use std::fmt;
 use std::net::SocketAddr;
 
-use crate::packet::ParseError;
-use crate::tables::Refusal;
+use crate::message::ParseError;
+use crate::tables::InsertError;
 
 // Generates the enum, its `ALL` list and its `Display` names from one table,
 // so a new reason cannot be added without a counter name. In the order the
-// relay checks them: the forwarding half's checks, the per-source limit, then
+// relay checks them: the data plane's checks, the per-source limit, then
 // registration, forwarded initiations and the session lookups.
-macro_rules! reasons {
+macro_rules! drop_reasons {
     ($($v:ident => $s:literal),* $(,)?) => {
         /// Why a datagram was dropped. Each has its own counter.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub enum Reason { $($v),* }
-        impl Reason {
-            pub const ALL: &'static [Reason] = &[$(Reason::$v),*];
+        pub enum DropReason { $($v),* }
+        impl DropReason {
+            pub const ALL: &'static [DropReason] = &[$(DropReason::$v),*];
             pub const COUNT: usize = Self::ALL.len();
         }
-        impl fmt::Display for Reason {
+        impl fmt::Display for DropReason {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(match self { $(Reason::$v => $s),* })
+                f.write_str(match self { $(DropReason::$v => $s),* })
             }
         }
     };
 }
 
-reasons! {
+drop_reasons! {
     InvalidSource => "invalid_source",
     Malformed => "malformed",
     RateLimited => "rate_limited",
@@ -51,9 +51,9 @@ reasons! {
 pub enum Verdict {
     /// Send it, unchanged, to this address.
     Forward(SocketAddr),
-    /// Taken by a listed peer's registration tunnel with the relay.
-    Consumed,
-    Drop(Reason),
+    /// Taken by a configured peer's registration tunnel with the relay.
+    DeliveredLocally,
+    Drop(DropReason),
 }
 
 /// What became of a datagram that was not dropped.
@@ -61,32 +61,32 @@ pub enum Verdict {
 pub(crate) enum Accepted {
     /// Send it, unchanged, to this address.
     Forward(SocketAddr),
-    /// Taken by a listed peer's registration tunnel with the relay.
-    Consumed,
+    /// Taken by a configured peer's registration tunnel with the relay.
+    DeliveredLocally,
 }
 
-impl From<Result<Accepted, Reason>> for Verdict {
-    fn from(outcome: Result<Accepted, Reason>) -> Self {
+impl From<Result<Accepted, DropReason>> for Verdict {
+    fn from(outcome: Result<Accepted, DropReason>) -> Self {
         match outcome {
             Ok(Accepted::Forward(dst)) => Verdict::Forward(dst),
-            Ok(Accepted::Consumed) => Verdict::Consumed,
+            Ok(Accepted::DeliveredLocally) => Verdict::DeliveredLocally,
             Err(reason) => Verdict::Drop(reason),
         }
     }
 }
 
-impl From<ParseError> for Reason {
+impl From<ParseError> for DropReason {
     fn from(_: ParseError) -> Self {
-        Reason::Malformed
+        DropReason::Malformed
     }
 }
 
-impl From<Refusal> for Reason {
-    fn from(refusal: Refusal) -> Self {
-        match refusal {
-            Refusal::IndexInUse => Reason::IndexInUse,
-            Refusal::PeerQuota => Reason::PeerQuota,
-            Refusal::Full => Reason::TooManySessions,
+impl From<InsertError> for DropReason {
+    fn from(error: InsertError) -> Self {
+        match error {
+            InsertError::IndexInUse => DropReason::IndexInUse,
+            InsertError::PeerQuota => DropReason::PeerQuota,
+            InsertError::Full => DropReason::TooManySessions,
         }
     }
 }

@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::key::{PeerKey, PrivateKey};
+use crate::key::{PrivateKey, PublicKey};
 
 pub mod error;
 mod rate;
@@ -55,12 +55,12 @@ fn parse_workers(n: usize) -> Result<NonZeroUsize, ConfigError> {
         .ok_or(ConfigError::Workers { got: n, max: MAX_WORKERS })
 }
 
-/// A listed peer: it registers with the relay, and anyone may handshake with it.
+/// A configured peer: it registers with the relay, and anyone may handshake with it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Peer {
     pub name: String,
-    pub pubkey: PeerKey,
+    pub pubkey: PublicKey,
 }
 
 /// The validated contents of `relay.toml`.

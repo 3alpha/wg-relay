@@ -74,7 +74,7 @@ struct Args {
     /// Client sockets, each with its own session through the relay.
     #[arg(long, default_value_t = 1)]
     flows: usize,
-    /// Listed peers receiving the flows, each on its own socket with its own counter thread.
+    /// Configured peers receiving the flows, each on its own socket with its own counter thread.
     #[arg(long, default_value_t = 1)]
     servers: usize,
     /// The relay's `workers` setting; left out of its config when not given.
@@ -267,7 +267,7 @@ fn recv_until<T>(
     Ok(None)
 }
 
-/// A listed peer receiving flows.
+/// A configured peer receiving flows.
 struct Server {
     key: Key,
     sock: UdpSocket,
@@ -563,7 +563,7 @@ fn run(args: &Args) -> Result<(), BenchError> {
     }
     let (relay_key, client_key) = (key(), key());
     let servers = (0..args.servers).map(|_| server(key())).collect::<Result<Vec<_>, _>>()?;
-    let listed: String = servers
+    let peers: String = servers
         .iter()
         .enumerate()
         .map(|(i, s)| {
@@ -579,7 +579,7 @@ fn run(args: &Args) -> Result<(), BenchError> {
         &config,
         format!(
             "listen = \"{relay}\"\nprivate_key = \"{}\"\nhandshake_rate_per_ip = \"1000/s\"\n\
-             {workers}{listed}",
+             {workers}{peers}",
             b64(relay_key.sk.to_bytes()),
         ),
     )?;

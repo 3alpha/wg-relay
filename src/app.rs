@@ -39,13 +39,13 @@ pub struct Cli {
 
 /// Load the config, then either print its summary or run the relay.
 pub fn run(cli: Cli) -> Result<(), AppError> {
-    let cfg = load(&cli.config)?;
+    let config = load(&cli.config)?;
     if cli.check_config {
         println!("config OK: {}", cli.config.display());
-        print!("{}", cfg.summary());
+        print!("{}", config.summary());
         return Ok(());
     }
-    serve(cfg, cli.config)
+    serve(config, cli.config)
 }
 
 /// Read and validate the config file at `path`.
@@ -55,25 +55,25 @@ fn load(path: &Path) -> Result<Config, AppError> {
 
 /// Bind one socket per forwarding thread, start the threads, supervise them
 /// until a signal or a thread's end, then stop and join them.
-fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
-    let (listen, sockets) = udp::bind_group(cfg.listen, workers::count(&cfg))?;
+fn serve(config: Config, path: PathBuf) -> Result<(), AppError> {
+    let (listen, sockets) = udp::bind_group(config.listen, workers::count(&config))?;
     let (gro, gso) = (sockets.iter().all(Bound::gro), sockets.iter().all(Bound::gso));
     let rt = runtime().map_err(|source| AppError::Runtime { source })?;
-    let relay = Relay::new(&cfg);
+    let relay = Relay::new(&config);
     let workers = Workers::start(sockets, &relay)?;
     info!(
         %listen,
         pubkey = %relay.public_key(),
-        tunnel_ip = %cfg.tunnel_ip,
-        handshake_rate = %cfg.handshake_rate,
+        tunnel_ip = %config.tunnel_ip,
+        handshake_rate = %config.handshake_rate,
         peers = relay.peer_count(),
         workers = workers.len(),
         gro,
         gso,
         "wg-relay started"
     );
-    debug!(config = ?cfg, "effective config");
-    let supervised = rt.block_on(supervise(&relay, &workers, &cfg, &path));
+    debug!(?config, "effective config");
+    let supervised = rt.block_on(supervise(&relay, &workers, &config, &path));
     let (metrics, joined) = workers.stop();
     info!(metrics = %metrics, "shutting down");
     joined.and(supervised)
@@ -90,7 +90,7 @@ fn runtime() -> io::Result<Runtime> {
 async fn supervise(
     relay: &Relay,
     workers: &Workers,
-    cfg: &Config,
+    config: &Config,
     path: &Path,
 ) -> Result<(), AppError> {
     let on = |kind, name| signal(kind).map_err(|source| AppError::Signal { signal: name, source });
@@ -109,7 +109,7 @@ async fn supervise(
             _ = stats.tick() => {
                 info!(metrics = %workers.metrics(), sessions = relay.session_count(), "stats");
             }
-            _ = hup.recv() => reload(relay, cfg, path),
+            _ = hup.recv() => reload(relay, config, path),
             _ = int.recv() => return Ok(()),
             _ = term.recv() => return Ok(()),
         }
@@ -117,15 +117,15 @@ async fn supervise(
 }
 
 /// Reload the config file, keeping the current one if it is invalid.
-fn reload(relay: &Relay, cfg: &Config, path: &Path) {
+fn reload(relay: &Relay, config: &Config, path: &Path) {
     let new = match load(path) {
         Ok(new) => new,
         Err(e) => return error!(error = %Report(&e), "reload failed, keeping current config"),
     };
-    if new.listen != cfg.listen {
+    if new.listen != config.listen {
         warn!("changing listen requires a restart");
     }
-    if new.workers != cfg.workers {
+    if new.workers != config.workers {
         warn!("changing workers requires a restart");
     }
     relay.reload(&new);

@@ -1,7 +1,7 @@
 //! Test helper for tests/netns.sh: inspect a pcap captured at the relay.
 //!
 //! usage:
-//!   pcap_check <relay.pcap> <relay_ip:port> <relay_sk_b64> <dest_sk_b64> [marker_hex]
+//!   pcap_check <relay.pcap> <relay_ip:port> <relay_sk_b64> <dst_sk_b64> [marker_hex]
 //!   pcap_check --initiators <any.pcap> <responder_sk_b64>
 //!
 //! The second form prints (base64, one per line) the static public key of every
@@ -19,11 +19,11 @@ use std::error::Error as _;
 use std::net::{AddrParseError, Ipv4Addr, SocketAddrV4};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use wg_relay::key::{KeyError, PeerKey, PrivateKey};
-use wg_relay::packet::Mac1Key;
+use wg_relay::key::{self, KeyError, PrivateKey};
+use wg_relay::message::Mac1Key;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-const USAGE: &str = "usage: pcap_check <pcap> <relay_ip:port> <relay_sk_b64> <dest_sk_b64> [marker_hex]\n\
+const USAGE: &str = "usage: pcap_check <pcap> <relay_ip:port> <relay_sk_b64> <dst_sk_b64> [marker_hex]\n\
                      \x20      pcap_check --initiators <pcap> <responder_sk_b64>";
 
 #[derive(Debug, thiserror::Error)]
@@ -121,7 +121,7 @@ fn initiators(pcap: &str, responder_sk: &str) -> Result<bool, CheckError> {
         if let Ok(Packet::HandshakeInit(h)) = Tunn::parse_incoming_packet(&p.payload)
             && let Ok(half) = parse_handshake_anon(&sk, &pk, &h)
         {
-            seen.insert(PeerKey::from(half.peer_static_public).to_string());
+            seen.insert(key::PublicKey::from(half.peer_static_public).to_string());
         }
     }
     seen.iter().for_each(|k| println!("{k}"));
@@ -130,10 +130,10 @@ fn initiators(pcap: &str, responder_sk: &str) -> Result<bool, CheckError> {
 
 /// Run the relay capture checks; Ok(false) means a check failed.
 fn verify(args: &[String]) -> Result<bool, CheckError> {
-    let [pcap, relay, relay_sk, dest_sk, rest @ ..] = args else { return Err(CheckError::Usage) };
+    let [pcap, relay, relay_sk, dst_sk, rest @ ..] = args else { return Err(CheckError::Usage) };
     let relay: SocketAddrV4 = relay.parse()?;
-    let (relay_sk, dest_sk) = (secret("relay", relay_sk)?, secret("destination", dest_sk)?);
-    let (relay_pk, dest_pk) = (PublicKey::from(&relay_sk), PublicKey::from(&dest_sk));
+    let (relay_sk, dst_sk) = (secret("relay", relay_sk)?, secret("destination", dst_sk)?);
+    let (relay_pk, dst_pk) = (PublicKey::from(&relay_sk), PublicKey::from(&dst_sk));
     let relay_mac1 = Mac1Key::new(relay_pk.as_bytes());
     let marker = match rest {
         [] => None,
@@ -142,7 +142,7 @@ fn verify(args: &[String]) -> Result<bool, CheckError> {
     };
 
     let pkts = read_pcap(pcap)?;
-    let (mut fwd_inits, mut opened_relay, mut opened_dest, mut marker_hits) = (0, 0, 0, 0);
+    let (mut fwd_inits, mut opened_relay, mut opened_dst, mut marker_hits) = (0, 0, 0, 0);
     // payload -> addresses it arrived at the relay from
     let mut inbound: HashMap<&[u8], Vec<SocketAddrV4>> = HashMap::new();
     for p in &pkts {
@@ -159,7 +159,7 @@ fn verify(args: &[String]) -> Result<bool, CheckError> {
         {
             fwd_inits += 1;
             opened_relay += parse_handshake_anon(&relay_sk, &relay_pk, &h).is_ok() as u32;
-            opened_dest += parse_handshake_anon(&dest_sk, &dest_pk, &h).is_ok() as u32;
+            opened_dst += parse_handshake_anon(&dst_sk, &dst_pk, &h).is_ok() as u32;
         }
     }
     let mut identical = [0u32; 5];
@@ -173,12 +173,12 @@ fn verify(args: &[String]) -> Result<bool, CheckError> {
     println!("udp packets captured:                {}", pkts.len());
     println!("initiations to peers (inbound):      {fwd_inits}");
     println!("  opened with relay key:             {opened_relay}");
-    println!("  opened with destination key:       {opened_dest}");
+    println!("  opened with destination key:       {opened_dst}");
     println!("forwarded byte-identical (init/resp/cookie/data): {:?}", &identical[1..]);
     println!("plaintext marker occurrences:        {marker_hits}");
     let ok = fwd_inits > 0
         && opened_relay == 0
-        && opened_dest > 0
+        && opened_dst > 0
         && identical[4] > 0
         && marker_hits == 0;
     println!("{}", if ok { "PCAP CHECK PASSED" } else { "PCAP CHECK FAILED" });

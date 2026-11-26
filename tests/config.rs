@@ -9,15 +9,15 @@ use wg_relay::config::{Config, ConfigError, Peer};
 #[test]
 fn peers_and_defaults() {
     let (r, a, b) = (key(), key(), key());
-    let cfg = Config::parse(&(head(&r, "") + &peer("home", &a) + &peer("office", &b))).unwrap();
-    assert_eq!(cfg.listen.to_string(), "0.0.0.0:51820");
-    assert_eq!(cfg.tunnel_ip.to_string(), "10.99.0.254");
-    assert_eq!(cfg.handshake_rate.per_sec(), 10.0);
-    assert_eq!(cfg.private_key.public_key(), r.id());
+    let config = Config::parse(&(head(&r, "") + &peer("home", &a) + &peer("office", &b))).unwrap();
+    assert_eq!(config.listen.to_string(), "0.0.0.0:51820");
+    assert_eq!(config.tunnel_ip.to_string(), "10.99.0.254");
+    assert_eq!(config.handshake_rate.per_sec(), 10.0);
+    assert_eq!(config.private_key.public_key(), r.id());
     let cores = std::thread::available_parallelism().unwrap().get();
-    assert_eq!(cfg.workers.get(), cores.min(wg_relay::config::MAX_WORKERS), "one per core");
+    assert_eq!(config.workers.get(), cores.min(wg_relay::config::MAX_WORKERS), "one per core");
     assert_eq!(
-        cfg.peers,
+        config.peers,
         vec![
             Peer { name: "home".into(), pubkey: a.id() },
             Peer { name: "office".into(), pubkey: b.id() },
@@ -26,12 +26,12 @@ fn peers_and_defaults() {
 
     let extra = "listen = \"127.0.0.1:5000\"\ntunnel_ip = \"10.0.0.1\"\n\
                  handshake_rate_per_ip = \"60/m\"\nworkers = 3\n";
-    let cfg = Config::parse(&(head(&r, extra) + &peer("home", &a))).unwrap();
+    let config = Config::parse(&(head(&r, extra) + &peer("home", &a))).unwrap();
     assert_eq!(
-        (cfg.listen.to_string(), cfg.tunnel_ip.to_string(), cfg.handshake_rate.per_sec()),
+        (config.listen.to_string(), config.tunnel_ip.to_string(), config.handshake_rate.per_sec()),
         ("127.0.0.1:5000".into(), "10.0.0.1".into(), 1.0)
     );
-    assert_eq!(cfg.workers.get(), 3);
+    assert_eq!(config.workers.get(), 3);
 }
 
 /// Does this error match what a test case expects?

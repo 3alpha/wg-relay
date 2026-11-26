@@ -1,7 +1,7 @@
 //! In-process tests: boringtun peers talking through `Relay::handle`.
 //!
-//! Config used throughout: `main` and `other` are listed peers, registered at
-//! SRV and SRV2; `c1` and `c2` are unlisted peers.
+//! Config used throughout: `main` and `other` are configured peers, registered at
+//! SRV and SRV2; `c1` and `c2` are unconfigured peers.
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "test setup panics on failure")]
 
 mod common;
@@ -11,7 +11,7 @@ use common::*;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use wg_relay::config::Config;
-use wg_relay::relay::{Reason, Relay, Verdict};
+use wg_relay::relay::{DropReason, Relay, Verdict};
 
 const SRV: &str = "198.51.100.1:51820";
 const SRV2: &str = "198.51.100.2:51820";
@@ -31,7 +31,7 @@ struct W {
     c2: Key,
 }
 
-/// A config listing these peers.
+/// A config with these peers.
 fn config(r: &Key, peers: &[(&str, &Key)]) -> Config {
     let text = peers.iter().fold(head(r, ""), |text, (name, k)| text + &peer(name, k));
     Config::parse(&text).unwrap()
@@ -48,7 +48,7 @@ fn world() -> W {
 }
 
 impl W {
-    /// Register listed peer `k` from `src` via a real handshake with the relay.
+    /// Register configured peer `k` from `src` via a real handshake with the relay.
     fn register(&mut self, k: &Key, src: &str) -> Tunn {
         self.register_at(k, src, Instant::now())
     }
@@ -57,12 +57,12 @@ impl W {
     fn register_at(&mut self, k: &Key, src: &str, now: Instant) -> Tunn {
         let mut t = tunn(k, &self.r);
         let init = initiation(&mut t);
-        assert_eq!(self.relay.handle(addr(src), &init, now), Verdict::Consumed);
-        let out = self.relay.take_outbox();
+        assert_eq!(self.relay.handle(addr(src), &init, now), Verdict::DeliveredLocally);
+        let out = self.relay.drain_tx_queue();
         assert_eq!(out.len(), 1, "relay should answer the registration");
         let ka = reply(&mut t, &out[0].1).expect("keepalive to relay");
-        assert_eq!(self.relay.handle(addr(src), &ka, now), Verdict::Consumed);
-        assert_eq!(self.relay.registered_addr(&k.id(), now), Some(addr(src)));
+        assert_eq!(self.relay.handle(addr(src), &ka, now), Verdict::DeliveredLocally);
+        assert_eq!(self.relay.registered_endpoint(&k.id(), now), Some(addr(src)));
         t
     }
 
@@ -75,12 +75,12 @@ impl W {
     fn fwd_at(&mut self, src: &str, pkt: &[u8], now: Instant) -> Option<SocketAddr> {
         match self.relay.handle(addr(src), pkt, now) {
             Verdict::Forward(dst) => Some(dst),
-            Verdict::Consumed | Verdict::Drop(_) => None,
+            Verdict::DeliveredLocally | Verdict::Drop(_) => None,
         }
     }
 
     /// How many datagrams were dropped for `r`.
-    fn n(&self, r: Reason) -> u64 {
+    fn n(&self, r: DropReason) -> u64 {
         self.relay.metrics().rejected(r)
     }
 
@@ -135,20 +135,20 @@ fn spoofed(i: u32) -> SocketAddr {
 }
 
 /// The index a handshake message announces as its sender.
-fn sender_idx(pkt: &[u8]) -> u32 {
+fn sender_index(pkt: &[u8]) -> u32 {
     u32::from_le_bytes(pkt[4..8].try_into().unwrap())
 }
 
-/// A cookie-reply-shaped datagram for `receiver`.
-fn cookie(receiver: u32) -> Vec<u8> {
+/// A cookie-reply-shaped datagram for `receiver_index`.
+fn cookie(receiver_index: u32) -> Vec<u8> {
     let mut p = vec![0u8; 64];
     p[0] = 3;
-    p[4..8].copy_from_slice(&receiver.to_le_bytes());
+    p[4..8].copy_from_slice(&receiver_index.to_le_bytes());
     p
 }
 
 #[test]
-fn unlisted_peer_reaches_listed_peer() {
+fn unconfigured_peer_reaches_configured_peer() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
@@ -161,22 +161,22 @@ fn unlisted_peer_reaches_listed_peer() {
     // A peer that moves network loses data until it re-handshakes.
     let moved = "198.51.100.11:49999";
     assert_eq!(w.data(&mut c1s, moved, &mut sc1), None);
-    assert_eq!(w.n(Reason::WrongSource), 1);
+    assert_eq!(w.n(DropReason::WrongSource), 1);
     assert_eq!(w.hs(&mut c1s, moved, &mut sc1, SRV), ok3(SRV, moved));
 }
 
 #[test]
-fn listed_peer_cannot_initiate_to_unlisted_peer() {
+fn configured_peer_cannot_initiate_to_unconfigured_peer() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     // The relay has no key to match the initiation's mac1 against.
     assert_eq!(w.fwd(SRV, &initiation(&mut sc1)), None);
-    assert_eq!(w.n(Reason::NoMac1Match), 1);
+    assert_eq!(w.n(DropReason::NoMac1Match), 1);
 }
 
 #[test]
-fn listed_peers_reach_each_other_both_ways() {
+fn configured_peers_reach_each_other_both_ways() {
     let mut w = world();
     let (mut ab, mut ba) = (tunn(&w.srv, &w.srv2), tunn(&w.srv2, &w.srv));
     assert_eq!(w.hs(&mut ab, SRV, &mut ba, SRV2), ok3(SRV2, SRV));
@@ -186,30 +186,30 @@ fn listed_peers_reach_each_other_both_ways() {
 }
 
 #[test]
-fn unlisted_peer_cannot_register() {
+fn unconfigured_peer_cannot_register() {
     let mut w = world();
     let mut c1r = tunn(&w.c1, &w.r);
     assert_eq!(w.fwd(C1, &initiation(&mut c1r)), None);
-    assert_eq!(w.n(Reason::RegistrationUnknownKey), 1);
-    assert!(w.relay.take_outbox().is_empty());
+    assert_eq!(w.n(DropReason::RegistrationUnknownKey), 1);
+    assert!(w.relay.drain_tx_queue().is_empty());
 }
 
 #[test]
-fn only_the_listed_peer_answers_and_pending_carries_no_data() {
+fn only_the_configured_peer_answers_and_pending_carries_no_data() {
     let mut w = world();
     let mut c1s = tunn(&w.c1, &w.srv);
     let init = initiation(&mut c1s);
     assert_eq!(w.fwd(C1, &init), Some(addr(SRV)));
     // A response for c1's pending index from anywhere but the server is refused.
-    let forged = forged_response(0x7000_0001, sender_idx(&init), &w.c1.pk);
+    let forged = forged_response(0x7000_0001, sender_index(&init), &w.c1.pk);
     assert_eq!(w.fwd(C2, &forged), None);
-    assert_eq!(w.n(Reason::WrongSource), 1);
+    assert_eq!(w.n(DropReason::WrongSource), 1);
     // Until the server answers, data towards c1 is refused; a cookie reply may pass.
     let mut fake = vec![4, 0, 0, 0];
     fake.extend_from_slice(&init[4..8]);
     fake.resize(48, 0);
     assert_eq!(w.fwd(SRV, &fake), None);
-    assert_eq!(w.n(Reason::UnknownIndex), 1);
+    assert_eq!(w.n(DropReason::UnknownIndex), 1);
     fake[0] = 3;
     fake.resize(64, 0);
     assert_eq!(w.fwd(SRV, &fake), Some(addr(C1)));
@@ -217,13 +217,13 @@ fn only_the_listed_peer_answers_and_pending_carries_no_data() {
 }
 
 #[test]
-fn unregistered_listed_peer_is_unreachable() {
+fn unregistered_configured_peer_is_unreachable() {
     let (r, srv) = (key(), key());
     let mut relay = Relay::new(&config(&r, &[("main", &srv)]));
     let init = initiation(&mut tunn(&key(), &srv));
     assert_eq!(
         relay.handle(addr(C1), &init, Instant::now()),
-        Verdict::Drop(Reason::PeerNotRegistered)
+        Verdict::Drop(DropReason::PeerNotRegistered)
     );
 }
 
@@ -236,14 +236,13 @@ fn reload_revokes_removed_peer_immediately() {
     assert_eq!(w.hs(&mut c2o, C2, &mut oc2, SRV2), ok3(SRV2, C2));
 
     // Remove `main`: its registration and every session routed to it go.
-    let cfg = config(&w.r, &[("other", &w.srv2)]);
-    w.relay.reload(&cfg);
-    assert_eq!(w.relay.registered_addr(&w.srv.id(), Instant::now()), None);
+    w.relay.reload(&config(&w.r, &[("other", &w.srv2)]));
+    assert_eq!(w.relay.registered_endpoint(&w.srv.id(), Instant::now()), None);
     assert_eq!(w.data(&mut c1s, C1, &mut sc1), None);
     assert_eq!(w.data(&mut sc1, SRV, &mut c1s), None);
-    assert_eq!(w.n(Reason::UnknownIndex), 2);
+    assert_eq!(w.n(DropReason::UnknownIndex), 2);
     assert_eq!(w.fwd(C1, &initiation(&mut c1s)), None);
-    assert_eq!(w.n(Reason::NoMac1Match), 1);
+    assert_eq!(w.n(DropReason::NoMac1Match), 1);
     // Sessions with `other` are untouched.
     assert_eq!(w.data(&mut c2o, C2, &mut oc2), Some(addr(SRV2)));
     assert_eq!(w.data(&mut oc2, SRV2, &mut c2o), Some(addr(C2)));
@@ -257,14 +256,14 @@ fn registration_tunnel_indexes_are_reserved() {
     let mut t = tunn(&srv, &w.r);
     let init = initiation(&mut t);
     w.fwd(SRV, &init);
-    let resp = w.relay.take_outbox().pop().unwrap().1;
-    let relay_idx = u32::from_le_bytes(resp[4..8].try_into().unwrap());
+    let resp = w.relay.drain_tx_queue().pop().unwrap().1;
+    let relay_index = u32::from_le_bytes(resp[4..8].try_into().unwrap());
     // A forwarded initiation trying to use an index in its reserved prefix is refused.
     let mut c1s = tunn(&w.c1, &w.srv);
-    let forged = with_sender(&initiation(&mut c1s), relay_idx ^ 0x7f, &w.srv.pk);
+    let forged = with_sender(&initiation(&mut c1s), relay_index ^ 0x7f, &w.srv.pk);
     assert_eq!(w.fwd(C1, &forged), None);
-    assert_eq!(w.n(Reason::ReservedIndex), 1);
-    let fine = with_sender(&initiation(&mut c1s), relay_idx ^ 0x7f00_0000, &w.srv.pk);
+    assert_eq!(w.n(DropReason::ReservedIndex), 1);
+    let fine = with_sender(&initiation(&mut c1s), relay_index ^ 0x7f00_0000, &w.srv.pk);
     assert_eq!(w.fwd(C1, &fine), Some(addr(SRV)));
 }
 
@@ -285,19 +284,19 @@ fn established_session_cannot_mint_or_take_over_indexes() {
     let sessions = w.relay.session_count();
 
     // c1 forges a response on its own, already established, session.
-    let forged = forged_response(0x7000_0001, sender_idx(&c1_resp), &w.srv.pk);
+    let forged = forged_response(0x7000_0001, sender_index(&c1_resp), &w.srv.pk);
     assert_eq!(w.fwd(C1, &forged), None);
-    assert_eq!(w.n(Reason::SessionNotPending), 1);
+    assert_eq!(w.n(DropReason::SessionNotPending), 1);
     // A duplicate of the server's real response is refused the same way.
     assert_eq!(w.fwd(SRV, &c1_resp), None);
-    assert_eq!(w.n(Reason::SessionNotPending), 2);
+    assert_eq!(w.n(DropReason::SessionNotPending), 2);
 
     // c1 starts handshakes that claim c2's two live indexes.
-    for idx in [sender_idx(&c2_init), sender_idx(&c2_resp)] {
-        let init = with_sender(&initiation(&mut c1s), idx, &w.srv.pk);
+    for index in [sender_index(&c2_init), sender_index(&c2_resp)] {
+        let init = with_sender(&initiation(&mut c1s), index, &w.srv.pk);
         assert_eq!(w.fwd(C1, &init), None);
     }
-    assert_eq!(w.n(Reason::IndexInUse), 2);
+    assert_eq!(w.n(DropReason::IndexInUse), 2);
     assert_eq!(w.relay.session_count(), sessions);
     assert_eq!(w.data(&mut c2s, C2, &mut sc2), Some(addr(SRV)));
     assert_eq!(w.data(&mut sc2, SRV, &mut c2s), Some(addr(C2)));
@@ -311,11 +310,11 @@ fn registration_needs_key_confirmation() {
     let mut t = tunn(&srv, &w.r);
     // A registration initiation alone (which could be a replay) does not move the registration.
     assert_eq!(w.fwd(moved, &initiation(&mut t)), None);
-    let resp = w.relay.take_outbox().pop().unwrap().1;
-    assert_eq!(w.relay.registered_addr(&srv.id(), Instant::now()), Some(addr(SRV)));
+    let resp = w.relay.drain_tx_queue().pop().unwrap().1;
+    assert_eq!(w.relay.registered_endpoint(&srv.id(), Instant::now()), Some(addr(SRV)));
     let ka = reply(&mut t, &resp).unwrap();
     assert_eq!(w.fwd(moved, &ka), None);
-    assert_eq!(w.relay.registered_addr(&srv.id(), Instant::now()), Some(addr(moved)));
+    assert_eq!(w.relay.registered_endpoint(&srv.id(), Instant::now()), Some(addr(moved)));
 }
 
 #[test]
@@ -329,7 +328,7 @@ fn pending_session_expires_quickly() {
 }
 
 #[test]
-fn listed_peer_roaming_migrates_sessions() {
+fn configured_peer_roaming_moves_its_sessions() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
@@ -355,7 +354,7 @@ fn relay_key_cannot_open_forwarded_initiation_and_ping_works() {
     let srv = w.srv.clone();
     let mut sr = w.register(&srv, SRV);
     assert_eq!(w.fwd(SRV, &encrypt(&mut sr, &ping([10, 99, 0, 1], [10, 99, 0, 254]))), None);
-    let out = w.relay.take_outbox();
+    let out = w.relay.drain_tx_queue();
     let mut buf = vec![0u8; 2048];
     assert!(
         matches!(sr.decapsulate(None, &out[0].1, &mut buf), TunnResult::WriteToTunnelV4(p, _) if p[20] == 0)
@@ -369,7 +368,7 @@ fn expiry_and_rate_limit() {
     assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
     w.relay.tick(Instant::now() + Duration::from_secs(181));
     assert_eq!(
-        w.relay.registered_addr(&w.srv.id(), Instant::now() + Duration::from_secs(181)),
+        w.relay.registered_endpoint(&w.srv.id(), Instant::now() + Duration::from_secs(181)),
         None
     );
     w.relay.tick(Instant::now() + Duration::from_secs(201));
@@ -380,7 +379,7 @@ fn expiry_and_rate_limit() {
     let init = initiation(&mut c1s);
     let ok = (0..100).filter(|_| w.fwd(C1, &init).is_some()).count();
     assert_eq!(ok, 20, "default 10/s => burst of 20");
-    assert_eq!(w.n(Reason::RateLimited), 80);
+    assert_eq!(w.n(DropReason::RateLimited), 80);
 }
 
 #[test]
@@ -421,9 +420,9 @@ fn garbage_never_panics() {
         }
         let src = [SRV, C1, C2][(rnd() % 3) as usize];
         w.fwd(src, &p);
-        w.relay.take_outbox();
+        w.relay.drain_tx_queue();
     }
-    assert!(w.n(Reason::Malformed) > 500, "{}", w.relay.metrics());
+    assert!(w.n(DropReason::Malformed) > 500, "{}", w.relay.metrics());
 }
 
 #[test]
@@ -436,14 +435,14 @@ fn registration_flood_does_not_block_registered_peers() {
     for i in 0..600 {
         w.relay.handle(spoofed(i), &junk, now);
     }
-    assert!(w.n(Reason::RegistrationBudget) > 0, "{}", w.relay.metrics());
-    // A listed peer re-handshakes from its registered address all the same.
+    assert!(w.n(DropReason::RegistrationBudget) > 0, "{}", w.relay.metrics());
+    // A configured peer re-handshakes from its endpoint all the same.
     let srv = w.srv.clone();
     w.register_at(&srv, SRV, now);
     // Registering from a new address competes with the flood.
     let mut t = tunn(&srv, &w.r);
     let moved = addr("203.0.113.9:1234");
-    let shed = Verdict::Drop(Reason::RegistrationBudget);
+    let shed = Verdict::Drop(DropReason::RegistrationBudget);
     assert_eq!(w.relay.handle(moved, &initiation(&mut t), now), shed);
     // Forwarded handshakes have their own budget.
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
@@ -480,7 +479,7 @@ fn pending_flood_aimed_at_one_peer_evicts_only_its_oldest() {
     assert_eq!(w.fwd(C1, &c1_init), Some(addr(SRV)));
     flood(&mut w, QUOTA, QUOTA);
     assert_eq!(w.fwd(SRV, &reply(&mut sc1, &c1_init).unwrap()), None);
-    assert_eq!(w.n(Reason::UnknownIndex), 1);
+    assert_eq!(w.n(DropReason::UnknownIndex), 1);
     assert_eq!(w.fwd(SRV2, &reply(&mut oc2, &c2_init).unwrap()), Some(addr(C2)));
     // c1's earlier session, c2's new one and QUOTA flood entries remain.
     assert_eq!(w.relay.session_count(), 2 + 2 + QUOTA as usize);
@@ -501,7 +500,7 @@ fn established_session_expires_on_time_however_busy() {
     // WireGuard has rekeyed by now and never uses this session's keys again.
     assert_eq!(w.data_at(&mut c1s, C1, &mut sc1, at(200)), None);
     assert_eq!(w.data_at(&mut sc1, SRV, &mut c1s, at(200)), None);
-    assert_eq!(w.n(Reason::UnknownIndex), 2);
+    assert_eq!(w.n(DropReason::UnknownIndex), 2);
 }
 
 #[test]
@@ -511,7 +510,7 @@ fn cookie_replies_do_not_extend_a_pending_session() {
     let t0 = Instant::now();
     let init = initiation(&mut c1s);
     assert_eq!(w.fwd_at(C1, &init, t0), Some(addr(SRV)));
-    let reply_cookie = cookie(sender_idx(&init));
+    let reply_cookie = cookie(sender_index(&init));
     for s in [1, 5, 9] {
         let t = t0 + Duration::from_secs(s);
         assert_eq!(w.fwd_at(SRV, &reply_cookie, t), Some(addr(C1)), "{s} s");
@@ -519,7 +518,7 @@ fn cookie_replies_do_not_extend_a_pending_session() {
     let t = t0 + Duration::from_secs(10);
     assert_eq!(w.fwd_at(SRV, &reply_cookie, t), None);
     assert_eq!(w.fwd_at(SRV, &reply(&mut sc1, &init).unwrap(), t), None, "too late to establish");
-    assert_eq!(w.n(Reason::UnknownIndex), 2);
+    assert_eq!(w.n(DropReason::UnknownIndex), 2);
 }
 
 #[test]
@@ -537,10 +536,10 @@ fn resent_initiation_cannot_reset_an_established_session() {
     reply(&mut sc1, &ka);
     // Once established, neither a replay of it nor a new initiation reusing its
     // index may turn the entry back into a pending one or restart its lifetime.
-    let reuse = with_sender(&initiation(&mut c1s), sender_idx(&init), &w.srv.pk);
+    let reuse = with_sender(&initiation(&mut c1s), sender_index(&init), &w.srv.pk);
     assert_eq!(w.fwd(C1, &init), None);
     assert_eq!(w.fwd(C1, &reuse), None);
-    assert_eq!(w.n(Reason::IndexInUse), 2);
+    assert_eq!(w.n(DropReason::IndexInUse), 2);
     assert_eq!(w.data(&mut sc1, SRV, &mut c1s), Some(addr(C1)));
 }
 
@@ -552,5 +551,5 @@ fn ipv4_mapped_source_is_a_normal_peer() {
     assert_eq!(w.hs(&mut c1s, mapped, &mut sc1, SRV), ok3(SRV, mapped));
     assert_eq!(w.data(&mut sc1, SRV, &mut c1s), Some(addr(mapped)));
     assert_eq!(w.fwd("[::ffff:255.255.255.255]:40001", &initiation(&mut c1s)), None);
-    assert_eq!(w.n(Reason::InvalidSource), 1);
+    assert_eq!(w.n(DropReason::InvalidSource), 1);
 }

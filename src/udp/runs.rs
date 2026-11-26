@@ -105,7 +105,7 @@ impl Plan {
             offset = bytes.end;
             let dst = match d.verdict {
                 Verdict::Forward(dst) => dst,
-                Verdict::Consumed | Verdict::Drop(_) => {
+                Verdict::DeliveredLocally | Verdict::Drop(_) => {
                     self.runs.extend(open.take());
                     continue;
                 }
@@ -147,10 +147,10 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wg_relay::relay::Reason;
+    use wg_relay::relay::DropReason;
 
     const GSO: Limits = Limits { max_segments: 64, max_bytes: 65_507 };
-    const DROP: Verdict = Verdict::Drop(Reason::UnknownIndex);
+    const DROP: Verdict = Verdict::Drop(DropReason::UnknownIndex);
 
     fn addr(i: u8) -> SocketAddr {
         SocketAddr::from(([192, 0, 2, i], 51820))
@@ -201,13 +201,13 @@ mod tests {
     }
 
     #[test]
-    fn dropped_and_consumed_datagrams_split_the_run() {
+    fn dropped_and_locally_delivered_datagrams_split_the_run() {
         let d = [
             (100, fwd(1)),
             (100, DROP),
             (100, fwd(1)),
             (100, fwd(1)),
-            (100, Verdict::Consumed),
+            (100, Verdict::DeliveredLocally),
             (100, fwd(1)),
         ];
         let want = [

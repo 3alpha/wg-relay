@@ -2,14 +2,14 @@ use std::time::Instant;
 
 /// Tokens earned at a steady rate, up to a cap.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Bucket {
+pub(super) struct TokenBucket {
     pub(super) tokens: f64,
     last: Instant,
 }
 
-impl Bucket {
+impl TokenBucket {
     pub(super) fn full(burst: f64, now: Instant) -> Self {
-        Bucket { tokens: burst, last: now }
+        TokenBucket { tokens: burst, last: now }
     }
 
     /// Add the tokens earned since the last refill.

@@ -14,7 +14,7 @@ use wg_relay::error::AppError;
 pub mod runs;
 
 /// Receive buffers per `recvmmsg` call.
-pub const RECV_BUFS: usize = quinn_udp::BATCH_SIZE;
+pub const RECV_BUFFERS: usize = quinn_udp::BATCH_SIZE;
 /// One receive buffer: the largest UDP datagram fits, and so does the largest
 /// GRO list, since the kernel only coalesces UDP up to 64 KiB.
 pub const RECV_BUF_BYTES: usize = 65_536;
@@ -93,7 +93,7 @@ impl Bound {
     }
 
     /// Tie the socket to the runtime this is called in.
-    pub fn register(self) -> io::Result<Socket> {
+    pub fn into_async(self) -> io::Result<Socket> {
         Ok(Socket { io: UdpSocket::from_std(self.io)?, state: self.state })
     }
 }
@@ -119,12 +119,12 @@ impl Socket {
     pub fn try_recv(&self, batch: &mut RecvBatch) -> io::Result<usize> {
         batch.len = 0;
         let mut bufs = batch.bufs.chunks_mut(RECV_BUF_BYTES);
-        let mut iovs: [IoSliceMut<'_>; RECV_BUFS] =
+        let mut iovs: [IoSliceMut<'_>; RECV_BUFFERS] =
             std::array::from_fn(|_| IoSliceMut::new(bufs.next().unwrap_or_default()));
         let n = self.io.try_io(Interest::READABLE, || {
             self.state.recv((&self.io).into(), &mut iovs, &mut batch.meta)
         })?;
-        batch.len = n.min(RECV_BUFS);
+        batch.len = n.min(RECV_BUFFERS);
         Ok(batch.len)
     }
 
@@ -146,15 +146,15 @@ impl Socket {
 /// Receive buffers and their metadata, allocated once and reused.
 pub struct RecvBatch {
     bufs: Box<[u8]>,
-    meta: [RecvMeta; RECV_BUFS],
+    meta: [RecvMeta; RECV_BUFFERS],
     len: usize,
 }
 
 impl Default for RecvBatch {
     fn default() -> Self {
         RecvBatch {
-            bufs: vec![0; RECV_BUFS * RECV_BUF_BYTES].into_boxed_slice(),
-            meta: [RecvMeta::default(); RECV_BUFS],
+            bufs: vec![0; RECV_BUFFERS * RECV_BUF_BYTES].into_boxed_slice(),
+            meta: [RecvMeta::default(); RECV_BUFFERS],
             len: 0,
         }
     }

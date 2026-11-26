@@ -1,13 +1,13 @@
 use std::time::Instant;
 
-use super::bucket::Bucket;
+use super::bucket::TokenBucket;
 
 /// Budget for CPU work spent on unauthenticated handshakes, so a flood of
 /// them cannot starve forwarding. Work is charged once it is done, so the
 /// budget can go into debt by one handshake; the burst is one second's worth.
 pub struct WorkBudget {
     per_sec: f64,
-    bucket: Option<Bucket>,
+    bucket: Option<TokenBucket>,
 }
 
 impl WorkBudget {
@@ -17,7 +17,7 @@ impl WorkBudget {
 
     /// Is there budget left for more work?
     pub fn available(&mut self, now: Instant) -> bool {
-        let b = self.bucket.get_or_insert(Bucket::full(self.per_sec, now));
+        let b = self.bucket.get_or_insert(TokenBucket::full(self.per_sec, now));
         b.refill(now, self.per_sec, self.per_sec);
         b.tokens > 0.0
     }
