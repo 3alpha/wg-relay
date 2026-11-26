@@ -301,22 +301,51 @@ What this means behind the relay:
 
 ## 4. The relay's state
 
-The relay is a state machine (`Relay` in `src/relay/mod.rs`) that runs on one thread. `Relay::handle(src, datagram, now)` does no I/O: it returns a verdict, and the socket loop in `src/app.rs` acts on it.
+The relay is a state machine (`Relay` in `src/relay/mod.rs`). `Relay::handle(src, datagram, now)` does no I/O: it returns a verdict, and the socket loop in `src/app/forwarding.rs` acts on it.
 
 The socket loop reads the socket in batches: one `recvmmsg` call returns up to 32 receive buffers, and where the kernel supports UDP GRO each buffer can hold up to 64 datagrams from one source. Every datagram goes through `handle()` on its own. Consecutive datagrams forwarded to the same address then leave as one UDP GSO send of their unchanged bytes, which the kernel splits back into the same datagrams, with the ECN bits they arrived with. Without GRO and GSO the same loop works one datagram at a time. The [reference](reference.md#socket-io) has the details.
 
-Inside, `Relay` is made of two halves with a narrow interface between them. The split prepares the relay for forwarding on several threads while one thread owns everything that changes; for now both halves still run on the one thread.
+Inside, `Relay` is made of two halves with a narrow interface between them, so that several threads can forward at once while only one at a time changes anything.
 
-- The **forwarding half** (`Forwarder`, `src/relay/forwarder.rs`) holds only what forwarding transport data or a cookie reply on an open session needs: each open session's destination, expected source and opening time, and the reserved prefixes (the registration tunnels' index prefixes). It never writes. Given a datagram it forwards it, drops it (`invalid_source`, `malformed`, `wrong_source`), or hands it to the control half: handshake messages, messages to a registration tunnel, and indexes that are not a live open session (pending or unknown).
-- The **control half** (`Control`, `src/relay/control/`) owns everything else: the listed peers and their registration tunnels, the registry, the rate limiter and both budgets, the session table with its pending entries, quotas and lifetimes, reload, and the relay's own outgoing datagrams. It is the only writer of the forwarding half. The session table keeps the forwarding half's open sessions in step itself: every call that opens, replaces, migrates, expires or revokes an open entry publishes or withdraws the same entry there, so the two cannot disagree. Reload replaces the set of reserved prefixes.
+- The **forwarding half** (`Forwarder`, `src/relay/forwarder.rs`) holds only what forwarding transport data or a cookie reply on an open session needs: each open session's destination, expected source and opening time. It never writes. Given a datagram it forwards it, drops it (`invalid_source`, `malformed`, `wrong_source`), or hands it to the control half: handshake messages, messages to a registration tunnel, and indexes that are not a live open session (pending or unknown).
+- The **control half** (`Control`, `src/relay/control/`) owns everything else: the listed peers and their registration tunnels, the registry, the rate limiter and both budgets, the session table with its pending entries, quotas and lifetimes, reload, and the relay's own outgoing datagrams. It is the only writer of the forwarding half. The session table keeps the forwarding half's open sessions in step itself: every call that opens, replaces, migrates, expires or revokes an open entry publishes or withdraws the same entry there, so the two cannot disagree. No open session is ever in a reserved prefix (forwarded sessions may not use one, and a new registration tunnel never takes a prefix in use), so the forwarding half never holds a registration tunnel's index and hands all its messages over without checking the prefixes itself.
 
 Each half counts the datagrams it decides, and `Relay::metrics()` adds the two together.
+
+The relay runs several forwarding threads (`workers` in `relay.toml`, one per CPU by default), each running the same socket loop on its own socket. All the sockets are bound to the listen address with `SO_REUSEPORT`, so the kernel picks a socket for every incoming datagram by hashing its address pair: a flow always lands on the same thread, in order, and different flows spread across threads. Every thread has its own `Relay` handle (`Relay::share`) on the same two halves:
+
+- The forwarding half is shared and read by every thread at once, without a lock. Its open sessions live in a concurrent hash map (`papaya`) that readers search while the control half writes.
+- The control half sits behind one `Mutex`. A thread locks it for each datagram its forwarding half hands over, decides it, and sends the result itself, together with whatever the registration tunnels queued, on its own socket. Every socket has the same address, so it does not matter which one sends.
+- Each handle keeps its own counters, so counting never contends between threads. The main thread, which is forwarding thread 0, also runs the timers, the stats line, SIGHUP and shutdown, and adds every thread's counters to the control half's for the stats and shutdown lines.
+
+```mermaid
+flowchart TB
+    K["kernel: SO_REUSEPORT group on the listen port<br/>picks a socket per flow (address pair hash)"]
+    subgraph main["main thread = forwarding thread 0"]
+        L0["socket loop on socket 0"]
+        H["timers, stats, SIGHUP, SIGINT/SIGTERM"]
+    end
+    subgraph more["forwarding threads 1 … n-1"]
+        L1["socket loop on socket 1 … n-1"]
+    end
+    F["forwarding half (Forwarder)<br/>open sessions<br/>read by all threads, no lock"]
+    C["control half (Control) behind a Mutex<br/>registration tunnels, registry, budgets,<br/>session table, reload"]
+    K --> L0
+    K --> L1
+    L0 -- "triage every datagram" --> F
+    L1 -- "triage every datagram" --> F
+    L0 -- "lock for what triage hands over" --> C
+    L1 -- "lock for what triage hands over" --> C
+    H -- "lock for ticks and reloads" --> C
+    C -- "publish / withdraw open entries" --> F
+```
+
+A thread may still forward the rest of a batch it is deciding on an entry the control half has just withdrawn or rewritten (a reload, a sweep, a roam); its next lookups see the change. The control half publishes the sessions a handshake response opens before that response is sent on, so the initiator's first data message, wherever the kernel delivers it, finds them.
 
 ```mermaid
 flowchart LR
     subgraph fwd["Forwarding half (Forwarder): read only"]
         OPEN["open sessions<br/>receiver_idx → {dest, expected_src, opened}"]
-        RES["reserved prefixes<br/>of the registration tunnels"]
     end
     subgraph ctl["Control half (Control)"]
         subgraph cfg["From relay.toml"]
@@ -330,10 +359,11 @@ flowchart LR
         end
         subgraph tunnels["Relay's own WireGuard"]
             T["one boringtun Tunn per listed peer<br/>indexes in a reserved prefix"]
+            RES["reserved prefixes<br/>prefix → listed peer"]
         end
     end
     SES -- "publish / withdraw<br/>open entries" --> OPEN
-    T -- "prefixes replaced<br/>on reload" --> RES
+    T -- "one prefix each" --> RES
 ```
 
 | Table | Half | Written when | Read when | Expires |
@@ -341,7 +371,7 @@ flowchart LR
 | `registry` | control | a packet **authenticates** on a listed peer's registration tunnel | finding a listed peer's address | 180 s without authenticated traffic |
 | `sessions` | control | a handshake is forwarded (pending) or accepted (open); never by forwarded data or cookie replies | every handshake, and every type 3 or 4 packet the forwarding half hands over | 200 s after the handshake was accepted, whatever the traffic (10 s after the initiation while pending); a pending entry also goes when its listed peer has 1,024 newer ones |
 | `open sessions` | forwarding | by the session table, in the same call that opens, replaces, migrates or removes an open entry | every type 3 or 4 packet | with its session table entry; a lookup checks the 200 s lifetime itself, so an entry stops forwarding on time even before the sweep removes it |
-| `reserved prefixes` | forwarding | on reload, from the reserved prefixes | every type 3 or 4 packet | when its listed peer is removed |
+| `reserved prefixes` | control | when a listed peer's registration tunnel is created (startup, reload) | every packet the forwarding half hands over, and every forwarded handshake's `sender_idx` | when its listed peer is removed |
 | `rate limiter` | control | every initiation | every initiation | never: a fixed array of buckets, so memory is constant |
 | `forwarding budget` | control | after each mac1 scan | every initiation not for the relay | never; refills continuously |
 | `registration budget` | control | after each registration attempt from an unregistered address | every registration initiation from an unregistered address | never; refills continuously |
@@ -431,7 +461,7 @@ Quotas keep the table bounded:
 - Each listed peer may have at most 1,024 pending entries: a new initiation for a peer at its quota evicts that peer's oldest pending entry (counted as `pending_evicted`), so spoofed initiations aimed at one listed peer only compete with handshakes to that peer, and a legitimate handshake survives as long as it is answered before 1,024 newer initiations to the same peer arrive.
 - Each listed peer may have at most 65,536 entries in all, pending and open, room for about 16,000 busy sessions (a busy session holds four entries: its current pair and, until it expires, the previous one). A listed peer that answers spoofed initiations with fabricated responses gains two open entries per answer; at its quota, new initiations to it and responses from it are dropped (`peer_quota`) until its entries expire, and other peers are unaffected.
 - At most 262,144 entries may be pending in total (`too_many_pending`), so a flood of initiations leaves most of the table to open sessions; with the default budgets, a flood cannot create pending entries fast enough to reach it.
-- At most 917,504 entries may exist in total (`too_many_sessions`), a memory backstop of about 135 MB ([reference](reference.md#session-table)).
+- At most 917,504 entries may exist in total (`too_many_sessions`), a memory backstop of about 240 MB with the forwarding half's copy of open entries ([reference](reference.md#session-table)).
 
 When an expiry sweep leaves the table mostly empty, it gives the memory back. If a handshake picks an index that a live entry of a different address pair already holds (probability 2⁻³² per pair by accident), it is dropped (`index_in_use`) and the peer retries with a new index, so an index in use can never be taken over. A live open entry is never replaced at all, not even by its own address pair: an initiation re-sent or replayed with the index of an open session is dropped (`index_in_use`), so it can neither cut the session off by turning the entry back into a pending one nor restart its lifetime. WireGuard uses a fresh index for every initiation, so real peers never hit this.
 
@@ -507,7 +537,7 @@ Every datagram goes through `Relay::handle` (`src/relay/mod.rs`), and who handle
 | `ForwardedCookieReply { receiver }` | any other cookie reply | `forward_cookie_reply`: a pending or open session |
 | `ForwardedData { receiver }` | any other transport data | `forward_data`: an open session only |
 
-A cookie reply or transport data that reaches the control half is checked against the full session table, so a pending index gives `session_not_open` for data (a cookie reply passes) and an unknown one `unknown_index`, exactly as if there were one table. The two levels exist because the forwarding half only reads, so several threads will be able to run it while one thread owns the control half.
+A cookie reply or transport data that reaches the control half is checked against the full session table, so a pending index gives `session_not_open` for data (a cookie reply passes) and an unknown one `unknown_index`, exactly as if there were one table. The two levels exist because the forwarding half only reads, so every forwarding thread runs it at once without a lock, while the control half is locked by one thread at a time.
 
 ```mermaid
 flowchart TD
@@ -516,7 +546,7 @@ flowchart TD
         SV -- no --> D0["Drop: invalid_source"]
         SV -- yes --> P{"parse: type, size,<br/>reserved bytes"}
         P -- bad --> M["Drop: malformed"]
-        P -- "type 3/4" --> FO{"receiver_idx outside the<br/>reserved prefixes and a<br/>live open session?"}
+        P -- "type 3/4" --> FO{"receiver_idx a live<br/>open session?<br/>(never one in a reserved prefix)"}
         FO -- yes --> FS{"src is its<br/>expected_src?"}
         FS -- yes --> FW["Forward to its dest"]
         FS -- no --> D3["Drop: wrong_source"]
@@ -606,14 +636,14 @@ Together these guarantee the two kinds of index never collide, and a message who
 | Registration TTL | 180 s | `REGISTRY_TTL` | a listed peer silent for 3 min is forgotten |
 | Session lifetime | 200 s after the handshake, not extended by traffic | `SESSION_TTL` | indexes from old handshakes age out; nobody can keep an entry alive by sending |
 | Pending lifetime | 10 s after the initiation, not extended by cookie replies | `PENDING_TTL` | unanswered initiations do not pile up |
-| Relay tick | 250 ms | `app.rs` | runs registration tunnel timers |
+| Relay tick | 250 ms | `app.rs` (main thread) | runs registration tunnel timers, checks that every forwarding thread is still running |
 | Table sweep | 1 s | `SWEEP_INTERVAL` | expires tables, shrinks them when mostly empty |
-| Stats log | 60 s | `app.rs` | logs all counters, including per-reason rejects |
+| Stats log | 60 s | `app.rs` (main thread) | logs all counters of every thread, including per-reason rejects |
 | Rate limit | `handshake_rate_per_ip`, burst 2 s worth | `relay.toml` | caps initiations per source (IPv4 address or IPv6 /64) |
 | Forwarding budget | 1,000,000 mac1 checks/s, burst 1 s | `FORWARDING_WORK_PER_SEC` | caps CPU spent finding forwarded handshakes' destinations |
 | Registration budget | 200,000 mac1 checks/s (500 attempts), burst 1 s | `REGISTRATION_WORK_PER_SEC` | caps X25519 work on registration attempts from unregistered addresses |
 | Pending quota | 1,024 per listed peer; 262,144 in total | `MAX_PENDING_PER_PEER`, `MAX_PENDING` | a flood at one listed peer evicts only that peer's oldest pending entries; the total leaves room for open sessions |
-| Session quota | 65,536 entries per listed peer; 917,504 in total | `MAX_SESSIONS_PER_PEER`, `MAX_SESSIONS` | one listed peer cannot take the whole table; the total bounds memory at about 135 MB |
+| Session quota | 65,536 entries per listed peer; 917,504 in total | `MAX_SESSIONS_PER_PEER`, `MAX_SESSIONS` | one listed peer cannot take the whole table; the total bounds memory at about 240 MB, open sessions' copy in the forwarding half included |
 
 The values nest deliberately: a healthy listed peer refreshes its registration about seven times per TTL, and a session in use is replaced by a rekey every 2 minutes, so its entries are idle well before they expire 200 s after their handshake. WireGuard stops using a session's keys at 180 s at the latest, which is why the relay can expire entries on a fixed schedule instead of watching traffic.
 
@@ -706,7 +736,7 @@ flowchart LR
 | Handshake floods | Per-source token buckets, then separate work budgets for forwarding scans and registration attempts, checked before the mac1 scan or key exchange: floods are shed cheaply, forwarding continues, a flood on one path does not starve the other, and registered peers re-handshake with the relay without touching the registration budget |
 | Crowding out pending handshakes | Each listed peer has its own quota of 1,024 pending entries, evicting its oldest first, so a flood aimed at one listed peer cannot refuse handshakes to the others |
 | A listed peer filling the session table by answering spoofed initiations | Each listed peer may hold at most 65,536 entries, pending and open, so it can only refuse new sessions to itself |
-| Exhausting memory with spoofed sources | The rate limiter is a fixed array; the session table is capped at 917,504 entries (about 135 MB), of which at most 262,144 pending; tables shrink after a flood |
+| Exhausting memory with spoofed sources | The rate limiter is a fixed array; the session table is capped at 917,504 entries (about 240 MB with the forwarding half's copy), of which at most 262,144 pending; tables shrink after a flood |
 | Keeping a session alive with junk, e.g. a client the server has removed | Entries live a fixed time from their handshake (200 s open, 10 s pending); neither data nor cookie replies extend them, and an open entry cannot be reset by re-sending its initiation |
 | Spoofed sources that cannot receive replies | Datagrams from port 0, unspecified, multicast or broadcast addresses are dropped first (`invalid_source`) |
 | A removed listed peer lingering | SIGHUP drops its registration and sessions immediately |
@@ -720,8 +750,11 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    main["main.rs<br/>parse CLI, logging, report errors"] --> app["app.rs<br/>Cli, socket loop, timers, signals"]
-    app --> udp["udp.rs + udp/runs.rs<br/>batched I/O on quinn-udp,<br/>GRO split, GSO runs"]
+    main["main.rs<br/>parse CLI, logging, report errors"] --> app["app.rs<br/>Cli, startup, main thread: timers, signals"]
+    app --> wrk["app/workers.rs<br/>the other forwarding threads"]
+    app --> loop["app/forwarding.rs<br/>socket loop: batch, GSO runs, outbox"]
+    wrk --> loop
+    loop --> udp["udp.rs + udp/runs.rs<br/>SO_REUSEPORT sockets, batched I/O<br/>on quinn-udp, GRO split, GSO runs"]
     app --> cfg["config/<br/>relay.toml, Rate, Summary, ConfigError"]
     app --> relay["relay/mod.rs<br/>Relay: handle, tick, reload, metrics;<br/>settle"]
     relay --> fwdr["relay/forwarder.rs<br/>Forwarder: triage (read only)"]
@@ -741,9 +774,9 @@ flowchart TD
 
 Following one transport data message through the code:
 
-1. `app.rs` `forward_batch()` receives it in a batch with `Socket::try_recv` (`recvmmsg`, in `udp.rs`), either alone in a receive buffer or as one segment of a GRO buffer, which `udp::runs::segments()` splits at the reported size. It calls `relay.handle(src, bytes, now)`.
+1. `app/forwarding.rs` `forward_batch()`, on whichever thread's socket the kernel picked for the flow, receives it in a batch with `Socket::try_recv` (`recvmmsg`, in `udp.rs`), either alone in a receive buffer or as one segment of a GRO buffer, which `udp::runs::segments()` splits at the reported size. It calls `relay.handle(src, bytes, now)`.
 2. `handle()` asks the forwarding half: `Forwarder::triage()` checks that the source can be replied to and calls `packet::parse()`, which gives `Message::TransportData { receiver }`.
-3. `receiver` is in none of the reserved prefixes, and `open.get(receiver, now)` finds a live open session whose `expected_src` is the source. Nothing is written: the entry's lifetime is fixed.
+3. `open.get(receiver, now)` finds a live open session whose `expected_src` is the source, without any lock: other threads may be reading the same map, and the control half writing it. Nothing is written: the entry's lifetime is fixed.
 4. `triage()` returns `Triage::Forward(dest)`, and `settle()` records `Verdict::Forward(dest)` in the forwarding half's counters. Had the index been pending or unknown, `triage()` would have answered `Triage::ToControl`, `classify()` would have named it `ForwardedData`, and `forward_data()` would have decided against the full session table (`session_not_open` or `unknown_index`).
 5. `Plan::make()` in `udp/runs.rs` groups it with the neighbouring datagrams that go to the same address, and `forward()` sends the group as one GSO send of the original, unmodified bytes (or alone, with a plain send). If the GSO send fails, the datagrams go again one by one.
 
@@ -751,11 +784,11 @@ Following one transport data message through the code:
 
 | Layer | What | Where |
 |---|---|---|
-| Unit | session table: fixed lifetimes, per-peer pending eviction, per-peer quota, global cap and exact counts, with its per-peer accounts and open-session view checked after every change; the forwarding half alone: forwarding on open sessions, the expected source, and everything it hands to the control half; the forwarding half kept in step with the control half after each kind of change and through 20,000 random operations, with both halves reaching the same verdict; the control half's classification of every case; read-only forwarding, source validation, eviction counter, counters merged from both halves; registry, rate limiter, the forwarding and registration budgets and their independence, `Rate` parsing, ICMP reply; splitting GRO buffers and grouping datagrams into GSO sends | `#[cfg(test)]` modules in `src/` |
+| Unit | session table: fixed lifetimes, per-peer pending eviction, per-peer quota, global cap and exact counts, with its per-peer accounts and open-session view checked after every change; the forwarding half alone: forwarding on open sessions, the expected source, and everything it hands to the control half; the forwarding half kept in step with the control half after each kind of change and through 20,000 random operations, with both halves reaching the same verdict; reader threads triaging while another thread changes the sessions, never seeing a route the session table never held; the control half's classification of every case; read-only forwarding, source validation, eviction counter, counters merged from both halves; registry, rate limiter, the forwarding and registration budgets and their independence, `Rate` parsing, ICMP reply; splitting GRO buffers and grouping datagrams into GSO sends | `#[cfg(test)]` modules in `src/` |
 | Packet | parsing, size checks, mac1 matching and batched search on real packets made by boringtun | `tests/packet.rs` |
 | Config | defaults, exact `ConfigError` for each bad input, `--check-config` | `tests/config.rs` |
 | Relay, in-process | full handshakes between boringtun peers through `Relay::handle` (unlisted to listed, listed to listed, listed to unlisted refused), reload, roaming, reserved indexes, index takeover, re-sent initiations, fixed session lifetimes under traffic, IPv4-mapped sources, rate limits, registration and pending floods, 10 000 mutated packets | `tests/relay.rs` |
-| End-to-end | real kernel WireGuard in network namespaces behind real NATs | `tests/netns.sh` |
+| End-to-end | real kernel WireGuard in network namespaces behind real NATs, with three forwarding threads | `tests/netns.sh` |
 
 The end-to-end topology:
 

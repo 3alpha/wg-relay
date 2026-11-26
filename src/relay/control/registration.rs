@@ -133,7 +133,7 @@ impl Control {
         let name = self.peers.get(&peer).map_or("?", |p| &p.name);
         info!(peer = %name, addr = %src, old = ?old, "registered");
         if let Some(old) = old {
-            self.sessions.migrate(old, src, &mut self.forwarder.open);
+            self.sessions.migrate(old, src, &self.forwarder.open);
         }
     }
 }

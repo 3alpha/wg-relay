@@ -1,9 +1,10 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use papaya::HashMap;
+
 use super::entry::Session;
-use super::{live, shrink_if_sparse};
+use super::live;
 use crate::packet::SessionIdx;
 
 /// What forwarding needs of an open session.
@@ -25,7 +26,8 @@ impl From<&Session> for Route {
 
 /// The open entries of a `SessionTable`, as the forwarding half reads them.
 /// Only the table writes it, in the same calls that change its open entries,
-/// so the two cannot disagree.
+/// so the two cannot disagree. Every thread reads it without a lock; the map
+/// shrinks itself once mostly empty.
 pub struct OpenSessions {
     ttl: Duration,
     map: HashMap<SessionIdx, Route>,
@@ -37,8 +39,8 @@ impl OpenSessions {
     }
 
     /// The open session `idx` names, unless its lifetime is over.
-    pub fn get(&self, idx: SessionIdx, now: Instant) -> Option<&Route> {
-        self.map.get(&idx).filter(|r| live(r.opened, now, self.ttl))
+    pub fn get(&self, idx: SessionIdx, now: Instant) -> Option<Route> {
+        self.map.pin().get(&idx).filter(|r| live(r.opened, now, self.ttl)).copied()
     }
 
     #[cfg(test)]
@@ -46,21 +48,24 @@ impl OpenSessions {
         self.map.len()
     }
 
-    pub(super) fn publish(&mut self, idx: SessionIdx, route: Route) {
-        self.map.insert(idx, route);
+    pub(super) fn publish(&self, idx: SessionIdx, route: Route) {
+        self.map.pin().insert(idx, route);
     }
 
-    pub(super) fn withdraw(&mut self, idx: SessionIdx) {
-        self.map.remove(&idx);
-    }
-
-    pub(super) fn shrink(&mut self) {
-        shrink_if_sparse(&mut self.map);
+    pub(super) fn withdraw(&self, idx: SessionIdx) {
+        self.map.pin().remove(&idx);
     }
 
     /// Does this view hold exactly these routes, with this lifetime?
     #[cfg(test)]
-    pub(super) fn holds(&self, ttl: Duration, routes: &HashMap<SessionIdx, Route>) -> bool {
-        self.ttl == ttl && self.map == *routes
+    pub(super) fn holds(
+        &self,
+        ttl: Duration,
+        routes: &std::collections::HashMap<SessionIdx, Route>,
+    ) -> bool {
+        let map = self.map.pin();
+        let mine: std::collections::HashMap<SessionIdx, Route> =
+            map.iter().map(|(i, r)| (*i, *r)).collect();
+        self.ttl == ttl && mine == *routes
     }
 }

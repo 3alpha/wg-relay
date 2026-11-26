@@ -1,5 +1,5 @@
 # wg-relay configuration. Validate with: wg-relay --check-config -c relay.toml
-# Reload with SIGHUP (listen and private_key changes need a restart).
+# Reload with SIGHUP (listen, workers and private_key changes need a restart).
 listen = "0.0.0.0:51820"
 # The relay's own WireGuard private key (wg genkey). Used only for the
 # registration tunnels; it can never decrypt traffic between peers.
@@ -9,6 +9,10 @@ tunnel_ip = "10.99.0.254"
 # Handshake initiations per source (IPv4 address or IPv6 /64): "<n>/s" or
 # "<n>/m". Burst = 2 s worth.
 handshake_rate_per_ip = "10/s"
+# Forwarding threads, each with its own socket on the listen port; the kernel
+# keeps each flow on one of them. Default: one per CPU the relay may use.
+# Linux only; elsewhere the relay uses one.
+# workers = 4
 
 # The peers that must be reachable, usually the servers. Each one adds the
 # relay as a WireGuard peer and registers with it. Anyone may start a

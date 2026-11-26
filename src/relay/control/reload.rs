@@ -34,14 +34,12 @@ impl Control {
         }
         let peers = &self.peers;
         self.reserved.retain(|_, k| peers.contains_key(k));
-        self.forwarder.set_reserved(self.reserved.keys().copied());
         for k in self.registry.keys() {
             if !peers.contains_key(&k) {
                 self.registry.remove(&k);
             }
         }
-        let dropped =
-            self.sessions.retain(|s| peers.contains_key(&s.peer), &mut self.forwarder.open);
+        let dropped = self.sessions.retain(|s| peers.contains_key(&s.peer), &self.forwarder.open);
         info!(peers = peers.len(), dropped_sessions = dropped, "config applied");
     }
 

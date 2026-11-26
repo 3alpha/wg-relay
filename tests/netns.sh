@@ -8,6 +8,7 @@
 #
 # Every host runs kernel WireGuard behind its own NAT (MASQUERADE, unsolicited
 # inbound dropped). Tunnel IPs: srv 10.99.0.1, c1 .11, c2 .12, st .13, relay .254.
+# The relay runs three forwarding threads, each with its own socket.
 # relay.toml lists srv and c2, which register with the relay; c1 and st are
 # unlisted. The server has c1 and c2 as peers; st (stranger) is not one of them,
 # although it knows the server's public key. The test asserts:
@@ -101,6 +102,7 @@ write_config() { # listed peers...
     {
         echo "private_key = \"$(cat "$WORK/relay.key")\""
         echo "handshake_rate_per_ip = \"10/s\""
+        echo "workers = 3"
         for p in "$@"; do printf '[[peer]]\nname = "%s"\npubkey = "%s"\n' "$p" "$(pub "$p")"; done
     } >"$WORK/relay.toml"
 }
@@ -156,6 +158,8 @@ PIDS+=($!)
 RELAY_PID=$!
 sleep 0.3
 setup_wg
+
+grep -q 'wg-relay started.*workers=3' "$LOG" || fail "relay did not start three forwarding threads"
 
 step "1. srv and c2 register"
 retry_ping srv 10.99.0.254 15 || fail "srv not registered"

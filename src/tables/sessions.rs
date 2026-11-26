@@ -60,7 +60,7 @@ impl SessionTable {
         &mut self,
         idx: SessionIdx,
         s: Session,
-        view: &mut OpenSessions,
+        view: &OpenSessions,
     ) -> Result<Option<SessionIdx>, Refusal> {
         let old = self.replaceable(idx, &s)?;
         self.check_room(&s, old.as_ref())?;
@@ -95,13 +95,7 @@ impl SessionTable {
     }
 
     /// Put `s` at `idx` in place of `old`: in the entries, the accounts and the view.
-    fn store(
-        &mut self,
-        idx: SessionIdx,
-        s: Session,
-        old: Option<Session>,
-        view: &mut OpenSessions,
-    ) {
+    fn store(&mut self, idx: SessionIdx, s: Session, old: Option<Session>, view: &OpenSessions) {
         self.map.insert(idx, s);
         if let Some(old) = old {
             self.ledger.removed(idx, &old);
@@ -129,7 +123,7 @@ impl SessionTable {
 
     /// Mark a pending index open once the response is accepted; its open
     /// lifetime starts now.
-    pub fn open(&mut self, idx: SessionIdx, now: Instant, view: &mut OpenSessions) {
+    pub fn open(&mut self, idx: SessionIdx, now: Instant, view: &OpenSessions) {
         let Some(s) = self.map.get_mut(&idx) else { return };
         let was = s.state;
         s.since = now;
@@ -143,7 +137,7 @@ impl SessionTable {
     }
 
     /// A registered peer moved: rewrite its address in every session.
-    pub fn migrate(&mut self, old: SocketAddr, new: SocketAddr, view: &mut OpenSessions) {
+    pub fn migrate(&mut self, old: SocketAddr, new: SocketAddr, view: &OpenSessions) {
         for (idx, s) in &mut self.map {
             let before = (s.dest, s.expected_src);
             if s.dest == old {
@@ -159,11 +153,7 @@ impl SessionTable {
     }
 
     /// Keep only matching sessions; returns how many were removed.
-    pub fn retain(
-        &mut self,
-        mut keep: impl FnMut(&Session) -> bool,
-        view: &mut OpenSessions,
-    ) -> usize {
+    pub fn retain(&mut self, mut keep: impl FnMut(&Session) -> bool, view: &OpenSessions) -> usize {
         let before = self.map.len();
         self.ledger.retain(&mut self.map, |idx, s| {
             let kept = keep(s);
@@ -173,11 +163,10 @@ impl SessionTable {
             kept
         });
         shrink_if_sparse(&mut self.map);
-        view.shrink();
         before - self.map.len()
     }
 
-    pub fn expire(&mut self, now: Instant, view: &mut OpenSessions) -> usize {
+    pub fn expire(&mut self, now: Instant, view: &OpenSessions) -> usize {
         let ttls = self.ttls;
         self.retain(|s| ttls.live(s, now), view)
     }
@@ -219,6 +208,13 @@ impl SessionTable {
         let open = self.map.iter().filter(|(_, s)| s.state == SessionState::Open);
         let routes: HashMap<SessionIdx, Route> = open.map(|(i, s)| (*i, Route::from(s))).collect();
         view.holds(self.ttls.open, &routes)
+    }
+
+    /// Each open entry's index, expected source and destination.
+    #[cfg(test)]
+    pub fn open_pairs(&self) -> impl Iterator<Item = (SessionIdx, SocketAddr, SocketAddr)> {
+        let open = self.map.iter().filter(|(_, s)| s.state == SessionState::Open);
+        open.map(|(i, s)| (*i, s.expected_src, s.dest))
     }
 }
 
@@ -277,27 +273,27 @@ mod tests {
         }
 
         fn insert(&mut self, i: SessionIdx, s: Session) -> Result<Option<SessionIdx>, Refusal> {
-            let out = self.table.insert(i, s, &mut self.view);
+            let out = self.table.insert(i, s, &self.view);
             self.checked(out)
         }
 
         fn open(&mut self, i: SessionIdx, now: Instant) {
-            self.table.open(i, now, &mut self.view);
+            self.table.open(i, now, &self.view);
             self.checked(());
         }
 
         fn migrate(&mut self, old: SocketAddr, new: SocketAddr) {
-            self.table.migrate(old, new, &mut self.view);
+            self.table.migrate(old, new, &self.view);
             self.checked(());
         }
 
         fn retain(&mut self, keep: impl FnMut(&Session) -> bool) -> usize {
-            let out = self.table.retain(keep, &mut self.view);
+            let out = self.table.retain(keep, &self.view);
             self.checked(out)
         }
 
         fn expire(&mut self, now: Instant) -> usize {
-            let out = self.table.expire(now, &mut self.view);
+            let out = self.table.expire(now, &self.view);
             self.checked(out)
         }
     }
@@ -400,7 +396,7 @@ mod tests {
             expected_src: addr("192.0.2.2:2"),
             opened: t0 + secs(5),
         };
-        assert_eq!(t.view.get(idx(1), t0 + secs(204)), Some(&route));
+        assert_eq!(t.view.get(idx(1), t0 + secs(204)), Some(route));
         assert_eq!(t.view.get(idx(1), t0 + secs(205)), None, "counted from opening");
         // A stale open entry replaced by a pending one leaves the view at once.
         t.insert(idx(1), pending("192.0.2.3:3", "192.0.2.4:4", t0 + secs(205))).unwrap();
@@ -504,7 +500,7 @@ mod tests {
         // Unchecked one by one: checking compares whole tables.
         for i in 0..100_000 {
             let s = pending("192.0.2.1:1", "192.0.2.2:2", t0);
-            t.table.insert(idx(i), s, &mut t.view).unwrap();
+            t.table.insert(idx(i), s, &t.view).unwrap();
         }
         let peak = t.map.capacity();
         t.insert(idx(1 << 31), open("192.0.2.1:1", "192.0.2.2:2", t0 + secs(5))).unwrap();

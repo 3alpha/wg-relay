@@ -21,6 +21,8 @@ fn peers_and_defaults() {
     assert_eq!(cfg.tunnel_ip.to_string(), "10.99.0.254");
     assert_eq!(cfg.handshake_rate.per_sec(), 10.0);
     assert_eq!(cfg.private_key.public_key(), r.id());
+    let cores = std::thread::available_parallelism().unwrap().get();
+    assert_eq!(cfg.workers.get(), cores.min(wg_relay::config::MAX_WORKERS), "one per core");
     assert_eq!(
         cfg.peers,
         vec![
@@ -29,13 +31,14 @@ fn peers_and_defaults() {
         ]
     );
 
-    let extra =
-        "listen = \"127.0.0.1:5000\"\ntunnel_ip = \"10.0.0.1\"\nhandshake_rate_per_ip = \"60/m\"\n";
+    let extra = "listen = \"127.0.0.1:5000\"\ntunnel_ip = \"10.0.0.1\"\n\
+                 handshake_rate_per_ip = \"60/m\"\nworkers = 3\n";
     let cfg = Config::parse(&(head(&r, extra) + &peer("home", &a))).unwrap();
     assert_eq!(
         (cfg.listen.to_string(), cfg.tunnel_ip.to_string(), cfg.handshake_rate.per_sec()),
         ("127.0.0.1:5000".into(), "10.0.0.1".into(), 1.0)
     );
+    assert_eq!(cfg.workers.get(), 3);
 }
 
 /// Does this error match what a test case expects?
@@ -77,6 +80,15 @@ fn rejects_bad_configs_with_exact_errors() {
         ("bad rate", head(&r, "handshake_rate_per_ip = \"0/s\"\n") + &peer("a", &a), |e| {
             toml_error(e, "rate must be positive")
         }),
+        ("no workers", head(&r, "workers = 0\n") + &peer("a", &a), |e| {
+            matches!(e, ConfigError::Workers { got: 0, max: 256 })
+        }),
+        ("too many workers", head(&r, "workers = 257\n") + &peer("a", &a), |e| {
+            matches!(e, ConfigError::Workers { got: 257, max: 256 })
+        }),
+        ("negative workers", head(&r, "workers = -1\n") + &peer("a", &a), |e| {
+            toml_error(e, "invalid value")
+        }),
         ("unknown field", head(&r, "") + &peer("a", &a) + "bogus = 1\n", |e| {
             toml_error(e, "unknown field")
         }),
@@ -111,6 +123,7 @@ fn check_config_flag() {
     let out = String::from_utf8_lossy(&ok.stdout);
     assert!(ok.status.success() && out.contains("config OK"), "{out}");
     assert!(out.contains("peer main"), "{out}");
+    assert!(out.contains("workers      "), "{out}");
     assert!(!run(&bad).status.success());
     std::fs::remove_dir_all(&dir).ok();
 }

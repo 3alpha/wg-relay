@@ -3,9 +3,13 @@
 //! `Relay::handle` does no I/O: it returns a `Verdict` for the datagram and
 //! queues the registration tunnels' output for `take_outbox`. Inside, the
 //! forwarding half decides what it can from open sessions alone and hands the
-//! rest to the control half, which owns everything that changes.
+//! rest to the control half, which owns everything that changes. Several
+//! threads can run the relay at once, each with its own `Relay` from
+//! `Relay::share`: the forwarding half is read without a lock, the control
+//! half is locked for each datagram it decides.
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use tracing::debug;
@@ -19,50 +23,81 @@ mod metrics;
 mod reason;
 
 use control::Control;
-use forwarder::Triage;
+use forwarder::{Forwarder, Triage};
 pub use metrics::Metrics;
 use reason::Accepted;
 pub use reason::{Reason, Verdict};
 
+/// One thread's handle on the relay.
 pub struct Relay {
-    control: Control,
-    /// What the forwarding half decided, and socket errors: the counters each
-    /// forwarding worker will own.
+    forwarder: Arc<Forwarder>,
+    control: Arc<Mutex<Control>>,
+    /// What the forwarding half decided on this thread, and its socket errors.
     counters: Metrics,
 }
 
 impl Relay {
     pub fn new(cfg: &Config) -> Self {
-        Relay { control: Control::new(cfg), counters: Metrics::default() }
+        let control = Control::new(cfg);
+        Relay {
+            forwarder: control.forwarder(),
+            control: Arc::new(Mutex::new(control)),
+            counters: Metrics::default(),
+        }
+    }
+
+    /// Another handle on the same relay, with counters of its own, for another thread.
+    pub fn share(&self) -> Self {
+        Relay {
+            forwarder: Arc::clone(&self.forwarder),
+            control: Arc::clone(&self.control),
+            counters: Metrics::default(),
+        }
+    }
+
+    /// Lock the control half. A thread that panicked holding it ends the
+    /// process anyway, so its state is used as it is.
+    fn control(&self) -> MutexGuard<'_, Control> {
+        self.control.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn public_key(&self) -> PeerKey {
-        self.control.public_key()
+        self.control().public_key()
     }
 
     pub fn peer_count(&self) -> usize {
-        self.control.peer_count()
+        self.control().peer_count()
     }
 
     pub fn session_count(&self) -> usize {
-        self.control.session_count()
+        self.control().session_count()
     }
 
-    /// Both halves' counters, merged.
+    /// This handle's counters and the control half's, merged.
     pub fn metrics(&self) -> Metrics {
         let mut all = self.counters.clone();
-        all += self.control.metrics();
+        all += &self.control_metrics();
         all
+    }
+
+    /// What the forwarding half decided on this handle's thread, and its socket errors.
+    pub fn counters(&self) -> &Metrics {
+        &self.counters
+    }
+
+    /// What the control half decided, for every thread.
+    pub fn control_metrics(&self) -> Metrics {
+        self.control().metrics().clone()
     }
 
     /// Where `key` is currently registered, if anywhere.
     pub fn registered_addr(&self, key: &PeerKey, now: Instant) -> Option<SocketAddr> {
-        self.control.registered_addr(key, now)
+        self.control().registered_addr(key, now)
     }
 
     /// Hand over the datagrams the registration tunnels want to send.
-    pub fn take_outbox(&mut self) -> Vec<(SocketAddr, Vec<u8>)> {
-        self.control.take_outbox()
+    pub fn take_outbox(&self) -> Vec<(SocketAddr, Vec<u8>)> {
+        self.control().take_outbox()
     }
 
     /// Count a datagram the caller failed to send.
@@ -78,22 +113,22 @@ impl Relay {
     /// Decide one datagram, counting and logging the outcome: the forwarding
     /// half first, then the control half for what the forwarding half hands over.
     pub fn handle(&mut self, src: SocketAddr, datagram: &[u8], now: Instant) -> Verdict {
-        match self.control.forwarder().triage(src, datagram, now) {
+        match self.forwarder.triage(src, datagram, now) {
             Triage::Forward(dst) => settle(&mut self.counters, src, Ok(Accepted::Forward(dst))),
             Triage::Drop(reason) => settle(&mut self.counters, src, Err(reason)),
-            Triage::ToControl(message) => self.control.handle(src, datagram, message, now),
+            Triage::ToControl(message) => self.control().handle(src, datagram, message, now),
         }
     }
 
     /// Run the registration tunnels' timers and expire soft state. Call a few times a second.
-    pub fn tick(&mut self, now: Instant) {
-        self.control.tick(now);
+    pub fn tick(&self, now: Instant) {
+        self.control().tick(now);
     }
 
     /// Apply a (re)loaded config. Removed peers lose their registrations, and
     /// every session routed to them, immediately.
-    pub fn reload(&mut self, cfg: &Config) {
-        self.control.reload(cfg);
+    pub fn reload(&self, cfg: &Config) {
+        self.control().reload(cfg);
     }
 }
 

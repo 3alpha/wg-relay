@@ -21,7 +21,7 @@ The relay is configured with nothing more than the public keys of the peers that
 - **Many networks on one relay.** Adding a network means adding its server's public key. Networks are isolated from one another by their own WireGuard peer lists.
 - **Minimal configuration.** The relay lists only the peers that must be reachable. Who may connect to them is decided where it always is in WireGuard: in each peer's own config.
 - **Abuse resistance.** Only listed peers can register, and a session opens only when a listed peer answers. Handshakes are rate-limited per source and by separate CPU budgets for forwarding and registration, so a flood cannot stall forwarding and cannot stop registered peers from staying registered; pending handshakes and session entries have a quota per listed peer, so a flood aimed at one network does not refuse handshakes to the others and a misbehaving listed peer cannot fill the session table; session entries expire a fixed time after their handshake, however much traffic arrives; memory stays bounded however many sources appear; and the relay cannot be used as a reflector.
-- **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 2,800 lines of Rust.
+- **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 3,100 lines of Rust.
 
 ## How it works
 
@@ -70,6 +70,7 @@ listen = "0.0.0.0:51820"
 private_key = "<relay private key>"
 tunnel_ip = "10.99.0.254"         # the relay's address inside each listed peer's tunnel
 handshake_rate_per_ip = "10/s"
+# workers = 4                     # forwarding threads; default one per CPU
 
 [[peer]]
 name = "main"
@@ -155,7 +156,7 @@ The relay's own private key opens only the registration tunnels, which carry kee
 - **The relay cannot cap who uses its bandwidth.** A listed peer can accept any number of unlisted peers; only handshakes are rate-limited.
 - **WireGuard's handshake flood protection is weaker behind the relay.** The relay's per-source rate limit and forwarding budget compensate in part; see [section 3.5 of the guide](docs/how-it-works.md#35-under-load-cookies-and-mac2).
 - **A sustained handshake flood delays new sessions.** Existing sessions keep forwarding, but legitimate handshakes compete with the flood: junk initiations compete with all forwarded handshakes for the forwarding budget, a flood aimed at one listed peer can evict pending handshakes to that peer, and a registration flood delays peers that register from a new address.
-- **The relay is single-threaded.** Ping replies are IPv4-only, and metrics are written to the log rather than exported.
+- **One flow is forwarded by one core.** The relay forwards on several threads, but the kernel keeps each flow (address pair) on one of them, and handshakes are decided one at a time. Ping replies are IPv4-only, and metrics are written to the log rather than exported.
 
 The [reference](docs/reference.md#limitations) gives the complete list with the reasoning behind each item, and the [guide's security model](docs/how-it-works.md#15-security-model) covers threats and defences.
 

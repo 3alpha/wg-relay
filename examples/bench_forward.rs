@@ -2,14 +2,21 @@
 //! process on loopback, so changes to the forwarding path can be compared.
 //!
 //! usage: bench_forward [--bin target/release/wg-relay] [--secs 5] [--senders 4]
+//!                      [--flows 1] [--servers 1] [--workers N] [--relay-cpus 0-3]
 //!                      [--sizes 64,1420] [--gso] [--relay-log warn]
 //!
-//! It starts the relay with a temporary config listing one peer (the server),
-//! registers the server through a real handshake with the relay, completes a
-//! client-to-server handshake through it, then sends one encrypted data packet
-//! over and over from the client socket (the relay does not check counters)
-//! and counts what reaches the server socket. Each size is the plaintext
-//! length; the datagram adds WireGuard's 16-byte header and 16-byte tag.
+//! It starts the relay with a temporary config listing the servers, registers
+//! each server through a real handshake with the relay, completes one
+//! client-to-server handshake through it per flow, each from its own client
+//! socket and to the servers in turn, then sends each flow's encrypted data
+//! packet over and over (the relay does not check counters) and counts what
+//! reaches the server sockets. With one server, every forwarded datagram
+//! lands in one socket, whose lock on loopback caps the rate at some point.
+//! Each size is the plaintext length; the datagram adds WireGuard's 16-byte
+//! header and 16-byte tag. The relay's workers share the port through
+//! `SO_REUSEPORT`, which keeps each flow on one worker, so spreading load over
+//! workers needs several flows. The relay's CPU time per second of the
+//! window is reported too.
 //!
 //! Loopback is not a NIC: there is no driver GRO, so plain sends reach the
 //! relay one datagram per receive. `--gso` sends bursts of up to 64 datagrams
@@ -58,10 +65,23 @@ struct Args {
     /// Measurement time per size, in seconds.
     #[arg(long, default_value_t = 5)]
     secs: u64,
-    /// Threads sending from the client socket; raise it until there is loss,
-    /// so that the relay, not the senders, sets the rate.
+    /// Threads sending from the client sockets, spread over the flows; raise
+    /// it until there is loss, so that the relay, not the senders, sets the rate.
     #[arg(long, default_value_t = 4)]
     senders: usize,
+    /// Client sockets, each with its own session through the relay.
+    #[arg(long, default_value_t = 1)]
+    flows: usize,
+    /// Listed peers receiving the flows, each on its own socket with its own counter thread.
+    #[arg(long, default_value_t = 1)]
+    servers: usize,
+    /// The relay's `workers` setting; left out of its config when not given.
+    #[arg(long)]
+    workers: Option<usize>,
+    /// Run the relay on these CPUs only (a `taskset` list), so that it does
+    /// not compete with the senders; run the bench itself on the others.
+    #[arg(long)]
+    relay_cpus: Option<String>,
     /// Plaintext sizes in bytes, comma-separated.
     #[arg(long, value_delimiter = ',', default_value = "64,1420")]
     sizes: Vec<usize>,
@@ -91,6 +111,8 @@ enum BenchError {
     Tunnel(&'static str),
     #[error("a size must be between 1 and {max} bytes")]
     Size { max: usize },
+    #[error("there must be at least one flow, server and sender")]
+    Flows,
 }
 
 struct Key {
@@ -165,8 +187,17 @@ impl Drop for TempDir {
 struct RelayProcess(Child);
 
 impl RelayProcess {
-    fn spawn(bin: &Path, config: &Path, log: &str) -> Result<Self, BenchError> {
-        let child = Command::new(bin)
+    fn spawn(bin: &Path, config: &Path, args: &Args) -> Result<Self, BenchError> {
+        let mut cmd = match &args.relay_cpus {
+            Some(cpus) => {
+                let mut cmd = Command::new("taskset");
+                cmd.arg("--cpu-list").arg(cpus).arg(bin);
+                cmd
+            }
+            None => Command::new(bin),
+        };
+        let log = &args.relay_log;
+        let child = cmd
             .arg("--config")
             .arg(config)
             .env("RUST_LOG", log)
@@ -174,6 +205,17 @@ impl RelayProcess {
             .spawn()
             .map_err(|source| BenchError::Spawn { path: bin.to_owned(), source })?;
         Ok(RelayProcess(child))
+    }
+
+    /// CPU time the relay (all its threads) has used so far, from `/proc`.
+    fn cpu_time(&self) -> Option<Duration> {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", self.0.id())).ok()?;
+        // Fields after the command name, which ends at the last ')'.
+        let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+        let ticks: u64 =
+            fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?;
+        // USER_HZ is 100 on every mainstream Linux build.
+        Some(Duration::from_millis(ticks * 10))
     }
 
     fn check_running(&mut self) -> Result<(), BenchError> {
@@ -219,34 +261,46 @@ fn recv_until<T>(
     Ok(None)
 }
 
-/// The three parties and their sockets.
+/// A listed peer receiving flows.
+struct Server {
+    key: Key,
+    sock: UdpSocket,
+    state: UdpSocketState,
+}
+
+/// The parties and their sockets.
 struct World {
     relay_key: Key,
-    server_key: Key,
     client_key: Key,
     relay: SocketAddr,
-    server: UdpSocket,
-    client: UdpSocket,
+    servers: Vec<Server>,
+    clients: Vec<UdpSocket>,
 }
 
 impl World {
-    /// Register the server with the relay, then check it with a ping to the
+    /// Register every server with the relay.
+    fn register_all(&self, process: &mut RelayProcess) -> Result<(), BenchError> {
+        self.servers.iter().try_for_each(|server| self.register(server, process))
+    }
+
+    /// Register `server` with the relay, then check it with a ping to the
     /// relay's tunnel address, which the relay answers only once registered.
-    fn register(&self, process: &mut RelayProcess) -> Result<(), BenchError> {
+    fn register(&self, server: &Server, process: &mut RelayProcess) -> Result<(), BenchError> {
+        let sock = &server.sock;
         let deadline = Instant::now() + STEP_TIMEOUT;
         while Instant::now() < deadline {
             process.check_running()?;
-            let mut t = tunn(&self.server_key, &self.relay_key);
-            self.server.send_to(&initiation(&mut t)?, self.relay)?;
+            let mut t = tunn(&server.key, &self.relay_key);
+            sock.send_to(&initiation(&mut t)?, self.relay)?;
             let answered = Instant::now() + RETRY_INTERVAL;
-            let Some(keepalive) = recv_until(&self.server, answered, |p| reply(&mut t, p))? else {
+            let Some(keepalive) = recv_until(sock, answered, |p| reply(&mut t, p))? else {
                 continue;
             };
-            self.server.send_to(&keepalive, self.relay)?;
+            sock.send_to(&keepalive, self.relay)?;
             let ping = encrypt(&mut t, &echo_request(TUNNEL_IP))?;
-            self.server.send_to(&ping, self.relay)?;
+            sock.send_to(&ping, self.relay)?;
             let mut buf = vec![0u8; RECV_BUF_BYTES];
-            let pong = recv_until(&self.server, answered + RETRY_INTERVAL, |p| {
+            let pong = recv_until(sock, answered + RETRY_INTERVAL, |p| {
                 matches!(t.decapsulate(None, p, &mut buf), TunnResult::WriteToTunnelV4(..))
                     .then_some(())
             })?;
@@ -257,27 +311,26 @@ impl World {
         Err(BenchError::Timeout("the server to register with the relay"))
     }
 
-    /// Complete a client-to-server handshake through the relay and return the
-    /// client's tunnel, ready to encrypt data for the server.
-    fn connect(&self) -> Result<Tunn, BenchError> {
+    /// Complete a handshake from `client` to `server` through the relay and
+    /// return the client's tunnel, ready to encrypt data for the server.
+    fn connect(&self, client: &UdpSocket, server: &Server) -> Result<Tunn, BenchError> {
         let deadline = Instant::now() + STEP_TIMEOUT;
+        let sock = &server.sock;
         while Instant::now() < deadline {
-            let (mut c, mut s) = (
-                tunn(&self.client_key, &self.server_key),
-                tunn(&self.server_key, &self.client_key),
-            );
-            self.client.send_to(&initiation(&mut c)?, self.relay)?;
+            let (mut c, mut s) =
+                (tunn(&self.client_key, &server.key), tunn(&server.key, &self.client_key));
+            client.send_to(&initiation(&mut c)?, self.relay)?;
             let step = Instant::now() + RETRY_INTERVAL;
-            let Some(resp) = recv_until(&self.server, step, |p| reply(&mut s, p))? else {
+            let Some(resp) = recv_until(sock, step, |p| reply(&mut s, p))? else {
                 continue;
             };
-            self.server.send_to(&resp, self.relay)?;
-            let Some(keepalive) = recv_until(&self.client, step, |p| reply(&mut c, p))? else {
+            sock.send_to(&resp, self.relay)?;
+            let Some(keepalive) = recv_until(client, step, |p| reply(&mut c, p))? else {
                 continue;
             };
-            self.client.send_to(&keepalive, self.relay)?;
+            client.send_to(&keepalive, self.relay)?;
             let mut buf = vec![0u8; RECV_BUF_BYTES];
-            let confirmed = recv_until(&self.server, step + RETRY_INTERVAL, |p| {
+            let confirmed = recv_until(sock, step + RETRY_INTERVAL, |p| {
                 matches!(s.decapsulate(None, p, &mut buf), TunnResult::Done).then_some(())
             })?;
             if confirmed.is_some() {
@@ -305,13 +358,16 @@ struct Sample {
     received: u64,
     ecn_kept: u64,
     elapsed: Duration,
+    /// Relay CPU time over the window, if `/proc` tells.
+    relay_cpu: Option<Duration>,
 }
 
-/// Count datagrams arriving at the server that are copies of `pkt`.
+/// Count data datagrams of `len` bytes arriving at a server: nothing else
+/// sends it any.
 fn count_received(
     sock: &UdpSocket,
     state: &UdpSocketState,
-    pkt: &[u8],
+    len: usize,
     stop: &AtomicBool,
     counts: &Counts,
 ) -> io::Result<()> {
@@ -332,7 +388,9 @@ fn count_received(
         for (m, buf) in meta.iter().zip(bufs.chunks(RECV_BUF_BYTES)).take(n) {
             let data = &buf[..m.len.min(buf.len())];
             let stride = if m.stride == 0 { data.len().max(1) } else { m.stride };
-            let matched = data.chunks(stride).filter(|d| *d == pkt).count() as u64;
+            let matched =
+                data.chunks(stride).filter(|d| d.len() == len && d.first() == Some(&4)).count()
+                    as u64;
             counts.received.fetch_add(matched, Ordering::Relaxed);
             if m.ecn == Some(SENT_ECN) {
                 counts.ecn_kept.fetch_add(matched, Ordering::Relaxed);
@@ -342,29 +400,42 @@ fn count_received(
     Ok(())
 }
 
-/// Send `pkt` to the relay as fast as possible until stopped.
+/// One flow as a sender sees it: its socket and its data packet.
+struct Flow<'a> {
+    sock: &'a UdpSocket,
+    state: &'a UdpSocketState,
+    pkt: &'a [u8],
+}
+
+/// Send each flow's packet to the relay in turn, as fast as possible, until stopped.
 fn send_loop(
-    sock: &UdpSocket,
-    state: &UdpSocketState,
+    flows: &[Flow<'_>],
     gso: bool,
     relay: SocketAddr,
-    pkt: &[u8],
     stop: &AtomicBool,
     sent: &AtomicU64,
 ) {
-    let burst = if gso { (GSO_MAX_BYTES / pkt.len()).clamp(1, GSO_MAX_SEGMENTS) } else { 1 };
-    let contents = pkt.repeat(burst);
-    let transmit = Transmit {
-        destination: relay,
-        ecn: Some(SENT_ECN),
-        contents: &contents,
-        segment_size: Some(pkt.len()),
-        src_ip: None,
-    };
+    let bursts: Vec<(usize, Vec<u8>)> = flows
+        .iter()
+        .map(|f| {
+            let burst =
+                if gso { (GSO_MAX_BYTES / f.pkt.len()).clamp(1, GSO_MAX_SEGMENTS) } else { 1 };
+            (burst, f.pkt.repeat(burst))
+        })
+        .collect();
     while !stop.load(Ordering::Relaxed) {
-        // A full send buffer or a refused GSO send is part of the load test.
-        if state.try_send(sock.into(), &transmit).is_ok() {
-            sent.fetch_add(burst as u64, Ordering::Relaxed);
+        for (flow, (burst, contents)) in flows.iter().zip(&bursts) {
+            let transmit = Transmit {
+                destination: relay,
+                ecn: Some(SENT_ECN),
+                contents,
+                segment_size: Some(flow.pkt.len()),
+                src_ip: None,
+            };
+            // A full send buffer or a refused GSO send is part of the load test.
+            if flow.state.try_send(flow.sock.into(), &transmit).is_ok() {
+                sent.fetch_add(*burst as u64, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -378,34 +449,78 @@ struct Counts {
 }
 
 /// Run senders and the counter for one window and report what got through.
-fn measure(world: &World, states: &States, pkt: &[u8], args: &Args) -> Result<Sample, BenchError> {
+fn measure(
+    world: &World,
+    states: &States,
+    pkts: &[Vec<u8>],
+    process: &RelayProcess,
+    args: &Args,
+) -> Result<Sample, BenchError> {
     let stop = AtomicBool::new(false);
     let (sent, counts) = (AtomicU64::new(0), Counts::default());
-    let (client, server) = (&world.client, &world.server);
+    let len = pkts.first().map_or(0, Vec::len);
     thread::scope(|s| {
-        let counter = s.spawn(|| count_received(server, &states.server, pkt, &stop, &counts));
-        for _ in 0..args.senders {
-            s.spawn(|| send_loop(client, &states.client, args.gso, world.relay, pkt, &stop, &sent));
+        let counters: Vec<_> = world
+            .servers
+            .iter()
+            .map(|server| {
+                let (stop, counts) = (&stop, &counts);
+                s.spawn(move || count_received(&server.sock, &server.state, len, stop, counts))
+            })
+            .collect();
+        // Sender `i` takes flows `i`, `i + senders` and so on; with fewer flows
+        // than senders, several senders share a flow.
+        for i in 0..args.senders {
+            let flows: Vec<Flow<'_>> = (i % pkts.len()..pkts.len())
+                .step_by(args.senders)
+                .map(|f| Flow { sock: &world.clients[f], state: &states.clients[f], pkt: &pkts[f] })
+                .collect();
+            let (stop, sent) = (&stop, &sent);
+            s.spawn(move || send_loop(&flows, args.gso, world.relay, stop, sent));
         }
         thread::sleep(WARMUP);
         let snapshot = || {
             let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
-            (load(&sent), load(&counts.received), load(&counts.ecn_kept), Instant::now())
+            let cpu = process.cpu_time();
+            (load(&sent), load(&counts.received), load(&counts.ecn_kept), Instant::now(), cpu)
         };
-        let (s0, r0, e0, t0) = snapshot();
+        let (s0, r0, e0, t0, c0) = snapshot();
         thread::sleep(Duration::from_secs(args.secs));
-        let (s1, r1, e1, t1) = snapshot();
+        let (s1, r1, e1, t1, c1) = snapshot();
         stop.store(true, Ordering::Relaxed);
-        let counted = counter.join().unwrap_or(Ok(()));
-        counted?;
-        Ok(Sample { sent: s1 - s0, received: r1 - r0, ecn_kept: e1 - e0, elapsed: t1 - t0 })
+        for counter in counters {
+            counter.join().unwrap_or(Ok(()))?;
+        }
+        let relay_cpu = c0.zip(c1).map(|(a, b)| b.saturating_sub(a));
+        Ok(Sample {
+            sent: s1 - s0,
+            received: r1 - r0,
+            ecn_kept: e1 - e0,
+            elapsed: t1 - t0,
+            relay_cpu,
+        })
     })
 }
 
-/// Batched I/O state for the server and client sockets.
+/// Batched I/O state for the client sockets.
 struct States {
-    server: UdpSocketState,
-    client: UdpSocketState,
+    clients: Vec<UdpSocketState>,
+}
+
+/// Bind a server's socket and set it up for counting.
+fn server(key: Key) -> Result<Server, BenchError> {
+    let sock = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?;
+    sock.set_read_timeout(Some(Duration::from_millis(20)))?;
+    // The socket turns non-blocking here; `recv_until` copes with either.
+    let state = UdpSocketState::new((&sock).into())?;
+    // Room for bursts, so the counter is not what drops packets.
+    let _ = state.set_recv_buffer_size((&sock).into(), 16 << 20);
+    // Receive timestamps crowd the ECN bits out of `quinn-udp`'s control
+    // buffer next to a GRO segment size; the counter needs the ECN bits.
+    #[cfg(target_os = "linux")]
+    nix::sys::socket::setsockopt(&sock, nix::sys::socket::sockopt::ReceiveTimestampns, &false)
+        .map_err(io::Error::from)?;
+    Ok(Server { key, sock, state })
 }
 
 fn run(args: &Args) -> Result<(), BenchError> {
@@ -413,78 +528,93 @@ fn run(args: &Args) -> Result<(), BenchError> {
     if args.sizes.iter().any(|&s| s == 0 || s > max) {
         return Err(BenchError::Size { max });
     }
-    let (relay_key, server_key, client_key) = (key(), key(), key());
+    if args.flows == 0 || args.servers == 0 || args.senders == 0 {
+        return Err(BenchError::Flows);
+    }
+    let (relay_key, client_key) = (key(), key());
+    let servers = (0..args.servers).map(|_| server(key())).collect::<Result<Vec<_>, _>>()?;
+    let listed: String = servers
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            format!("[[peer]]\nname = \"server{i}\"\npubkey = \"{}\"\n", b64(s.key.pk.to_bytes()))
+        })
+        .collect();
     let relay = SocketAddr::from((Ipv4Addr::LOCALHOST, free_port()?));
     let dir = TempDir::new()?;
     let config = dir.0.join("relay.toml");
+    // Older builds reject the `workers` key, so it is only written when asked for.
+    let workers = args.workers.map_or_else(String::new, |n| format!("workers = {n}\n"));
     std::fs::write(
         &config,
         format!(
-            "listen = \"{relay}\"\nprivate_key = \"{}\"\nhandshake_rate_per_ip = \"100/s\"\n\
-             [[peer]]\nname = \"server\"\npubkey = \"{}\"\n",
+            "listen = \"{relay}\"\nprivate_key = \"{}\"\nhandshake_rate_per_ip = \"1000/s\"\n\
+             {workers}{listed}",
             b64(relay_key.sk.to_bytes()),
-            b64(server_key.pk.to_bytes()),
         ),
     )?;
-    let mut process = RelayProcess::spawn(&args.bin, &config, &args.relay_log)?;
+    let mut process = RelayProcess::spawn(&args.bin, &config, args)?;
     let world = World {
         relay_key,
-        server_key,
         client_key,
         relay,
-        server: UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?,
-        client: UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))?,
+        servers,
+        clients: (0..args.flows)
+            .map(|_| UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)))
+            .collect::<Result<_, _>>()?,
     };
-    for sock in [&world.server, &world.client] {
+    for sock in &world.clients {
         sock.set_read_timeout(Some(Duration::from_millis(20)))?;
     }
-    // Both sockets turn non-blocking here; `recv_until` copes with either.
+    // The sockets turn non-blocking here; `recv_until` copes with either.
     let states = States {
-        server: UdpSocketState::new((&world.server).into())?,
-        client: UdpSocketState::new((&world.client).into())?,
+        clients: world
+            .clients
+            .iter()
+            .map(|c| UdpSocketState::new(c.into()))
+            .collect::<Result<_, _>>()?,
     };
-    // Room for bursts, so the counter is not what drops packets.
-    let _ = states.server.set_recv_buffer_size((&world.server).into(), 16 << 20);
-    // Receive timestamps crowd the ECN bits out of `quinn-udp`'s control
-    // buffer next to a GRO segment size; the counter needs the ECN bits.
-    #[cfg(target_os = "linux")]
-    nix::sys::socket::setsockopt(
-        &world.server,
-        nix::sys::socket::sockopt::ReceiveTimestampns,
-        &false,
-    )
-    .map_err(io::Error::from)?;
 
     println!(
-        "relay {}: {} sender thread(s), {} sends, {} s per size",
+        "relay {}: {} sender thread(s), {} flow(s), {} server(s), {} sends, {} s per size",
         args.bin.display(),
         args.senders,
+        args.flows,
+        args.servers,
         if args.gso { "GSO" } else { "plain" },
         args.secs
     );
     println!(
-        "{:>9} {:>12} {:>12} {:>9} {:>7} {:>9}",
-        "datagram", "sent/s", "forwarded/s", "Mbit/s", "loss", "ECN kept"
+        "{:>9} {:>12} {:>12} {:>9} {:>7} {:>9} {:>9}",
+        "datagram", "sent/s", "forwarded/s", "Mbit/s", "loss", "ECN kept", "relay CPU"
     );
     for &size in &args.sizes {
         // A fresh registration and session per size, so long runs never
         // outlive the relay's registration and session lifetimes.
-        world.register(&mut process)?;
-        let mut client = world.connect()?;
-        let pkt = encrypt(&mut client, &ip_packet(size))?;
-        let sample = measure(&world, &states, &pkt, args)?;
+        world.register_all(&mut process)?;
+        let servers = world.servers.iter().cycle();
+        let pkts = world
+            .clients
+            .iter()
+            .zip(servers)
+            .map(|(c, server)| encrypt(&mut world.connect(c, server)?, &ip_packet(size)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sample = measure(&world, &states, &pkts, &process, args)?;
         process.check_running()?;
         let secs = sample.elapsed.as_secs_f64();
         let pps = sample.received as f64 / secs;
         let share = |part: u64, whole: u64| part as f64 / whole.max(1) as f64 * 100.0;
+        let cpu = sample.relay_cpu.map_or(-1.0, |c| c.as_secs_f64() / secs * 100.0);
+        let len = pkts.first().map_or(0, Vec::len);
         println!(
-            "{:>7} B {:>12.0} {:>12.0} {:>9.1} {:>6.1}% {:>8.1}%",
-            pkt.len(),
+            "{:>7} B {:>12.0} {:>12.0} {:>9.1} {:>6.1}% {:>8.1}% {:>8.0}%",
+            len,
             sample.sent as f64 / secs,
             pps,
-            pps * pkt.len() as f64 * 8.0 / 1e6,
+            pps * len as f64 * 8.0 / 1e6,
             (100.0 - share(sample.received, sample.sent)).max(0.0),
             share(sample.ecn_kept, sample.received),
+            cpu,
         );
         // Let the queues drain before the next size.
         thread::sleep(Duration::from_millis(200));

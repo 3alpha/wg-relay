@@ -1,22 +1,20 @@
-use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Instant;
 
 use super::Reason;
-use crate::packet::{self, IdxPrefix, Message};
+use crate::packet::{self, Message};
 use crate::tables::{OpenSessions, Route};
 
 /// The forwarding half: forwards transport data and cookie replies on open
 /// sessions from state it only reads, and hands every other datagram to the
-/// control half, which is also its only writer.
+/// control half, which is also its only writer. Every forwarding thread reads
+/// it at once, without a lock.
 pub(super) struct Forwarder {
     /// Open sessions, written only by the session table as its open entries change.
     pub(super) open: OpenSessions,
-    /// Index prefixes of the registration tunnels. Messages to them go to the control half.
-    reserved: HashSet<IdxPrefix>,
 }
 
-// Forwarding workers will share it, so it must stay plain shareable data.
+// Forwarding threads share it, so it must stay plain shareable data.
 const _: () = {
     const fn shareable<T: Send + Sync>() {}
     shareable::<Forwarder>();
@@ -35,7 +33,7 @@ pub(super) enum Triage {
 
 impl Forwarder {
     pub(super) fn new(open: OpenSessions) -> Self {
-        Forwarder { open, reserved: HashSet::new() }
+        Forwarder { open }
     }
 
     /// Forward or drop a datagram if open sessions alone can decide, else hand it on.
@@ -57,26 +55,16 @@ impl Forwarder {
     }
 
     /// Find the live open session a transport data message or cookie reply
-    /// travels on. Handshake messages and reserved indexes never have one.
-    fn open_route(&self, message: Message, now: Instant) -> Option<&Route> {
+    /// travels on. Handshake messages never have one, and neither does an
+    /// index in a registration tunnel's reserved prefix: forwarded sessions may
+    /// not use those, and a new tunnel never takes a prefix in use. So a
+    /// tunnel's messages always reach the control half, without a second lookup.
+    fn open_route(&self, message: Message, now: Instant) -> Option<Route> {
         let receiver = match message {
             Message::HandshakeInitiation { .. } | Message::HandshakeResponse { .. } => return None,
             Message::CookieReply { receiver } | Message::TransportData { receiver } => receiver,
         };
-        if self.reserved.contains(&receiver.prefix()) {
-            return None;
-        }
         self.open.get(receiver, now)
-    }
-
-    /// Replace the registration tunnels' index prefixes.
-    pub(super) fn set_reserved(&mut self, prefixes: impl IntoIterator<Item = IdxPrefix>) {
-        self.reserved = prefixes.into_iter().collect();
-    }
-
-    #[cfg(test)]
-    pub(super) fn reserved(&self) -> &HashSet<IdxPrefix> {
-        &self.reserved
     }
 }
 
@@ -93,7 +81,6 @@ fn replyable(src: SocketAddr) -> bool {
 mod tests {
     use super::*;
     use crate::key::PeerKey;
-    use crate::packet::SessionIdx;
     use crate::tables::{PENDING_TTL, SESSION_TTL, Session, SessionLimits, SessionTable};
     use std::time::Duration;
 
@@ -122,21 +109,19 @@ mod tests {
     const RESERVED: u32 = 0x3005;
 
     /// A forwarder written by a session table: `OPEN` carries traffic from
-    /// addr(1) to addr(2), `PENDING` awaits a handshake response, and prefix
-    /// 0x30 is reserved, with an open session in it that must not be forwarded.
+    /// addr(1) to addr(2), `PENDING` awaits a handshake response, and
+    /// `RESERVED` is a registration tunnel's index, which no session takes.
     fn setup(t0: Instant) -> Forwarder {
         let limits = SessionLimits { pending_per_peer: 8, per_peer: 8, total: 8 };
         let mut table = SessionTable::new(SESSION_TTL, PENDING_TTL, limits);
-        let mut fwd = Forwarder::new(table.new_view());
+        let fwd = Forwarder::new(table.new_view());
         let peer = PeerKey::from([1; 32]);
         for (idx, s) in [
             (OPEN, Session::open(addr(2), addr(1), peer, t0)),
             (PENDING, Session::pending(addr(2), addr(1), peer, t0)),
-            (RESERVED, Session::open(addr(2), addr(1), peer, t0)),
         ] {
-            table.insert(idx.into(), s, &mut fwd.open).unwrap();
+            table.insert(idx.into(), s, &fwd.open).unwrap();
         }
-        fwd.set_reserved([SessionIdx::from(RESERVED).prefix()]);
         fwd
     }
 
@@ -170,7 +155,7 @@ mod tests {
             (data(PENDING), t0, "transport data on a pending index"),
             (cookie(PENDING), t0, "cookie reply on a pending index"),
             (data(0x99), t0, "unknown index"),
-            (data(RESERVED), t0, "a registration tunnel's prefix"),
+            (data(RESERVED), t0, "a registration tunnel's index"),
             (data(OPEN), t0 + SESSION_TTL, "expired, not yet swept"),
         ];
         for (datagram, now, what) in cases {

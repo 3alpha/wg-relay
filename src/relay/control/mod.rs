@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use boringtun::noise::Tunn;
@@ -45,7 +46,9 @@ const MAX_PENDING: usize = 262_144;
 /// spoofed initiations cannot take the whole table.
 const MAX_SESSIONS_PER_PEER: usize = 65_536;
 /// Most sessions in the table, a memory backstop: 7 × 2^17 is the most a
-/// `HashMap` holds in 2^20 buckets of 129 bytes, about 135 MB.
+/// `HashMap` holds in 2^20 buckets of 129 bytes, about 135 MB. With every
+/// entry open, the forwarding half's copy (about 117 bytes each) brings it to
+/// about 240 MB.
 const MAX_SESSIONS: usize = 917_504;
 
 /// What the relay holds for each listed peer.
@@ -81,9 +84,8 @@ pub(super) struct Control {
     /// Every session, pending or open: the truth the forwarding half's open
     /// sessions are kept in step with.
     sessions: SessionTable,
-    /// What the forwarding half reads. Its open sessions change only through
-    /// `sessions`, its reserved prefixes only on reload.
-    forwarder: Forwarder,
+    /// What the forwarding half reads. Its open sessions change only through `sessions`.
+    forwarder: Arc<Forwarder>,
     /// Per-source limit on handshake initiations, registration and forwarded alike.
     limiter: RateLimiter,
     forwarding_budget: WorkBudget,
@@ -118,7 +120,7 @@ impl Control {
             mac1: Mac1Index::default(),
             reserved: HashMap::new(),
             registry: Registry::new(REGISTRY_TTL),
-            forwarder: Forwarder::new(sessions.new_view()),
+            forwarder: Arc::new(Forwarder::new(sessions.new_view())),
             sessions,
             limiter: RateLimiter::new(cfg.handshake_rate.per_sec()),
             forwarding_budget: WorkBudget::new(FORWARDING_WORK_PER_SEC),
@@ -132,8 +134,9 @@ impl Control {
         control
     }
 
-    pub(super) fn forwarder(&self) -> &Forwarder {
-        &self.forwarder
+    /// The forwarding half, for the threads that read it without locking this half.
+    pub(super) fn forwarder(&self) -> Arc<Forwarder> {
+        Arc::clone(&self.forwarder)
     }
 
     pub(super) fn public_key(&self) -> PeerKey {
@@ -162,14 +165,15 @@ impl Control {
         out
     }
 
-    /// Panic unless the session table's accounts are exact and the forwarding
-    /// half holds exactly the open sessions and reserved prefixes this half holds.
+    /// Panic unless the session table's accounts are exact, the forwarding half
+    /// holds exactly its open sessions, and none of them is in a reserved prefix.
     #[cfg(test)]
     fn assert_forwarder_in_step(&self) {
         assert!(self.sessions.accounts_exact(), "session accounts diverged");
         assert!(self.sessions.matches_view(&self.forwarder.open), "open sessions diverged");
-        let prefixes: std::collections::HashSet<IdxPrefix> =
-            self.reserved.keys().copied().collect();
-        assert_eq!(self.forwarder.reserved(), &prefixes, "reserved prefixes diverged");
+        // The forwarding half relies on it to leave registration tunnels' messages alone.
+        let in_reserved =
+            self.sessions.open_pairs().any(|(i, ..)| self.reserved.contains_key(&i.prefix()));
+        assert!(!in_reserved, "an open session in a reserved prefix");
     }
 }

@@ -1,8 +1,10 @@
-//! Batched UDP I/O for the socket loop, on top of `quinn-udp`: `recvmmsg`
+//! Batched UDP I/O for the socket loops, on top of `quinn-udp`: `recvmmsg`
 //! with GRO on receive, GSO on send, and the ECN bits of each datagram.
+//! Every forwarding thread has its own socket on the listen address.
 
 use std::io::{self, IoSliceMut};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 
 use quinn_udp::{RecvMeta, Transmit, UdpSocketState};
 use tokio::io::Interest;
@@ -22,29 +24,94 @@ pub const MAX_GSO_BYTES: usize = 65_507;
 /// Most datagrams the kernel accepts in one GSO send (`UDP_MAX_SEGMENTS`).
 const MAX_GSO_SEGMENTS: usize = 64;
 
-/// The relay's socket, with the offloads the kernel supports turned on.
-pub struct Socket {
-    io: UdpSocket,
+/// One of the listen address's sockets, bound with the offloads the kernel
+/// supports turned on, not yet tied to a runtime.
+pub struct Bound {
+    io: std::net::UdpSocket,
     state: UdpSocketState,
 }
 
-impl Socket {
-    pub async fn bind(addr: SocketAddr) -> Result<Self, AppError> {
-        let io = UdpSocket::bind(addr).await.map_err(|source| AppError::Bind { addr, source })?;
+/// The listen address's sockets, one per forwarding thread.
+pub struct Group {
+    /// The main thread's socket, which also tells the actual address and offloads.
+    pub first: Bound,
+    pub others: Vec<Bound>,
+}
+
+/// Bind `count` sockets to `addr`. On Linux they share the port through
+/// `SO_REUSEPORT`, and the kernel spreads flows across them by their address
+/// pair, keeping each flow on one socket.
+pub fn bind_group(addr: SocketAddr, count: NonZeroUsize) -> Result<Group, AppError> {
+    let bind = |source| AppError::Bind { addr, source };
+    // A plain bind fails while anything holds the address, so a second relay
+    // cannot silently join the group; it also picks the port if `addr` has none.
+    let probe = std::net::UdpSocket::bind(addr).map_err(bind)?;
+    let actual = probe.local_addr().map_err(bind)?;
+    drop(probe);
+    let one = || Bound::new(bind_shared(actual).map_err(bind)?, addr);
+    let first = one()?;
+    let others = (1..count.get()).map(|_| one()).collect::<Result<_, _>>()?;
+    Ok(Group { first, others })
+}
+
+#[cfg(target_os = "linux")]
+fn bind_shared(addr: SocketAddr) -> io::Result<std::net::UdpSocket> {
+    use rustix::net::{AddressFamily, SocketFlags, SocketType, sockopt};
+
+    let family = if addr.is_ipv4() { AddressFamily::INET } else { AddressFamily::INET6 };
+    let flags = SocketFlags::CLOEXEC | SocketFlags::NONBLOCK;
+    let fd = rustix::net::socket_with(family, SocketType::DGRAM, flags, None)?;
+    sockopt::set_socket_reuseport(&fd, true)?;
+    rustix::net::bind(&fd, &addr)?;
+    Ok(std::net::UdpSocket::from(fd))
+}
+
+/// Elsewhere `SO_REUSEPORT` does not spread UDP flows, so there is one socket.
+#[cfg(not(target_os = "linux"))]
+fn bind_shared(addr: SocketAddr) -> io::Result<std::net::UdpSocket> {
+    let io = std::net::UdpSocket::bind(addr)?;
+    io.set_nonblocking(true)?;
+    Ok(io)
+}
+
+impl Bound {
+    fn new(io: std::net::UdpSocket, addr: SocketAddr) -> Result<Self, AppError> {
         let offload = |source| AppError::Offload { addr, source };
         #[cfg(target_os = "linux")]
         let kept = kernel_settings::Saved::read(&io);
         let state = UdpSocketState::new((&io).into()).map_err(offload)?;
         #[cfg(target_os = "linux")]
         kept.restore(&io).map_err(offload)?;
-        Ok(Socket { io, state })
+        Ok(Bound { io, state })
     }
 
-    /// Datagrams one receive buffer can hold: more than 1 when GRO is on.
-    pub fn gro_segments(&self) -> usize {
-        self.state.gro_segments()
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.io.local_addr()
     }
 
+    /// Is UDP GRO on: may one receive buffer hold several datagrams?
+    pub fn gro(&self) -> bool {
+        self.state.gro_segments() > 1
+    }
+
+    /// Is UDP GSO on: may one send carry several datagrams?
+    pub fn gso(&self) -> bool {
+        self.state.max_gso_segments() > 1
+    }
+
+    /// Tie the socket to the runtime this is called in.
+    pub fn register(self) -> io::Result<Socket> {
+        Ok(Socket { io: UdpSocket::from_std(self.io)?, state: self.state })
+    }
+}
+
+/// One thread's socket, tied to its runtime.
+pub struct Socket {
+    io: UdpSocket,
+    state: UdpSocketState,
+}
+
+impl Socket {
     /// Datagrams one send may carry: 1 without GSO, or once a GSO send failed.
     pub fn gso_segments(&self) -> usize {
         self.state.max_gso_segments().min(MAX_GSO_SEGMENTS)
@@ -127,10 +194,11 @@ impl RecvBatch {
 mod kernel_settings {
     use std::io;
 
+    use std::os::fd::AsFd;
+
     use nix::sys::socket::sockopt::{Ipv6DontFrag, ReceiveTimestampns};
     use nix::sys::socket::{getsockopt, setsockopt};
     use rustix::net::sockopt::{self, Ipv4PathMtuDiscovery, Ipv6PathMtuDiscovery};
-    use tokio::net::UdpSocket;
 
     /// The settings before `quinn-udp` changed them; `None` where the
     /// socket's address family has no such option.
@@ -142,7 +210,7 @@ mod kernel_settings {
     }
 
     impl Saved {
-        pub fn read(sock: &UdpSocket) -> Self {
+        pub fn read(sock: &impl AsFd) -> Self {
             Saved {
                 v4_pmtu: sockopt::ip_mtu_discover(sock).ok(),
                 v6_pmtu: sockopt::ipv6_mtu_discover(sock).ok(),
@@ -151,7 +219,7 @@ mod kernel_settings {
             }
         }
 
-        pub fn restore(&self, sock: &UdpSocket) -> io::Result<()> {
+        pub fn restore(&self, sock: &impl AsFd) -> io::Result<()> {
             if let Some(v) = self.v4_pmtu {
                 sockopt::set_ip_mtu_discover(sock, v)?;
             }

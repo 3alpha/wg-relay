@@ -8,6 +8,7 @@ base64 = "0.22"
 blake2s_simd = "1.0.5"
 boringtun = { version = "0.7.1", default-features = false }
 clap = { version = "4", features = ["derive", "env"] }
+papaya = "0.2.5"
 quinn-udp = { version = "0.6.3", default-features = false }
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1.0.229", features = ["derive"] }

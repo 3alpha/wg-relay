@@ -24,4 +24,6 @@ pub enum ConfigError {
     DuplicatePubkey { name: String },
     #[error("duplicate name {name}")]
     DuplicateName { name: String },
+    #[error("workers must be between 1 and {max}, got {got}")]
+    Workers { got: usize, max: usize },
 }

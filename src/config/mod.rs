@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -15,6 +16,9 @@ pub use error::{ConfigError, RateError};
 pub use rate::Rate;
 pub use summary::Summary;
 
+/// Most forwarding workers: far beyond the cores one socket's traffic can use.
+pub const MAX_WORKERS: usize = 256;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
@@ -25,6 +29,7 @@ struct RawConfig {
     tunnel_ip: Ipv4Addr,
     #[serde(default)]
     handshake_rate_per_ip: Rate,
+    workers: Option<usize>,
     #[serde(default)]
     peer: Vec<Peer>,
 }
@@ -35,6 +40,19 @@ fn default_listen() -> SocketAddr {
 
 fn default_tunnel_ip() -> Ipv4Addr {
     Ipv4Addr::new(10, 99, 0, 254)
+}
+
+/// One forwarding worker per core the process may use, up to `MAX_WORKERS`.
+fn default_workers() -> NonZeroUsize {
+    let cores = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    NonZeroUsize::new(cores.min(MAX_WORKERS)).unwrap_or(NonZeroUsize::MIN)
+}
+
+/// Check a configured worker count against `1..=MAX_WORKERS`.
+fn parse_workers(n: usize) -> Result<NonZeroUsize, ConfigError> {
+    NonZeroUsize::new(n)
+        .filter(|n| n.get() <= MAX_WORKERS)
+        .ok_or(ConfigError::Workers { got: n, max: MAX_WORKERS })
 }
 
 /// A listed peer: it registers with the relay, and anyone may handshake with it.
@@ -51,6 +69,8 @@ pub struct Config {
     pub private_key: PrivateKey,
     pub tunnel_ip: Ipv4Addr,
     pub handshake_rate: Rate,
+    /// Forwarding worker threads, each with its own socket.
+    pub workers: NonZeroUsize,
     pub peers: Vec<Peer>,
 }
 
@@ -63,6 +83,7 @@ impl Config {
     /// Parse and validate config text.
     pub fn parse(s: &str) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
+        let workers = raw.workers.map_or_else(|| Ok(default_workers()), parse_workers)?;
         if raw.peer.is_empty() {
             return Err(ConfigError::NoPeer);
         }
@@ -84,6 +105,7 @@ impl Config {
             private_key: raw.private_key,
             tunnel_ip: raw.tunnel_ip,
             handshake_rate: raw.handshake_rate_per_ip,
+            workers,
             peers: raw.peer,
         })
     }

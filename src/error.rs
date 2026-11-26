@@ -27,6 +27,22 @@ pub enum AppError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed to start forwarding thread {index}")]
+    WorkerSpawn {
+        index: usize,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("forwarding thread {index} failed")]
+    WorkerFailed {
+        index: usize,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("forwarding thread {index} panicked")]
+    WorkerPanicked { index: usize },
+    #[error("forwarding thread {index} exited unexpectedly")]
+    WorkerExited { index: usize },
     #[error("failed to install the {signal} handler")]
     Signal {
         signal: &'static str,

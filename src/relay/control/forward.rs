@@ -62,7 +62,7 @@ impl Control {
         }
         let responder = Session::open(initiator.expected_src, initiator.dest, initiator.peer, now);
         self.insert_session(sender, responder)?;
-        self.sessions.open(receiver, now, &mut self.forwarder.open);
+        self.sessions.open(receiver, now, &self.forwarder.open);
         Ok(Accepted::Forward(initiator.dest))
     }
 
@@ -124,7 +124,7 @@ impl Control {
 
     /// Store a session, counting the pending session it evicts, if any.
     fn insert_session(&mut self, idx: SessionIdx, s: Session) -> Result<(), Reason> {
-        let evicted = self.sessions.insert(idx, s, &mut self.forwarder.open)?;
+        let evicted = self.sessions.insert(idx, s, &self.forwarder.open)?;
         self.metrics.pending_evicted += u64::from(evicted.is_some());
         Ok(())
     }
