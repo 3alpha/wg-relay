@@ -20,7 +20,7 @@ The relay is configured with nothing more than the public keys of the peers that
 - **End-to-end encryption is preserved.** The relay holds no session keys and forwards datagrams byte for byte. A compromised relay can drop traffic, but cannot read or modify it, and cannot add peers.
 - **Many networks on one relay.** Adding a network means adding its server's public key. Networks are isolated from one another by their own WireGuard peer lists.
 - **Minimal configuration.** The relay lists only the peers that must be reachable. Who may connect to them is decided where it always is in WireGuard: in each peer's own config.
-- **Abuse resistance.** Only listed peers can register, and a session opens only when a listed peer answers. Handshakes are rate-limited per source and by separate CPU budgets for forwarding and registration, so a flood cannot stall forwarding and cannot stop registered peers from staying registered; pending handshakes and session entries have a quota per listed peer, so a flood aimed at one network does not refuse handshakes to the others and a misbehaving listed peer cannot fill the session table; session entries expire a fixed time after their handshake, however much traffic arrives; memory stays bounded however many sources appear; and the relay cannot be used as a reflector.
+- **Abuse resistance.** Only listed peers can register, and a session is established only when a listed peer answers. Handshakes are rate-limited per source and by separate CPU budgets for forwarding and registration, so a flood cannot stall forwarding and cannot stop registered peers from staying registered; pending handshakes and session entries have a quota per listed peer, so a flood aimed at one network does not refuse handshakes to the others and a misbehaving listed peer cannot fill the session table; session entries expire a fixed time after their handshake, however much traffic arrives; memory stays bounded however many sources appear; and the relay cannot be used as a reflector.
 - **Simple to operate.** One binary, one UDP port and one TOML file. Configuration reloads on `SIGHUP`, and a removed peer is cut off immediately. The implementation is about 3,200 lines of Rust.
 
 ## How it works
@@ -47,7 +47,7 @@ name = "bob-office"
 pubkey = "<bob's server public key>"
 ```
 
-- **Isolation.** A session opens only if the listed peer accepts the other side in its own WireGuard config. Alice's laptop is not a peer of Bob's server, so Bob's server drops its handshakes.
+- **Isolation.** A session is established only if the listed peer accepts the other side in its own WireGuard config. Alice's laptop is not a peer of Bob's server, so Bob's server drops its handshakes.
 - **Clients are not listed.** Each network's owner adds and removes their own clients in their server's WireGuard config, without involving the relay operator.
 - **Private keys stay private.** The relay operator never sees any network's private keys, and cannot read or join any network's traffic.
 - **Independent addressing.** The relay never sees the addresses inside the tunnels, so networks may use overlapping subnets. The only shared address is the relay's own `tunnel_ip` (`10.99.0.254` by default), which no network should assign to a peer.
@@ -127,7 +127,7 @@ Keep `PersistentKeepalive` on every peer. It keeps NAT mappings and registration
 
 ## Access control
 
-There is a single rule: **a session opens only when a listed peer answers from its registered address.** Anyone may send a handshake to a listed peer, and the peer's own WireGuard peer list decides whether to answer, so a handshake from an unknown host is dropped there.
+There is a single rule: **a session is established only when a listed peer answers from its registered address.** Anyone may send a handshake to a listed peer, and the peer's own WireGuard peer list decides whether to answer, so a handshake from an unknown host is dropped there.
 
 | To | Edit |
 |---|---|

@@ -35,7 +35,8 @@ impl Control {
         let peers = &self.peers;
         self.forwarder.reserved.retain(|k| peers.contains_key(k));
         self.registry.retain(|k, _| peers.contains_key(k));
-        let dropped = self.sessions.retain(|s| peers.contains_key(&s.peer), &self.forwarder.open);
+        let dropped =
+            self.sessions.retain(|s| peers.contains_key(&s.peer), &self.forwarder.established);
         info!(peers = peers.len(), dropped_sessions = dropped, "config applied");
     }
 

@@ -269,7 +269,7 @@ fn registration_tunnel_indexes_are_reserved() {
 }
 
 #[test]
-fn open_session_cannot_mint_or_take_over_indexes() {
+fn established_session_cannot_mint_or_take_over_indexes() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     let (mut c2s, mut sc2) = (tunn(&w.c2, &w.srv), tunn(&w.srv, &w.c2));
@@ -284,7 +284,7 @@ fn open_session_cannot_mint_or_take_over_indexes() {
     reply(&mut c2s, &c2_resp);
     let sessions = w.relay.session_count();
 
-    // c1 forges a response on its own, already open, session.
+    // c1 forges a response on its own, already established, session.
     let forged = forged_response(0x7000_0001, sender_idx(&c1_resp), &w.srv.pk);
     assert_eq!(w.fwd(C1, &forged), None);
     assert_eq!(w.n(Reason::SessionNotPending), 1);
@@ -488,12 +488,12 @@ fn pending_flood_aimed_at_one_peer_evicts_only_its_oldest() {
 }
 
 #[test]
-fn open_session_expires_on_time_however_busy() {
+fn established_session_expires_on_time_however_busy() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     assert_eq!(w.hs(&mut c1s, C1, &mut sc1, SRV), ok3(SRV, C1));
-    let opened = Instant::now();
-    let at = |s: u64| opened + Duration::from_secs(s);
+    let established = Instant::now();
+    let at = |s: u64| established + Duration::from_secs(s);
     for s in (10..200).step_by(10).chain([199]) {
         assert_eq!(w.data_at(&mut c1s, C1, &mut sc1, at(s)), Some(addr(SRV)), "{s} s");
         assert_eq!(w.data_at(&mut sc1, SRV, &mut c1s, at(s)), Some(addr(C1)), "{s} s");
@@ -518,12 +518,12 @@ fn cookie_replies_do_not_extend_a_pending_session() {
     }
     let t = t0 + Duration::from_secs(10);
     assert_eq!(w.fwd_at(SRV, &reply_cookie, t), None);
-    assert_eq!(w.fwd_at(SRV, &reply(&mut sc1, &init).unwrap(), t), None, "too late to open");
+    assert_eq!(w.fwd_at(SRV, &reply(&mut sc1, &init).unwrap(), t), None, "too late to establish");
     assert_eq!(w.n(Reason::UnknownIndex), 2);
 }
 
 #[test]
-fn resent_initiation_cannot_reset_an_open_session() {
+fn resent_initiation_cannot_reset_an_established_session() {
     let mut w = world();
     let (mut c1s, mut sc1) = (tunn(&w.c1, &w.srv), tunn(&w.srv, &w.c1));
     let init = initiation(&mut c1s);
@@ -535,8 +535,8 @@ fn resent_initiation_cannot_reset_an_open_session() {
     let ka = reply(&mut c1s, &resp).unwrap();
     assert_eq!(w.fwd(C1, &ka), Some(addr(SRV)));
     reply(&mut sc1, &ka);
-    // Once open, neither a replay of it nor a new initiation reusing its index
-    // may turn the entry back into a pending one or restart its lifetime.
+    // Once established, neither a replay of it nor a new initiation reusing its
+    // index may turn the entry back into a pending one or restart its lifetime.
     let reuse = with_sender(&initiation(&mut c1s), sender_idx(&init), &w.srv.pk);
     assert_eq!(w.fwd(C1, &init), None);
     assert_eq!(w.fwd(C1, &reuse), None);

@@ -9,7 +9,7 @@ use crate::tables::{Session, SessionState};
 
 impl Control {
     /// Forward a handshake initiation to the registered listed peer its mac1
-    /// names, opening a pending session for the initiator's index.
+    /// names, creating a pending session for the initiator's index.
     pub(super) fn forward_initiation(
         &mut self,
         src: SocketAddr,
@@ -24,7 +24,7 @@ impl Control {
         if self.sessions.is_full() {
             return Err(Reason::TooManySessions);
         }
-        if self.sessions.pending() >= MAX_PENDING {
+        if self.sessions.pending_len() >= MAX_PENDING {
             return Err(Reason::TooManyPending);
         }
         // Anyone may initiate to a listed peer; its own WireGuard peer list decides.
@@ -40,8 +40,8 @@ impl Control {
         Ok(Accepted::Forward(dst))
     }
 
-    /// Forward a handshake response from the listed peer, opening the pending
-    /// session it answers. One response per initiation.
+    /// Forward a handshake response from the listed peer, establishing the
+    /// pending session it answers. One response per initiation.
     pub(super) fn forward_response(
         &mut self,
         src: SocketAddr,
@@ -50,24 +50,25 @@ impl Control {
         now: Instant,
     ) -> Result<Accepted, Reason> {
         // The expected source is the listed peer's registered address, so only
-        // that peer can open the session.
+        // that peer can establish the session.
         let initiator = self.session_from(src, receiver, now)?;
         match initiator.state {
             SessionState::Pending => {}
-            // An open session could otherwise mint new entries.
-            SessionState::Open => return Err(Reason::SessionNotPending),
+            // An established session could otherwise mint new entries.
+            SessionState::Established => return Err(Reason::SessionNotPending),
         }
         if self.tunnel_owner(sender).is_some() {
             return Err(Reason::ReservedIndex);
         }
-        let responder = Session::open(initiator.expected_src, initiator.dest, initiator.peer, now);
+        let responder =
+            Session::established(initiator.expected_src, initiator.dest, initiator.peer, now);
         self.insert_session(sender, responder)?;
-        self.sessions.open(receiver, now, &self.forwarder.open);
+        self.sessions.establish(receiver, now, &self.forwarder.established);
         Ok(Accepted::Forward(initiator.dest))
     }
 
-    /// Forward a cookie reply on a pending or open session: a pending one
-    /// passes it too, so a peer under load can still answer an initiation.
+    /// Forward a cookie reply on a pending or established session: a pending
+    /// one passes it too, so a peer under load can still answer an initiation.
     pub(super) fn forward_cookie_reply(
         &self,
         src: SocketAddr,
@@ -105,7 +106,7 @@ impl Control {
 
     /// Store a session, counting the pending session it evicts, if any.
     fn insert_session(&mut self, idx: SessionIdx, s: Session) -> Result<(), Reason> {
-        let evicted = self.sessions.insert(idx, s, &self.forwarder.open)?;
+        let evicted = self.sessions.insert(idx, s, &self.forwarder.established)?;
         self.metrics.pending_evicted += u64::from(evicted.is_some());
         Ok(())
     }

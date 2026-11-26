@@ -1,5 +1,5 @@
-//! Soft state: registry, session table and the open-session view it keeps for
-//! forwarding, per-source rate limiter, work budgets.
+//! Soft state: registry, session table and the established-session view it
+//! keeps for forwarding, per-source rate limiter, work budgets.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -8,15 +8,15 @@ use std::time::{Duration, Instant};
 mod bucket;
 mod budget;
 mod entry;
+mod established;
 mod ledger;
-mod open;
 mod rate_limit;
 mod registry;
 mod sessions;
 
 pub use budget::WorkBudget;
 pub use entry::{Session, SessionState};
-pub use open::{OpenSessions, Route};
+pub use established::{EstablishedSessions, Route};
 pub use rate_limit::RateLimiter;
 pub use registry::Registry;
 pub use sessions::{Refusal, SessionLimits, SessionTable};
@@ -27,10 +27,10 @@ pub const REGISTRY_TTL: Duration = Duration::from_secs(180);
 /// Lifetime of a pending entry: a forwarded handshake is answered within
 /// WireGuard's 5 s retry timer or abandoned.
 pub const PENDING_TTL: Duration = Duration::from_secs(10);
-/// Lifetime of an open entry from the handshake that opened it, however much
-/// traffic it carries: WireGuard never uses a key older than 180 s
+/// Lifetime of an established entry from the handshake that established it,
+/// however much traffic it carries: WireGuard never uses a key older than 180 s
 /// (`REJECT_AFTER_TIME`), and the 20 s on top cover the round trip.
-pub const OPEN_TTL: Duration = Duration::from_secs(200);
+pub const ESTABLISHED_TTL: Duration = Duration::from_secs(200);
 
 /// Maps smaller than this are never shrunk, to avoid reallocating for nothing.
 const SHRINK_MIN_CAPACITY: usize = 1024;

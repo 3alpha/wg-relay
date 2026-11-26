@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::key::PeerKey;
 use crate::packet::{Mac1Key, SessionIdx};
 use crate::tables::{
-    OPEN_TTL, PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SessionLimits, SessionTable,
+    ESTABLISHED_TTL, PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SessionLimits, SessionTable,
     WorkBudget,
 };
 
@@ -48,15 +48,15 @@ const REGISTRATION_WORK: usize = 400;
 /// oldest, so a flood aimed at one peer only disturbs that peer.
 const MAX_PENDING_PER_PEER: usize = 1_024;
 /// Most pending sessions at once, so a flood of initiations leaves most of
-/// the table to open sessions. The forwarding budget keeps floods well below it.
+/// the table to established sessions. The forwarding budget keeps floods well below it.
 const MAX_PENDING: usize = 262_144;
-/// Most sessions, pending or open, routed to one listed peer: room for about
+/// Most sessions, pending or established, routed to one listed peer: room for about
 /// 16,000 busy WireGuard sessions (4 indexes each), so a listed peer answering
 /// spoofed initiations cannot take the whole table.
 const MAX_SESSIONS_PER_PEER: usize = 65_536;
 /// Most sessions in the table, a memory backstop: 7 × 2^17 is the most a
 /// `HashMap` holds in 2^20 buckets of 129 bytes, about 135 MB. With every
-/// entry open, the forwarding half's copy (about 117 bytes each) brings it to
+/// entry established, the forwarding half's copy (about 117 bytes each) brings it to
 /// about 240 MB.
 const MAX_SESSIONS: usize = 917_504;
 
@@ -87,11 +87,12 @@ pub(super) struct Control {
     mac1: Mac1Index,
     /// Where each listed peer last proved it can be reached.
     registry: Registry,
-    /// Every session, pending or open: the truth the forwarding half's open
-    /// sessions are kept in step with.
+    /// Every session, pending or established: the truth the forwarding half's
+    /// established sessions are kept in step with.
     sessions: SessionTable,
-    /// What the forwarding half reads. Its open sessions change only through
-    /// `sessions`, its reserved prefixes only as registration tunnels come and go.
+    /// What the forwarding half reads. Its established sessions change only
+    /// through `sessions`, its reserved prefixes only as registration tunnels
+    /// come and go.
     forwarder: Arc<Forwarder>,
     /// Per-source limit on handshake initiations, registration and forwarded alike.
     limiter: RateLimiter,
@@ -112,7 +113,7 @@ impl Control {
         let public = PublicKey::from(&secret);
         let sessions = SessionTable::new(
             PENDING_TTL,
-            OPEN_TTL,
+            ESTABLISHED_TTL,
             SessionLimits {
                 pending_per_peer: MAX_PENDING_PER_PEER,
                 per_peer: MAX_SESSIONS_PER_PEER,
@@ -180,13 +181,15 @@ impl Control {
     }
 
     /// Panic unless the session table's accounts are exact, the forwarding half
-    /// holds exactly its open sessions, and none of them is in a reserved prefix.
+    /// holds exactly its established sessions, and none is in a reserved prefix.
     #[cfg(test)]
     fn assert_forwarder_in_step(&self) {
         assert!(self.sessions.accounts_exact(), "session accounts diverged");
-        assert!(self.sessions.matches_view(&self.forwarder.open), "open sessions diverged");
+        let view = &self.forwarder.established;
+        assert!(self.sessions.matches_view(view), "established sessions diverged");
         // The forwarding half relies on it to look up the reserved prefixes only on a miss.
-        let in_reserved = self.sessions.open_pairs().any(|(i, ..)| self.tunnel_owner(i).is_some());
-        assert!(!in_reserved, "an open session in a reserved prefix");
+        let in_reserved =
+            self.sessions.established_pairs().any(|(i, ..)| self.tunnel_owner(i).is_some());
+        assert!(!in_reserved, "an established session in a reserved prefix");
     }
 }

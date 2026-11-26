@@ -131,17 +131,17 @@ fn full_pending_table_refuses_initiations_before_the_scan() {
         key[..4].copy_from_slice(&(i / MAX_PENDING_PER_PEER as u32).to_le_bytes());
         let s = crate::tables::Session::pending(a, b, PeerKey::from(key), now);
         let control = &mut *control;
-        assert!(control.sessions.insert(i.into(), s, &control.forwarder.open).is_ok());
+        assert!(control.sessions.insert(i.into(), s, &control.forwarder.established).is_ok());
     }
     drop(control);
-    assert_eq!(relay.control().sessions.pending(), MAX_PENDING);
+    assert_eq!(relay.control().sessions.pending_len(), MAX_PENDING);
     let mut junk = junk();
     junk[4] = 0xee; // a sender index none of the entries uses
     junk[7] = 0xee;
     let verdicts: Vec<Verdict> = (0..5).map(|_| relay.handle(a, &junk, now)).collect();
     assert_eq!(verdicts, [Verdict::Drop(Reason::TooManyPending); 5], "and no budget spent");
     relay.tick(now + PENDING_TTL + SWEEP_INTERVAL);
-    assert_eq!(relay.control().sessions.pending(), 0);
+    assert_eq!(relay.control().sessions.pending_len(), 0);
     let later = now + PENDING_TTL + SWEEP_INTERVAL;
     assert_eq!(relay.handle(a, &junk, later), Verdict::Drop(Reason::NoMac1Match));
     relay.control().assert_forwarder_in_step();
@@ -151,7 +151,7 @@ fn full_pending_table_refuses_initiations_before_the_scan() {
 fn limited(limits: SessionLimits, t0: Instant) -> Relay {
     let relay = relay();
     // Still empty, so the forwarding half's empty view, of the same lifetime, stays in step.
-    relay.control().sessions = SessionTable::new(PENDING_TTL, OPEN_TTL, limits);
+    relay.control().sessions = SessionTable::new(PENDING_TTL, ESTABLISHED_TTL, limits);
     let mut control = relay.control();
     for (i, peer) in control.mac1.peers.clone().into_iter().take(2).enumerate() {
         control.registry.update(peer, listed(i), t0);
@@ -184,7 +184,7 @@ fn peer_at_quota_is_refused_without_blocking_other_peers() {
     let limits = SessionLimits { pending_per_peer: 4, per_peer: 6, total: 100 };
     let mut relay = limited(limits, t0);
     let fwd = Verdict::Forward;
-    // Listed peer 0 answers two spoofed initiations aimed at itself: 4 open entries.
+    // Listed peer 0 answers two spoofed initiations aimed at itself: 4 established entries.
     for i in 0..2 {
         let init = init_for(&relay, 0, 0x100 + i);
         assert_eq!(relay.handle(src(i as u8), &init, t0), fwd(listed(0)));
@@ -266,15 +266,15 @@ fn forwarding_never_writes_to_the_session_entry() {
         let control = relay.control();
         (control.sessions.get(0x20.into(), t), control.sessions.get(0x21.into(), t))
     };
-    let open = entries(&relay, t0);
+    let established = entries(&relay, t0);
     for s in (10..200).step_by(10) {
         let t = t0 + Duration::from_secs(s);
         assert_eq!(relay.handle(listed(0), &data(0x20), t), Verdict::Forward(src(2)));
         assert_eq!(relay.handle(src(2), &data(0x21), t), Verdict::Forward(listed(0)));
-        assert_eq!(entries(&relay, t), open, "data at {s} s");
+        assert_eq!(entries(&relay, t), established, "data at {s} s");
     }
     let expired = Verdict::Drop(Reason::UnknownIndex);
-    assert_eq!(relay.handle(listed(0), &data(0x20), t0 + OPEN_TTL), expired);
+    assert_eq!(relay.handle(listed(0), &data(0x20), t0 + ESTABLISHED_TTL), expired);
     relay.control().assert_forwarder_in_step();
 }
 
@@ -336,7 +336,7 @@ fn forwarder_follows_every_control_change() {
     assert_eq!(fast(&relay, listed(0), &cookie(0x10), t0), to_control(&cookie(0x10)));
     relay.control().assert_forwarder_in_step();
 
-    // Opening publishes both indexes before the response is sent on, so the
+    // Establishing publishes both indexes before the response is sent on, so the
     // initiator's first data is forwarded right after it.
     assert_eq!(relay.handle(listed(0), &response(0x11, 0x10), t0), Verdict::Forward(src(1)));
     assert_eq!(relay.handle(src(1), &data(0x11), t0), Verdict::Forward(listed(0)));
@@ -345,7 +345,7 @@ fn forwarder_follows_every_control_change() {
     assert_eq!(fast(&relay, src(2), &data(0x11), t0), Triage::Drop(Reason::WrongSource));
     relay.control().assert_forwarder_in_step();
 
-    // Evicting pending entries leaves open ones alone.
+    // Evicting pending entries leaves established ones alone.
     for i in 0..3 {
         let init = init_for(&relay, 0, 0x20 + i);
         assert_eq!(relay.handle(src(3), &init, t0), Verdict::Forward(listed(0)));
@@ -370,7 +370,7 @@ fn forwarder_follows_every_control_change() {
     assert_eq!(fast(&relay, src(1), &data(in_prefix), t0), to_control(&data(in_prefix)));
     relay.control().assert_forwarder_in_step();
 
-    // Removing a peer revokes its open sessions and frees its prefix.
+    // Removing a peer revokes its established sessions and frees its prefix.
     assert_eq!(relay.handle(src(4), &init_for(&relay, 1, 0x30), t0), Verdict::Forward(listed(1)));
     assert_eq!(relay.handle(listed(1), &response(0x31, 0x30), t0), Verdict::Forward(src(4)));
     reload_listing(&relay, &[peers[0], peers[2]]);
@@ -381,10 +381,10 @@ fn forwarder_follows_every_control_change() {
     relay.control().assert_forwarder_in_step();
 
     // Expiry withdraws the rest, and lookups stop before the sweep.
-    let late = t0 + OPEN_TTL;
+    let late = t0 + ESTABLISHED_TTL;
     assert_eq!(fast(&relay, moved, &data(0x10), late), unknown);
     relay.tick(late);
-    assert_eq!(relay.control().forwarder.open.len(), 0);
+    assert_eq!(relay.control().forwarder.established.len(), 0);
     relay.control().assert_forwarder_in_step();
 }
 
@@ -410,7 +410,7 @@ fn verdicts_are_counted_by_the_half_that_decides() {
 }
 
 /// What one table makes of transport data outside the reserved prefixes: only
-/// an open session forwards it, and only from its expected source.
+/// an established session forwards it, and only from its expected source.
 fn data_verdict(
     control: &Control,
     from: SocketAddr,
@@ -418,10 +418,10 @@ fn data_verdict(
     now: Instant,
 ) -> Verdict {
     match control.sessions.get(receiver, now) {
-        Some(s) if s.state == SessionState::Open && s.expected_src == from => {
+        Some(s) if s.state == SessionState::Established && s.expected_src == from => {
             Verdict::Forward(s.dest)
         }
-        Some(s) if s.state == SessionState::Open => Verdict::Drop(Reason::WrongSource),
+        Some(s) if s.state == SessionState::Established => Verdict::Drop(Reason::WrongSource),
         Some(_) | None => Verdict::Drop(Reason::UnknownIndex),
     }
 }
@@ -561,7 +561,7 @@ fn readers_never_see_a_route_the_table_never_held() {
     let moved = |i: u64| SocketAddr::from(([203, 0, 113, 100 + (i % 8) as u8], 1));
     let stop = std::sync::atomic::AtomicBool::new(false);
     let forwarder = Arc::clone(&relay.forwarder);
-    // Every (index, expected source, destination) an open entry ever had.
+    // Every (index, expected source, destination) an established entry ever had.
     let mut held = std::collections::HashSet::new();
     std::thread::scope(|s| {
         let readers: Vec<_> = (0..4)
@@ -611,7 +611,7 @@ fn readers_never_see_a_route_the_table_never_held() {
                 },
             }
             relay.take_outbox();
-            held.extend(relay.control().sessions.open_pairs());
+            held.extend(relay.control().sessions.established_pairs());
         }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let seen: Vec<_> = readers.into_iter().flat_map(|r| r.join().unwrap()).collect();

@@ -46,7 +46,7 @@ impl Ledger {
                 self.pending += 1;
                 self.pending_by_peer.entry(s.peer).or_default().push_back(idx);
             }
-            SessionState::Open => {}
+            SessionState::Established => {}
         }
     }
 
@@ -66,7 +66,7 @@ impl Ledger {
     pub(super) fn removed(&mut self, idx: SessionIdx, s: &Session) {
         match s.state {
             SessionState::Pending => self.left_pending(idx, &s.peer),
-            SessionState::Open => {}
+            SessionState::Established => {}
         }
         self.uncount(&s.peer);
     }
@@ -108,7 +108,7 @@ impl Ledger {
     fn forget(&mut self, s: &Session) {
         match s.state {
             SessionState::Pending => self.pending -= 1,
-            SessionState::Open => {}
+            SessionState::Established => {}
         }
         self.uncount(&s.peer);
     }
@@ -177,7 +177,7 @@ mod tests {
     fn ledger_tracks_counts_queues_and_the_entry_to_evict() {
         let limits = SessionLimits { pending_per_peer: 2, per_peer: 3, total: usize::MAX };
         let mut l = Ledger::new(limits);
-        let (p, o) = (SessionState::Pending, SessionState::Open);
+        let (p, e) = (SessionState::Pending, SessionState::Established);
         let peer = PeerKey::from([1; 32]);
         for i in 1..=3u32 {
             l.added(i.into(), &entry(1, p));
@@ -188,10 +188,10 @@ mod tests {
         assert_eq!(l.evictable(&peer), None);
         l.left_pending(2.into(), &peer);
         assert_eq!((l.queue(&peer), l.pending(), l.count(&peer)), (vec![3.into()], 1, 2));
-        l.added(4.into(), &entry(1, o));
-        l.removed(4.into(), &entry(1, o));
+        l.added(4.into(), &entry(1, e));
+        l.removed(4.into(), &entry(1, e));
         l.removed(3.into(), &entry(1, p));
-        l.removed(2.into(), &entry(1, o));
+        l.removed(2.into(), &entry(1, e));
         assert_eq!((l.pending(), l.peers()), (0, (0, 0)), "nothing left behind");
     }
 }

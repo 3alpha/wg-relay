@@ -2,9 +2,9 @@
 //!
 //! `Relay::handle` does no I/O: it returns a `Verdict` for the datagram and
 //! queues the registration tunnels' output for `take_outbox`. Inside, the
-//! forwarding half decides what it can from open sessions alone and hands the
-//! rest to the control half, which owns everything that changes. Several
-//! threads can run the relay at once, each with its own `Relay` from
+//! forwarding half decides what it can from established sessions alone and
+//! hands the rest to the control half, which owns everything that changes.
+//! Several threads can run the relay at once, each with its own `Relay` from
 //! `Relay::share`: the forwarding half is read without a lock, the control
 //! half is locked for each datagram it decides.
 
@@ -75,7 +75,7 @@ impl Relay {
         self.control().peer_count()
     }
 
-    /// How many sessions, pending or open, the relay holds.
+    /// How many sessions, pending or established, the relay holds.
     pub fn session_count(&self) -> usize {
         self.control().session_count()
     }

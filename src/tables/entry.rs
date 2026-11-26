@@ -10,7 +10,7 @@ pub enum SessionState {
     /// Initiation forwarded, response not yet accepted: only cookie replies pass.
     Pending,
     /// Response accepted: transport data passes too.
-    Open,
+    Established,
 }
 
 /// A session: the relay's routing entry for one index, which later messages
@@ -41,8 +41,13 @@ impl Session {
     }
 
     /// The responder's session once its response is accepted.
-    pub fn open(dest: SocketAddr, expected_src: SocketAddr, peer: PeerKey, now: Instant) -> Self {
-        Session { state: SessionState::Open, ..Self::pending(dest, expected_src, peer, now) }
+    pub fn established(
+        dest: SocketAddr,
+        expected_src: SocketAddr,
+        peer: PeerKey,
+        now: Instant,
+    ) -> Self {
+        Session { state: SessionState::Established, ..Self::pending(dest, expected_src, peer, now) }
     }
 
     pub(super) fn same_pair(&self, other: &Session) -> bool {
@@ -54,14 +59,14 @@ impl Session {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Ttls {
     pub(super) pending: Duration,
-    pub(super) open: Duration,
+    pub(super) established: Duration,
 }
 
 impl Ttls {
     pub(super) fn live(self, s: &Session, now: Instant) -> bool {
         let ttl = match s.state {
             SessionState::Pending => self.pending,
-            SessionState::Open => self.open,
+            SessionState::Established => self.established,
         };
         live(s.since, now, ttl)
     }

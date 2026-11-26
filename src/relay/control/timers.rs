@@ -57,7 +57,7 @@ impl Control {
         for k in self.registry.expire(now) {
             info!(peer = %self.peers.get(&k).map_or("?", |p| &p.name), "registration expired");
         }
-        let gone = self.sessions.expire(now, &self.forwarder.open);
+        let gone = self.sessions.expire(now, &self.forwarder.established);
         if gone > 0 {
             debug!(gone, live = self.sessions.len(), "expired sessions");
         }
