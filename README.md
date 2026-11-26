@@ -21,7 +21,7 @@ WireGuard itself has only peers. Here a *server* is a peer that runs all the tim
 - **Clients need no relay configuration.** The relay's config lists only the servers.
 - **The relay cannot read traffic.** It holds no peer keys and forwards datagrams byte for byte. A compromised relay can drop traffic, but cannot read or modify it, and cannot add peers.
 - **Access control stays in WireGuard.** You distribute keys and admit peers in each peer's own config, exactly as without the relay.
-- **Small and self-hosted.** One binary with one UDP port and one TOML file, about 5,000 lines of Rust. It ships as the container image `ghcr.io/3alpha/wg-relay`, with a [`compose.yaml`](compose.yaml) in the repository.
+- **Small and self-hosted.** One binary with one UDP port and one TOML file, about 5,000 lines of Rust. It ships as the container image `ghcr.io/3alpha/wg-relay`, with a [`docker-compose.yml`](docker-compose.yml) in the repository.
 - **Many networks on one relay.** Each network is isolated by its own WireGuard peer lists.
 - **Bounded under abuse.** Handshakes are rate-limited and budgeted, session state has quotas and fixed lifetimes, and memory stays bounded however many sources appear. The [reference](docs/reference.md) has the exact rules.
 
@@ -176,7 +176,7 @@ The relay rate-limits handshakes per source address, so it must see each peer's 
 
 To check, watch the metric `wg_relay_rate_limit_buckets_used` with several peers connected. It grows with the number of distinct source addresses, and stays at 1 if they are being rewritten.
 
-[`compose.yaml`](compose.yaml) runs the relay with Docker Compose (`docker compose up -d`) and publishes the metrics port to the host's loopback. Its comments explain how to switch to the host network.
+[`docker-compose.yml`](docker-compose.yml) runs the relay with Docker Compose (`docker compose up -d`) and publishes the metrics port to the host's loopback. Its comments explain how to switch to the host network.
 
 ## Metrics
 
