@@ -1,0 +1,8 @@
+# Everything is excluded, then the build inputs are let back in, so secrets
+# such as relay.toml can never reach the build context.
+*
+!Cargo.toml
+!Cargo.lock
+!src
+!examples
+!tests
