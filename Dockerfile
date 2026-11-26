@@ -3,7 +3,7 @@
 # The same version as rust-toolchain.toml, so the image already has the
 # toolchain; that file stays out of the build context, or rustup would
 # download its extra components. CI passes the file's version and checks this default.
-ARG RUST_VERSION=1.98.1
+ARG RUST_VERSION=1.100.0
 FROM rust:${RUST_VERSION}-trixie AS build
 WORKDIR /src
 COPY . .
