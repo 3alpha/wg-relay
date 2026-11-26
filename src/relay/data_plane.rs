@@ -44,19 +44,34 @@ impl DataPlane {
 
     /// Forward or drop a datagram if the state it reads can decide, else hand it on.
     pub(super) fn triage(&self, src: SocketAddr, datagram: &[u8], now: Instant) -> Triage {
+        // A source nobody could answer (unspecified, multicast, broadcast, port 0) is spoofed.
         if !is_valid_source(src) {
             return Triage::Drop(DropReason::InvalidSource);
         }
+        // Only the header is read: the type and the indexes. Nothing is decrypted.
         let message = match message::parse(datagram) {
             Ok(message) => message,
             Err(e) => return Triage::Drop(DropReason::from(e)),
         };
+        // The fast path: transport data or a cookie reply on an established session.
         let Some(route) = self.established_route(message, now) else {
-            return self.unrouted(message);
+            // Transport data on no session is junk unless its index belongs to a
+            // registration tunnel; dropping it here keeps floods off the control lock.
+            if let Message::TransportData { receiver_index } = message
+                && self.reserved.owner(receiver_index).is_none()
+            {
+                return Triage::Drop(DropReason::UnknownIndex);
+            }
+            // Handshakes, registration tunnel traffic and stray cookie replies
+            // need state only the control plane holds.
+            return Triage::ToControl(message);
         };
+        // A session is pinned to the address that established it; anyone else
+        // who learned or guessed the index is refused.
         if src != route.src {
             return Triage::Drop(DropReason::WrongSource);
         }
+        // Forward byte for byte to the other end of the session.
         Triage::Forward(route.dst)
     }
 
@@ -70,21 +85,6 @@ impl DataPlane {
                 self.established.get(receiver_index, now)
             }
             Message::HandshakeInitiation { .. } | Message::HandshakeResponse { .. } => None,
-        }
-    }
-
-    /// Drop transport data unless a registration tunnel takes it, and hand the rest over.
-    /// Reached only on a miss, so forwarded traffic never pays for the prefix lookup.
-    fn unrouted(&self, message: Message) -> Triage {
-        let reserved = |index| self.reserved.owner(index).is_some();
-        match message {
-            Message::TransportData { receiver_index } if !reserved(receiver_index) => {
-                Triage::Drop(DropReason::UnknownIndex)
-            }
-            Message::HandshakeInitiation { .. }
-            | Message::HandshakeResponse { .. }
-            | Message::CookieReply { .. }
-            | Message::TransportData { .. } => Triage::ToControl(message),
         }
     }
 }
