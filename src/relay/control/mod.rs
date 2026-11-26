@@ -13,7 +13,7 @@ use super::Metrics;
 use super::forwarder::Forwarder;
 use crate::config::Config;
 use crate::key::PeerKey;
-use crate::packet::{IdxPrefix, Mac1Key, SessionIdx};
+use crate::packet::{Mac1Key, SessionIdx};
 use crate::tables::{
     OPEN_TTL, PENDING_TTL, REGISTRY_TTL, RateLimiter, Registry, SessionLimits, SessionTable,
     WorkBudget,
@@ -85,15 +85,13 @@ pub(super) struct Control {
     tunnel_ip: Ipv4Addr,
     peers: HashMap<PeerKey, PeerState>,
     mac1: Mac1Index,
-    /// Reserved index prefixes, each with the listed peer whose registration
-    /// tunnel numbers its indexes there. Forwarded sessions may never use them.
-    reserved: HashMap<IdxPrefix, PeerKey>,
     /// Where each listed peer last proved it can be reached.
     registry: Registry,
     /// Every session, pending or open: the truth the forwarding half's open
     /// sessions are kept in step with.
     sessions: SessionTable,
-    /// What the forwarding half reads. Its open sessions change only through `sessions`.
+    /// What the forwarding half reads. Its open sessions change only through
+    /// `sessions`, its reserved prefixes only as registration tunnels come and go.
     forwarder: Arc<Forwarder>,
     /// Per-source limit on handshake initiations, registration and forwarded alike.
     limiter: RateLimiter,
@@ -128,7 +126,6 @@ impl Control {
             tunnel_ip: cfg.tunnel_ip,
             peers: HashMap::new(),
             mac1: Mac1Index::default(),
-            reserved: HashMap::new(),
             registry: Registry::new(REGISTRY_TTL),
             forwarder: Arc::new(Forwarder::new(sessions.new_view())),
             sessions,
@@ -179,7 +176,7 @@ impl Control {
     /// Find the listed peer whose registration tunnel owns this index, if
     /// it is in a reserved prefix.
     fn tunnel_owner(&self, idx: SessionIdx) -> Option<PeerKey> {
-        self.reserved.get(&idx.prefix()).copied()
+        self.forwarder.reserved.owner(idx)
     }
 
     /// Panic unless the session table's accounts are exact, the forwarding half
@@ -188,7 +185,7 @@ impl Control {
     fn assert_forwarder_in_step(&self) {
         assert!(self.sessions.accounts_exact(), "session accounts diverged");
         assert!(self.sessions.matches_view(&self.forwarder.open), "open sessions diverged");
-        // The forwarding half relies on it to leave registration tunnels' messages alone.
+        // The forwarding half relies on it to look up the reserved prefixes only on a miss.
         let in_reserved = self.sessions.open_pairs().any(|(i, ..)| self.tunnel_owner(i).is_some());
         assert!(!in_reserved, "an open session in a reserved prefix");
     }

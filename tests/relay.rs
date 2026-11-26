@@ -209,7 +209,7 @@ fn only_the_listed_peer_answers_and_pending_carries_no_data() {
     fake.extend_from_slice(&init[4..8]);
     fake.resize(48, 0);
     assert_eq!(w.fwd(SRV, &fake), None);
-    assert_eq!(w.n(Reason::SessionNotOpen), 1);
+    assert_eq!(w.n(Reason::UnknownIndex), 1);
     fake[0] = 3;
     fake.resize(64, 0);
     assert_eq!(w.fwd(SRV, &fake), Some(addr(C1)));

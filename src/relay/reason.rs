@@ -44,7 +44,6 @@ reasons! {
     UnknownIndex => "unknown_index",
     WrongSource => "wrong_source",
     SessionNotPending => "session_not_pending",
-    SessionNotOpen => "session_not_open",
 }
 
 /// What happened to one datagram.

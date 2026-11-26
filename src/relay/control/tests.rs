@@ -1,6 +1,6 @@
 use super::dispatch::Class;
 use super::*;
-use crate::packet::{self, SessionIdx};
+use crate::packet::{self, Message, SessionIdx};
 use crate::relay::forwarder::Triage;
 use crate::relay::testing::{cookie, data, initiation, response};
 use crate::relay::{Reason, Relay, Verdict};
@@ -328,15 +328,18 @@ fn forwarder_follows_every_control_change() {
     let mut relay = limited(limits, t0);
     let peers = relay.control().mac1.peers.clone();
     let to_control = |p: &[u8]| Triage::ToControl(packet::parse(p).unwrap());
+    let unknown = Triage::Drop(Reason::UnknownIndex);
 
-    // A pending session stays with the control half.
+    // A pending session carries no data, and its cookie replies go to the control half.
     assert_eq!(relay.handle(src(1), &init_for(&relay, 0, 0x10), t0), Verdict::Forward(listed(0)));
-    assert_eq!(fast(&relay, listed(0), &data(0x10), t0), to_control(&data(0x10)));
+    assert_eq!(fast(&relay, listed(0), &data(0x10), t0), unknown);
     assert_eq!(fast(&relay, listed(0), &cookie(0x10), t0), to_control(&cookie(0x10)));
     relay.control().assert_forwarder_in_step();
 
-    // Opening publishes both indexes.
+    // Opening publishes both indexes before the response is sent on, so the
+    // initiator's first data is forwarded right after it.
     assert_eq!(relay.handle(listed(0), &response(0x11, 0x10), t0), Verdict::Forward(src(1)));
+    assert_eq!(relay.handle(src(1), &data(0x11), t0), Verdict::Forward(listed(0)));
     assert_eq!(fast(&relay, listed(0), &data(0x10), t0), Triage::Forward(src(1)));
     assert_eq!(fast(&relay, src(1), &cookie(0x11), t0), Triage::Forward(listed(0)));
     assert_eq!(fast(&relay, src(2), &data(0x11), t0), Triage::Drop(Reason::WrongSource));
@@ -361,7 +364,8 @@ fn forwarder_follows_every_control_change() {
     // A new peer's registration tunnel reserves its prefix at once.
     let extra: PeerKey = PublicKey::from(&StaticSecret::random_from_rng(OsRng)).into();
     reload_listing(&relay, &[peers[0], peers[1], peers[2], extra]);
-    let prefix = *relay.control().reserved.iter().find(|(_, k)| **k == extra).unwrap().0;
+    let pairs = relay.control().forwarder.reserved.pairs();
+    let prefix = pairs.into_iter().find(|(_, k)| *k == extra).unwrap().0;
     let in_prefix = prefix.get() << 8 | 7;
     assert_eq!(fast(&relay, src(1), &data(in_prefix), t0), to_control(&data(in_prefix)));
     relay.control().assert_forwarder_in_step();
@@ -370,16 +374,15 @@ fn forwarder_follows_every_control_change() {
     assert_eq!(relay.handle(src(4), &init_for(&relay, 1, 0x30), t0), Verdict::Forward(listed(1)));
     assert_eq!(relay.handle(listed(1), &response(0x31, 0x30), t0), Verdict::Forward(src(4)));
     reload_listing(&relay, &[peers[0], peers[2]]);
-    assert_eq!(fast(&relay, listed(1), &data(0x30), t0), to_control(&data(0x30)));
-    assert_eq!(relay.handle(listed(1), &data(0x30), t0), Verdict::Drop(Reason::UnknownIndex));
+    assert_eq!(fast(&relay, listed(1), &data(0x30), t0), unknown);
     assert_eq!(fast(&relay, moved, &data(0x10), t0), Triage::Forward(src(1)), "kept");
-    assert!(relay.control().reserved.values().all(|k| *k != extra));
+    assert_eq!(fast(&relay, src(1), &data(in_prefix), t0), unknown, "prefix freed");
+    assert!(relay.control().forwarder.reserved.pairs().iter().all(|(_, k)| *k != extra));
     relay.control().assert_forwarder_in_step();
 
     // Expiry withdraws the rest, and lookups stop before the sweep.
     let late = t0 + OPEN_TTL;
-    assert_eq!(fast(&relay, moved, &data(0x10), late), to_control(&data(0x10)));
-    assert_eq!(relay.handle(moved, &data(0x10), late), Verdict::Drop(Reason::UnknownIndex));
+    assert_eq!(fast(&relay, moved, &data(0x10), late), unknown);
     relay.tick(late);
     assert_eq!(relay.control().forwarder.open.len(), 0);
     relay.control().assert_forwarder_in_step();
@@ -395,12 +398,32 @@ fn verdicts_are_counted_by_the_half_that_decides() {
     assert_eq!(relay.handle(src(1), &data(0x11), t0), Verdict::Forward(listed(0)));
     assert_eq!(relay.handle(src(2), &data(0x11), t0), Verdict::Drop(Reason::WrongSource));
     assert_eq!(relay.handle(src(2), &data(0x99), t0), Verdict::Drop(Reason::UnknownIndex));
+    assert_eq!(relay.handle(src(2), &cookie(0x99), t0), Verdict::Drop(Reason::UnknownIndex));
     let (fast, control) = (&relay.counters, relay.control().metrics().clone());
-    assert_eq!((fast.rx, fast.forwarded, fast.rejected(Reason::WrongSource)), (2, 1, 1));
-    assert_eq!((control.rx, control.forwarded, control.rejected(Reason::UnknownIndex)), (3, 2, 1));
+    let wrong_unknown =
+        |m: &Metrics| (m.rejected(Reason::WrongSource), m.rejected(Reason::UnknownIndex));
+    assert_eq!((fast.rx, fast.forwarded, wrong_unknown(fast)), (3, 1, (1, 1)));
+    assert_eq!((control.rx, control.forwarded, wrong_unknown(&control)), (3, 2, (0, 1)));
     let all = relay.metrics();
-    assert_eq!((all.rx, all.forwarded), (5, 3));
-    assert!(all.to_string().starts_with("rx=5 forwarded=3 "), "{all}");
+    assert_eq!((all.rx, all.forwarded), (6, 3));
+    assert!(all.to_string().starts_with("rx=6 forwarded=3 "), "{all}");
+}
+
+/// What one table makes of transport data outside the reserved prefixes: only
+/// an open session forwards it, and only from its expected source.
+fn data_verdict(
+    control: &Control,
+    from: SocketAddr,
+    receiver: SessionIdx,
+    now: Instant,
+) -> Verdict {
+    match control.sessions.get(receiver, now) {
+        Some(s) if s.state == SessionState::Open && s.expected_src == from => {
+            Verdict::Forward(s.dest)
+        }
+        Some(s) if s.state == SessionState::Open => Verdict::Drop(Reason::WrongSource),
+        Some(_) | None => Verdict::Drop(Reason::UnknownIndex),
+    }
 }
 
 /// A small xorshift generator, so failures reproduce.
@@ -428,7 +451,7 @@ fn forwarder_stays_in_step_through_random_changes() {
     for step in 0..20_000 {
         let mut pick = |n: u64| (rnd() % n) as usize;
         // Mostly forwarded indexes, some in a reserved prefix.
-        let tunnel = relay.control().reserved.keys().next().copied();
+        let tunnel = relay.control().forwarder.reserved.pairs().first().map(|(p, _)| *p);
         let idx = match (pick(8), tunnel) {
             (0, Some(prefix)) => prefix.get() << 8 | pick(4) as u32,
             _ => 0x100 + pick(48) as u32,
@@ -447,21 +470,33 @@ fn forwarder_stays_in_step_through_random_changes() {
                 relay.handle(from, &response(sender, idx), now);
             }
             8..=12 => {
-                let (datagram, is_data) = match pick(2) {
-                    0 => (data(idx), true),
-                    _ => (cookie(idx), false),
+                let datagram = match pick(2) {
+                    0 => data(idx),
+                    _ => cookie(idx),
                 };
-                // The control half alone reaches the same verdict as the two halves.
+                // The forwarding half reaches the verdict one table would: the
+                // control half's alone, or for forwarded transport data, which
+                // never reaches the control half, the session table's.
                 let message = packet::parse(&datagram).unwrap();
-                let alone = Verdict::from(relay.control().decide(from, &datagram, message, now));
-                match fast(&relay, from, &datagram, now) {
-                    Triage::Forward(dst) => assert_eq!(Verdict::Forward(dst), alone, "step {step}"),
-                    Triage::Drop(reason) => assert_eq!(Verdict::Drop(reason), alone, "step {step}"),
-                    // Only a live open session forwards transport data, and the
-                    // forwarding half holds all of those.
-                    Triage::ToControl(_) if is_data => {
-                        assert!(!matches!(alone, Verdict::Forward(_)), "step {step}: {alone:?}")
+                let truth = {
+                    let mut control = relay.control();
+                    match message {
+                        Message::TransportData { receiver }
+                            if control.tunnel_owner(receiver).is_none() =>
+                        {
+                            data_verdict(&control, from, receiver, now)
+                        }
+                        Message::HandshakeInitiation { .. }
+                        | Message::HandshakeResponse { .. }
+                        | Message::CookieReply { .. }
+                        | Message::TransportData { .. } => {
+                            Verdict::from(control.decide(from, &datagram, message, now))
+                        }
                     }
+                };
+                match fast(&relay, from, &datagram, now) {
+                    Triage::Forward(dst) => assert_eq!(Verdict::Forward(dst), truth, "step {step}"),
+                    Triage::Drop(reason) => assert_eq!(Verdict::Drop(reason), truth, "step {step}"),
                     Triage::ToControl(_) => {}
                 }
                 relay.handle(from, &datagram, now);
@@ -493,21 +528,24 @@ fn forwarder_stays_in_step_through_random_changes() {
 #[test]
 fn classify_names_every_case() {
     let relay = relay();
-    let (prefix, owner) = relay.control().reserved.iter().map(|(p, k)| (*p, *k)).next().unwrap();
+    let (prefix, owner) = relay.control().forwarder.reserved.pairs()[0];
     let in_tunnel = prefix.get() << 8 | 1;
     let class =
         |datagram: &[u8]| relay.control().classify(datagram, packet::parse(datagram).unwrap());
-    assert_eq!(class(&junk_for_relay(&relay)), Class::RegistrationInitiation);
+    assert_eq!(class(&junk_for_relay(&relay)), Ok(Class::RegistrationInitiation));
     for datagram in [data(in_tunnel), cookie(in_tunnel), response(0x99, in_tunnel)] {
-        assert_eq!(class(&datagram), Class::RegistrationTunnel { peer: owner });
+        assert_eq!(class(&datagram), Ok(Class::RegistrationTunnel { peer: owner }));
     }
     let sender = 0x10.into();
-    assert_eq!(class(&init_for(&relay, 0, 0x10)), Class::ForwardedInitiation { sender });
-    assert_eq!(class(&junk()), Class::ForwardedInitiation { sender: 0.into() }, "for nobody");
+    assert_eq!(class(&init_for(&relay, 0, 0x10)), Ok(Class::ForwardedInitiation { sender }));
+    let for_nobody = Ok(Class::ForwardedInitiation { sender: 0.into() });
+    assert_eq!(class(&junk()), for_nobody, "for nobody");
     let receiver = 0x20.into();
-    assert_eq!(class(&response(0x10, 0x20)), Class::ForwardedResponse { sender, receiver });
-    assert_eq!(class(&cookie(0x20)), Class::ForwardedCookieReply { receiver });
-    assert_eq!(class(&data(0x20)), Class::ForwardedData { receiver });
+    assert_eq!(class(&response(0x10, 0x20)), Ok(Class::ForwardedResponse { sender, receiver }));
+    assert_eq!(class(&cookie(0x20)), Ok(Class::ForwardedCookieReply { receiver }));
+    // Transport data outside a reserved prefix reaches the control half only
+    // when a reload freed the prefix after the forwarding half looked.
+    assert_eq!(class(&data(0x20)), Err(Reason::UnknownIndex));
 }
 
 #[test]

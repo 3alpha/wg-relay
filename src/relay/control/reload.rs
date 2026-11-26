@@ -33,7 +33,7 @@ impl Control {
             info!(peer = %o.name, "peer removed from config");
         }
         let peers = &self.peers;
-        self.reserved.retain(|_, k| peers.contains_key(k));
+        self.forwarder.reserved.retain(|k| peers.contains_key(k));
         self.registry.retain(|k, _| peers.contains_key(k));
         let dropped = self.sessions.retain(|s| peers.contains_key(&s.peer), &self.forwarder.open);
         info!(peers = peers.len(), dropped_sessions = dropped, "config applied");
@@ -43,11 +43,11 @@ impl Control {
     fn new_tunnel(&mut self, peer: PeerKey) -> Tunn {
         let prefix = loop {
             let p = IdxPrefix::from_bits(OsRng.next_u32());
-            if !self.reserved.contains_key(&p) && !self.sessions.has_prefix(p) {
+            if !self.forwarder.reserved.contains(p) && !self.sessions.has_prefix(p) {
                 break p;
             }
         };
-        self.reserved.insert(prefix, peer);
+        self.forwarder.reserved.reserve(prefix, peer);
         Tunn::new(self.secret.clone(), PublicKey::from(peer), None, None, prefix.get(), None)
     }
 }

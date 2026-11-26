@@ -20,8 +20,6 @@ pub(super) enum Class {
     ForwardedResponse { sender: SessionIdx, receiver: SessionIdx },
     /// A cookie reply between two peers, on a session the forwarding half does not hold.
     ForwardedCookieReply { receiver: SessionIdx },
-    /// Transport data between two peers, on a session the forwarding half does not hold.
-    ForwardedData { receiver: SessionIdx },
 }
 
 impl Control {
@@ -51,7 +49,7 @@ impl Control {
         if initiation && !self.limiter.allow(src.ip(), now) {
             return Err(Reason::RateLimited);
         }
-        match self.classify(datagram, message) {
+        match self.classify(datagram, message)? {
             Class::RegistrationInitiation => self.start_registration_handshake(src, datagram, now),
             Class::RegistrationTunnel { peer } => self.feed_tunnel(src, datagram, peer, now),
             Class::ForwardedInitiation { sender } => {
@@ -63,25 +61,26 @@ impl Control {
             Class::ForwardedCookieReply { receiver } => {
                 self.forward_cookie_reply(src, receiver, now)
             }
-            Class::ForwardedData { receiver } => self.forward_data(src, receiver, now),
         }
     }
 
-    /// Name the case a message falls in. Changes nothing and costs at most one mac1 check.
-    pub(super) fn classify(&self, datagram: &[u8], message: Message) -> Class {
+    /// Name the case a message falls in, or why none does. Changes nothing; at most one mac1 check.
+    pub(super) fn classify(&self, datagram: &[u8], message: Message) -> Result<Class, Reason> {
         if let Some(peer) = message.receiver().and_then(|idx| self.tunnel_owner(idx)) {
-            return Class::RegistrationTunnel { peer };
+            return Ok(Class::RegistrationTunnel { peer });
         }
         match message {
             Message::HandshakeInitiation { .. } if self.relay_mac1.matches(datagram) => {
-                Class::RegistrationInitiation
+                Ok(Class::RegistrationInitiation)
             }
-            Message::HandshakeInitiation { sender } => Class::ForwardedInitiation { sender },
+            Message::HandshakeInitiation { sender } => Ok(Class::ForwardedInitiation { sender }),
             Message::HandshakeResponse { sender, receiver } => {
-                Class::ForwardedResponse { sender, receiver }
+                Ok(Class::ForwardedResponse { sender, receiver })
             }
-            Message::CookieReply { receiver } => Class::ForwardedCookieReply { receiver },
-            Message::TransportData { receiver } => Class::ForwardedData { receiver },
+            Message::CookieReply { receiver } => Ok(Class::ForwardedCookieReply { receiver }),
+            // The forwarding half hands over transport data only in a reserved
+            // prefix, which a reload may have freed since: no case takes it now.
+            Message::TransportData { .. } => Err(Reason::UnknownIndex),
         }
     }
 }

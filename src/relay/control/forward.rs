@@ -78,20 +78,6 @@ impl Control {
         Ok(Accepted::Forward(session.dest))
     }
 
-    /// Forward transport data on an open session.
-    pub(super) fn forward_data(
-        &self,
-        src: SocketAddr,
-        receiver: SessionIdx,
-        now: Instant,
-    ) -> Result<Accepted, Reason> {
-        let session = self.session_from(src, receiver, now)?;
-        match session.state {
-            SessionState::Pending => Err(Reason::SessionNotOpen),
-            SessionState::Open => Ok(Accepted::Forward(session.dest)),
-        }
-    }
-
     /// Find the live session `receiver` names, if `src` may send on it.
     fn session_from(
         &self,

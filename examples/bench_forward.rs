@@ -3,7 +3,7 @@
 //!
 //! usage: bench_forward [--bin target/release/wg-relay] [--secs 5] [--senders 4]
 //!                      [--flows 1] [--servers 1] [--workers N] [--relay-cpus 0-3]
-//!                      [--sizes 64,1420] [--gso] [--relay-log warn]
+//!                      [--sizes 64,1420] [--gso] [--junk 0] [--relay-log warn]
 //!
 //! It starts the relay with a temporary config listing the servers, registers
 //! each server through a real handshake with the relay, completes one
@@ -16,7 +16,9 @@
 //! header and 16-byte tag. The relay's workers share the port through
 //! `SO_REUSEPORT`, which keeps each flow on one worker, so spreading load over
 //! workers needs several flows. The relay's CPU time per second of the
-//! window is reported too.
+//! window is reported too. `--junk` adds client sockets that flood the relay
+//! with the same data packet under made-up indexes, which it drops, to show
+//! what such a flood costs the real flows.
 //!
 //! Loopback is not a NIC: there is no driver GRO, so plain sends reach the
 //! relay one datagram per receive. `--gso` sends bursts of up to 64 datagrams
@@ -88,6 +90,10 @@ struct Args {
     /// Send bursts with GSO, which reach the relay as GRO buffers.
     #[arg(long)]
     gso: bool,
+    /// Extra client sockets sending data packets with made-up indexes, each
+    /// from its own thread on top of `--senders`; not counted as sent.
+    #[arg(long, default_value_t = 0)]
+    junk: usize,
     /// The relay's log filter (`RUST_LOG`); its log goes to stderr.
     #[arg(long, default_value = "warn")]
     relay_log: String,
@@ -281,6 +287,8 @@ struct World {
     relay: SocketAddr,
     servers: Vec<Server>,
     clients: Vec<Client>,
+    /// Clients sending junk: data packets on indexes no session has.
+    junk: Vec<Client>,
 }
 
 impl World {
@@ -463,6 +471,8 @@ fn measure(
     let stop = AtomicBool::new(false);
     let (sent, counts) = (AtomicU64::new(0), Counts::default());
     let len = pkts.first().map_or(0, Vec::len);
+    let junk: Vec<Vec<u8>> = world.junk.iter().map(|_| made_up_index(&pkts[0])).collect();
+    let junk_sent = AtomicU64::new(0);
     thread::scope(|s| {
         let counters: Vec<_> = world
             .servers
@@ -481,6 +491,11 @@ fn measure(
                 .collect();
             let (stop, sent) = (&stop, &sent);
             s.spawn(move || send_loop(&flows, args.gso, world.relay, stop, sent));
+        }
+        for (client, pkt) in world.junk.iter().zip(&junk) {
+            let (stop, junk_sent) = (&stop, &junk_sent);
+            let flows = [Flow { client, pkt }];
+            s.spawn(move || send_loop(&flows, args.gso, world.relay, stop, junk_sent));
         }
         thread::sleep(WARMUP);
         let snapshot = || {
@@ -504,6 +519,13 @@ fn measure(
             relay_cpu,
         })
     })
+}
+
+/// `pkt` with a random receiver index, which no session has (2^-32 per session).
+fn made_up_index(pkt: &[u8]) -> Vec<u8> {
+    let mut junk = pkt.to_vec();
+    junk[4..8].copy_from_slice(&OsRng.next_u32().to_le_bytes());
+    junk
 }
 
 /// Bind a server's socket and set it up for counting.
@@ -568,14 +590,17 @@ fn run(args: &Args) -> Result<(), BenchError> {
         relay,
         servers,
         clients: (0..args.flows).map(|_| client()).collect::<Result<_, _>>()?,
+        junk: (0..args.junk).map(|_| client()).collect::<Result<_, _>>()?,
     };
 
     println!(
-        "relay {}: {} sender thread(s), {} flow(s), {} server(s), {} sends, {} s per size",
+        "relay {}: {} sender thread(s), {} flow(s), {} server(s), {} junk flow(s), {} sends, \
+         {} s per size",
         args.bin.display(),
         args.senders,
         args.flows,
         args.servers,
+        args.junk,
         if args.gso { "GSO" } else { "plain" },
         args.secs
     );
