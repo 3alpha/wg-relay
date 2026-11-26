@@ -1,33 +1,18 @@
-# wg-relay configuration. Validate with: wg-relay --check-config -c relay.toml
-# Reload with SIGHUP (listen, workers, private_key and metrics_listen changes
-# need a restart).
+# Check: wg-relay --check-config -c relay.toml    Reload: kill -HUP <pid>
+# Every key is described in docs/reference.md.
+
+private_key = "<output of wg genkey>"
 listen = "0.0.0.0:51820"
-# The relay's own WireGuard private key (wg genkey). Used only for the
-# registration tunnels; it can never decrypt traffic between peers.
-private_key = "<base64 private key>"
-# Address the relay answers pings on inside the registration tunnels.
+
+# Optional; defaults shown, or unset where commented out.
 tunnel_ip = "10.99.0.254"
-# Handshake initiations per source (IPv4 address or IPv6 /64): "<n>/s" or
-# "<n>/m". Burst = 2 s worth.
 handshake_rate_per_ip = "10/s"
-# Forwarding threads, each with its own socket on the listen port; the kernel
-# keeps each flow on one of them. Default: one per CPU the relay may use.
-# Linux only; elsewhere the relay uses one.
-# workers = 4
-# Where peers reach the relay, "<host>:<port>" (hostname, IPv4 or [IPv6]).
-# Used verbatim as the Endpoint of the [Peer] section the relay prints at
-# startup and with --print-peer. Without it, a specific listen address is
-# used, or a placeholder if listen is a wildcard such as 0.0.0.0.
 # public_endpoint = "relay.example.com:51820"
-# Serve Prometheus metrics over HTTP at http://<metrics_listen>/metrics.
-# Off when unset. The endpoint has no authentication: keep it on loopback or a
-# private network.
+# workers = 4
 # metrics_listen = "127.0.0.1:9586"
 
-# The peers that must be reachable, usually the servers. Each one adds the
-# relay as a WireGuard peer and registers with it. Anyone may start a
-# handshake with a configured peer; its own WireGuard peer list decides who
-# gets in. Unconfigured peers (laptops, phones) need no entry here.
+# One block per peer that others connect to but cannot reach directly, usually
+# a server behind NAT. The relay makes it reachable.
 [[peer]]
 name = "home"
-pubkey = "<base64 public key of the server>"
+pubkey = "<the peer's WireGuard public key>"
