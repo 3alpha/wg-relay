@@ -150,7 +150,7 @@ fn serves_metrics_and_prints_the_relay_peer_section() {
     );
     assert!(headers.contains(&format!("Content-Length: {}", body.len())), "{headers}");
     for line in [
-        "wg_relay_build_info{version=\"0.1.0\"} 1",
+        concat!("wg_relay_build_info{version=\"", env!("CARGO_PKG_VERSION"), "\"} 1"),
         "wg_relay_workers 2",
         "wg_relay_configured_peers 1",
         "wg_relay_registered_peers 0",
