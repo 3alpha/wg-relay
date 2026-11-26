@@ -23,6 +23,7 @@ mod metrics;
 mod reason;
 
 use control::Control;
+pub use control::TICK_INTERVAL;
 use forwarder::{Forwarder, Triage};
 pub use metrics::Metrics;
 use reason::Accepted;
@@ -76,18 +77,13 @@ impl Relay {
     /// This handle's counters and the control half's, merged.
     pub fn metrics(&self) -> Metrics {
         let mut all = self.counters.clone();
-        all += &self.control_metrics();
+        all += self.control().metrics();
         all
     }
 
     /// What the forwarding half decided on this handle's thread, and its socket errors.
     pub fn counters(&self) -> &Metrics {
         &self.counters
-    }
-
-    /// What the control half decided, for every thread.
-    pub fn control_metrics(&self) -> Metrics {
-        self.control().metrics().clone()
     }
 
     /// Where `key` is currently registered, if anywhere.
@@ -120,7 +116,8 @@ impl Relay {
         }
     }
 
-    /// Run the registration tunnels' timers and expire soft state. Call a few times a second.
+    /// Run the registration tunnels' timers and expire soft state, at most once
+    /// per `TICK_INTERVAL` however many threads offer a tick.
     pub fn tick(&self, now: Instant) {
         self.control().tick(now);
     }

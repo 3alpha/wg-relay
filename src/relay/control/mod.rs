@@ -24,7 +24,12 @@ mod reload;
 mod tests;
 mod timers;
 
+use timers::Cadence;
+
 const SCRATCH_LEN: usize = 65536 + 256;
+/// How often the registration tunnels' timers run. Every forwarding thread
+/// offers a tick this often, and the control half takes one per interval.
+pub const TICK_INTERVAL: Duration = Duration::from_millis(250);
 /// Expiry scans every table, so it runs less often than the registration tunnels' timers.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
 /// Mac1 checks per second spent finding forwarded initiations' destinations.
@@ -95,7 +100,8 @@ pub(super) struct Control {
     /// Datagrams the registration tunnels produced, for the caller to send.
     outbox: Vec<(SocketAddr, Vec<u8>)>,
     scratch: Vec<u8>,
-    last_sweep: Option<Instant>,
+    ticks: Cadence,
+    sweeps: Cadence,
 }
 
 impl Control {
@@ -128,7 +134,8 @@ impl Control {
             metrics: Metrics::default(),
             outbox: Vec::new(),
             scratch: vec![0; SCRATCH_LEN],
-            last_sweep: None,
+            ticks: Cadence::new(TICK_INTERVAL),
+            sweeps: Cadence::new(SWEEP_INTERVAL),
         };
         control.reload(cfg);
         control

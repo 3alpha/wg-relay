@@ -1,34 +1,79 @@
-//! One socket's forwarding loop body: receive a batch, decide each datagram,
-//! send the forwarded ones in GSO runs, then whatever the control half queued.
+//! One forwarding thread: its socket loop receives a batch, decides each
+//! datagram, sends the forwarded ones in GSO runs, then whatever the control
+//! half queued, and offers the relay a timer tick every `TICK_INTERVAL`.
 
 use std::io;
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use quinn_udp::Transmit;
+use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, info};
-use wg_relay::relay::Relay;
+use wg_relay::relay::{Metrics, Relay, TICK_INTERVAL};
 
 use crate::udp::runs::{self, Datagram, Limits, Plan, Run};
-use crate::udp::{MAX_GSO_BYTES, RecvBatch, Socket};
+use crate::udp::{Bound, MAX_GSO_BYTES, RecvBatch, Socket};
+
+/// Run one forwarding thread on a runtime of its own until `stop` changes,
+/// keeping `counters` at its relay handle's counters as of its last batch.
+pub(super) fn run(
+    socket: Bound,
+    relay: Relay,
+    stop: watch::Receiver<bool>,
+    counters: &Mutex<Metrics>,
+) -> io::Result<()> {
+    super::runtime()?.block_on(async {
+        SocketLoop::new(socket.register()?, relay).run(stop, counters).await;
+        Ok(())
+    })
+}
 
 /// One thread's socket, its handle on the relay, and its reusable buffers.
-pub(super) struct SocketLoop {
-    pub(super) sock: Socket,
-    pub(super) relay: Relay,
+struct SocketLoop {
+    sock: Socket,
+    relay: Relay,
     rx: RecvBatch,
     work: Work,
     gso: bool,
 }
 
 impl SocketLoop {
-    pub(super) fn new(sock: Socket, relay: Relay) -> Self {
+    fn new(sock: Socket, relay: Relay) -> Self {
         let gso = sock.gso_segments() > 1;
         SocketLoop { sock, relay, rx: RecvBatch::default(), work: Work::default(), gso }
     }
 
+    /// Forward batches and offer timer ticks until `stop` changes.
+    async fn run(mut self, mut stop: watch::Receiver<bool>, counters: &Mutex<Metrics>) {
+        let mut ticks = tokio::time::interval(TICK_INTERVAL);
+        ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            // In this order, so a busy socket can neither delay stopping nor starve the ticks.
+            tokio::select! {
+                biased;
+                _ = stop.changed() => return,
+                // The time the tick was due, not when it ran: one thread's ticks are
+                // then exactly `TICK_INTERVAL` apart, and the relay never skips one.
+                due = ticks.tick() => self.on_tick(due.into_std()).await,
+                readable = self.sock.readable() => self.on_readable(readable).await,
+            }
+            counters
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone_from(self.relay.counters());
+        }
+    }
+
+    /// Act on a timer tick: run the relay's timers, then send what they queued.
+    async fn on_tick(&mut self, due: Instant) {
+        self.relay.tick(due);
+        self.send_outbox().await;
+    }
+
     /// Act on the socket turning readable: forward one batch, then send what
     /// the registration tunnels queued, whichever thread's datagram made them.
-    pub(super) async fn on_readable(&mut self, readable: io::Result<()>) {
+    async fn on_readable(&mut self, readable: io::Result<()>) {
         match readable {
             Ok(()) => {
                 forward_batch(&self.sock, &mut self.relay, &mut self.rx, &mut self.work).await
@@ -39,7 +84,7 @@ impl SocketLoop {
     }
 
     /// Send the datagrams the registration tunnels want to send.
-    pub(super) async fn send_outbox(&mut self) {
+    async fn send_outbox(&mut self) {
         for (dst, pkt) in self.relay.take_outbox() {
             let t = Transmit {
                 destination: dst,

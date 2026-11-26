@@ -31,27 +31,24 @@ pub struct Bound {
     state: UdpSocketState,
 }
 
-/// The listen address's sockets, one per forwarding thread.
-pub struct Group {
-    /// The main thread's socket, which also tells the actual address and offloads.
-    pub first: Bound,
-    pub others: Vec<Bound>,
-}
-
-/// Bind `count` sockets to `addr`. On Linux they share the port through
+/// Bind `count` sockets to `addr` and return the address they share, with its
+/// port picked if `addr` had none. On Linux they share the port through
 /// `SO_REUSEPORT`, and the kernel spreads flows across them by their address
 /// pair, keeping each flow on one socket.
-pub fn bind_group(addr: SocketAddr, count: NonZeroUsize) -> Result<Group, AppError> {
+pub fn bind_group(
+    addr: SocketAddr,
+    count: NonZeroUsize,
+) -> Result<(SocketAddr, Vec<Bound>), AppError> {
     let bind = |source| AppError::Bind { addr, source };
     // A plain bind fails while anything holds the address, so a second relay
     // cannot silently join the group; it also picks the port if `addr` has none.
     let probe = std::net::UdpSocket::bind(addr).map_err(bind)?;
     let actual = probe.local_addr().map_err(bind)?;
     drop(probe);
-    let one = || Bound::new(bind_shared(actual).map_err(bind)?, addr);
-    let first = one()?;
-    let others = (1..count.get()).map(|_| one()).collect::<Result<_, _>>()?;
-    Ok(Group { first, others })
+    let sockets = (0..count.get())
+        .map(|_| Bound::new(bind_shared(actual).map_err(bind)?, addr))
+        .collect::<Result<_, _>>()?;
+    Ok((actual, sockets))
 }
 
 #[cfg(target_os = "linux")]
@@ -83,10 +80,6 @@ impl Bound {
         #[cfg(target_os = "linux")]
         kept.restore(&io).map_err(offload)?;
         Ok(Bound { io, state })
-    }
-
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.io.local_addr()
     }
 
     /// Is UDP GRO on: may one receive buffer hold several datagrams?

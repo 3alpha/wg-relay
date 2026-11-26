@@ -1,27 +1,28 @@
-//! CLI arguments and the threads that drive the relay: the main thread runs
-//! the first socket's loop plus timers, stats and signals; the others run
-//! the same loop on the other sockets.
+//! CLI arguments and the main thread, which supervises the forwarding threads:
+//! it starts them, handles signals, logs stats, and stops and joins them.
 
+use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::Parser;
+use tokio::runtime::Runtime;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{debug, error, info, warn};
 use wg_relay::config::Config;
 use wg_relay::error::{AppError, Report};
 use wg_relay::relay::Relay;
 
-use crate::udp;
+use crate::udp::{self, Bound};
 
 mod forwarding;
 mod workers;
 
-use forwarding::SocketLoop;
 use workers::Workers;
 
-const TIMER_INTERVAL: Duration = Duration::from_millis(250);
 const STATS_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the main thread checks that every forwarding thread still runs.
+const CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Pubkey-routed WireGuard relay for peers behind NAT.
 #[derive(Debug, Parser)]
@@ -50,95 +51,66 @@ fn load(path: &Path) -> Result<Config, AppError> {
     Config::load(path).map_err(|source| AppError::Config { path: path.to_owned(), source })
 }
 
-/// Why the main loop ended.
-enum Stopped {
-    /// SIGINT or SIGTERM.
-    Signal,
-    /// This forwarding thread ended though none was told to.
-    WorkerExited(usize),
-}
-
-/// Bind one socket per forwarding thread, start the other threads, run the
-/// main loop here, then stop and join them all.
+/// Bind one socket per forwarding thread, start the threads, supervise them
+/// until a signal or a thread's end, then stop and join them.
 fn serve(cfg: Config, path: PathBuf) -> Result<(), AppError> {
-    let sockets = udp::bind_group(cfg.listen, workers::count(&cfg))?;
-    let listen = sockets.first.local_addr().unwrap_or(cfg.listen);
-    let (gro, gso) = (sockets.first.gro(), sockets.first.gso());
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(AppError::Runtime)?;
-    let sock = {
-        let _runtime = rt.enter();
-        sockets.first.register().map_err(main_failed)?
-    };
+    let (listen, sockets) = udp::bind_group(cfg.listen, workers::count(&cfg))?;
+    let (gro, gso) = (sockets.iter().all(Bound::gro), sockets.iter().all(Bound::gso));
+    let rt = runtime().map_err(AppError::Runtime)?;
     let relay = Relay::new(&cfg);
-    let workers = Workers::start(sockets.others, &relay)?;
+    let workers = Workers::start(sockets, &relay)?;
     info!(
         %listen,
         pubkey = %relay.public_key(),
         tunnel_ip = %cfg.tunnel_ip,
         handshake_rate = %cfg.handshake_rate,
         peers = relay.peer_count(),
-        workers = 1 + workers.len(),
+        workers = workers.len(),
         gro,
         gso,
         "wg-relay started"
     );
     debug!(config = ?cfg, "effective config");
-
-    let mut lp = SocketLoop::new(sock, relay);
-    let stopped = rt.block_on(run_main(&mut lp, &workers, &cfg, &path));
-    let (mut totals, joined) = workers.stop();
-    totals += &lp.relay.metrics();
-    info!(metrics = %totals, "shutting down");
-    match stopped? {
-        Stopped::Signal => joined,
-        Stopped::WorkerExited(index) => joined.and(Err(AppError::WorkerExited { index })),
-    }
+    let supervised = rt.block_on(supervise(&relay, &workers, &cfg, &path));
+    let (metrics, joined) = workers.stop();
+    info!(metrics = %metrics, "shutting down");
+    joined.and(supervised)
 }
 
-/// The main thread's own socket could not join its runtime.
-fn main_failed(source: std::io::Error) -> AppError {
-    AppError::WorkerFailed { index: 0, source }
+/// A runtime for one thread: the main thread's signals and timers, or a
+/// forwarding thread's socket and ticks.
+fn runtime() -> io::Result<Runtime> {
+    tokio::runtime::Builder::new_current_thread().enable_all().build()
 }
 
-/// Run the first socket's loop, timers, stats, reload and signals until a
-/// signal asks to stop or another forwarding thread ends.
-async fn run_main(
-    lp: &mut SocketLoop,
+/// Log stats and apply reloads until SIGINT or SIGTERM, or until a
+/// forwarding thread ends.
+async fn supervise(
+    relay: &Relay,
     workers: &Workers,
     cfg: &Config,
     path: &Path,
-) -> Result<Stopped, AppError> {
+) -> Result<(), AppError> {
     let on = |kind, name| signal(kind).map_err(|source| AppError::Signal { signal: name, source });
     let mut term = on(SignalKind::terminate(), "SIGTERM")?;
     let mut int = on(SignalKind::interrupt(), "SIGINT")?;
     let mut hup = on(SignalKind::hangup(), "SIGHUP")?;
-    let mut timers = tokio::time::interval(TIMER_INTERVAL);
+    let mut checks = tokio::time::interval(CHECK_INTERVAL);
     let mut stats = tokio::time::interval(STATS_INTERVAL);
     loop {
         tokio::select! {
-            r = lp.sock.readable() => {
-                lp.on_readable(r).await;
-                continue;
-            }
-            _ = timers.tick() => {
-                lp.relay.tick(Instant::now());
+            _ = checks.tick() => {
                 if let Some(index) = workers.exited() {
-                    return Ok(Stopped::WorkerExited(index));
+                    return Err(AppError::WorkerExited { index });
                 }
             }
             _ = stats.tick() => {
-                let mut all = workers.counters();
-                all += &lp.relay.metrics();
-                info!(metrics = %all, sessions = lp.relay.session_count(), "stats");
+                info!(metrics = %workers.metrics(), sessions = relay.session_count(), "stats");
             }
-            _ = hup.recv() => reload(&lp.relay, cfg, path),
-            _ = int.recv() => return Ok(Stopped::Signal),
-            _ = term.recv() => return Ok(Stopped::Signal),
+            _ = hup.recv() => reload(relay, cfg, path),
+            _ = int.recv() => return Ok(()),
+            _ = term.recv() => return Ok(()),
         }
-        lp.send_outbox().await;
     }
 }
 

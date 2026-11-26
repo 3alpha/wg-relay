@@ -425,7 +425,7 @@ fn verdicts_are_counted_by_the_half_that_decides() {
     assert_eq!(relay.handle(src(1), &data(0x11), t0), Verdict::Forward(listed(0)));
     assert_eq!(relay.handle(src(2), &data(0x11), t0), Verdict::Drop(Reason::WrongSource));
     assert_eq!(relay.handle(src(2), &data(0x99), t0), Verdict::Drop(Reason::UnknownIndex));
-    let (fast, control) = (&relay.counters, relay.control_metrics());
+    let (fast, control) = (&relay.counters, relay.control().metrics().clone());
     assert_eq!((fast.rx, fast.forwarded, fast.rejected(Reason::WrongSource)), (2, 1, 1));
     assert_eq!((control.rx, control.forwarded, control.rejected(Reason::UnknownIndex)), (3, 2, 1));
     let all = relay.metrics();

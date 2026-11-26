@@ -316,27 +316,25 @@ The relay runs several forwarding threads (`workers` in `relay.toml`, one per CP
 
 - The forwarding half is shared and read by every thread at once, without a lock. Its open sessions live in a concurrent hash map (`papaya`) that readers search while the control half writes.
 - The control half sits behind one `Mutex`. A thread locks it for each datagram its forwarding half hands over, decides it, and sends the result itself, together with whatever the registration tunnels queued, on its own socket. Every socket has the same address, so it does not matter which one sends.
-- Each handle keeps its own counters, so counting never contends between threads. The main thread, which is forwarding thread 0, also runs the timers, the stats line, SIGHUP and shutdown, and adds every thread's counters to the control half's for the stats and shutdown lines.
+- Each handle keeps its own counters, so counting never contends between threads.
+- Every forwarding thread also offers the control half a timer tick every 250 ms and sends what the registration tunnels' timers queue. The control half runs at most one tick per 250 ms however many threads offer one, so the timers keep their pace with one thread or many.
+
+The threads are all alike. The main thread forwards nothing: it starts them, logs the stats line, handles SIGHUP, SIGINT and SIGTERM, notices a thread that ended, and stops and joins them. For the stats and shutdown lines it adds every thread's counters to the control half's.
 
 ```mermaid
 flowchart TB
     K["kernel: SO_REUSEPORT group on the listen port<br/>picks a socket per flow (address pair hash)"]
-    subgraph main["main thread = forwarding thread 0"]
-        L0["socket loop on socket 0"]
-        H["timers, stats, SIGHUP, SIGINT/SIGTERM"]
+    subgraph threads["forwarding threads 0 … n-1, all alike"]
+        L["socket loop on socket i<br/>plus a timer tick every 250 ms"]
     end
-    subgraph more["forwarding threads 1 … n-1"]
-        L1["socket loop on socket 1 … n-1"]
-    end
+    M["main thread: start and join the threads,<br/>stats, SIGHUP, SIGINT/SIGTERM"]
     F["forwarding half (Forwarder)<br/>open sessions<br/>read by all threads, no lock"]
     C["control half (Control) behind a Mutex<br/>registration tunnels, registry, budgets,<br/>session table, reload"]
-    K --> L0
-    K --> L1
-    L0 -- "triage every datagram" --> F
-    L1 -- "triage every datagram" --> F
-    L0 -- "lock for what triage hands over" --> C
-    L1 -- "lock for what triage hands over" --> C
-    H -- "lock for ticks and reloads" --> C
+    K --> L
+    L -- "triage every datagram" --> F
+    L -- "lock for what triage hands over, and for ticks" --> C
+    M -- "lock for reloads and stats" --> C
+    M -- "start, watch, stop" --> L
     C -- "publish / withdraw open entries" --> F
 ```
 
@@ -577,7 +575,7 @@ flowchart TD
 
 Initiations are the only packets that cost real CPU before anyone is authenticated. Finding the destination means hashing the mac1 against the listed keys, eight at a time with SIMD; a registration attempt costs an X25519 operation, about as much as 400 key checks. The two paths have separate token buckets, so a flood on one cannot starve the other: the forwarding scan may spend 1,000,000 key checks per second, registration attempts 200,000 (500 attempts). Telling the two apart costs one mac1 check against the relay's own key. A registration initiation from the address a listed peer is currently registered from skips the registration budget, limited only by its per-source allowance, so a flood of registration attempts from elsewhere cannot stop registered peers from re-handshaking with the relay. While a budget is empty, initiations on that path are dropped after at most one hash, so a flood from many sources costs little and data keeps flowing. Legitimate handshakes on the flooded path still compete with the flood: junk initiations can delay forwarded handshakes (a mac1 cannot be looked up by index, so each costs a full scan), and a registration flood can delay peers registering from a new address, but open sessions are unaffected.
 
-The control half's handlers return a `Result`: `Accepted::Forward(dest)`, `Accepted::Consumed` when a registration tunnel took the datagram, or a `Reason` when they drop. One function, `settle()`, turns the forwarding half's decision or a handler's outcome into a `Verdict`, counts it in the counters of the half that decided, and logs drops at debug level with their reason. The socket loop sends `Forward` datagrams unchanged and drains the registration tunnels' output (handshake responses, keepalives, ping replies) after every batch of received datagrams and every timer or signal.
+The control half's handlers return a `Result`: `Accepted::Forward(dest)`, `Accepted::Consumed` when a registration tunnel took the datagram, or a `Reason` when they drop. One function, `settle()`, turns the forwarding half's decision or a handler's outcome into a `Verdict`, counts it in the counters of the half that decided, and logs drops at debug level with their reason. The socket loop sends `Forward` datagrams unchanged and drains the registration tunnels' output (handshake responses, keepalives, ping replies) after every batch of received datagrams and every timer tick.
 
 The forwarded initiation rule in full (`forward_initiation`, in the control half):
 
@@ -636,8 +634,9 @@ Together these guarantee the two kinds of index never collide, and a message who
 | Registration TTL | 180 s | `REGISTRY_TTL` | a listed peer silent for 3 min is forgotten |
 | Session lifetime | 200 s after the handshake, not extended by traffic | `SESSION_TTL` | indexes from old handshakes age out; nobody can keep an entry alive by sending |
 | Pending lifetime | 10 s after the initiation, not extended by cookie replies | `PENDING_TTL` | unanswered initiations do not pile up |
-| Relay tick | 250 ms | `app.rs` (main thread) | runs registration tunnel timers, checks that every forwarding thread is still running |
+| Relay tick | 250 ms | `TICK_INTERVAL` | runs registration tunnel timers; every forwarding thread offers one, and the control half takes at most one per interval |
 | Table sweep | 1 s | `SWEEP_INTERVAL` | expires tables, shrinks them when mostly empty |
+| Thread check | 250 ms | `app.rs` (main thread) | checks that every forwarding thread is still running |
 | Stats log | 60 s | `app.rs` (main thread) | logs all counters of every thread, including per-reason rejects |
 | Rate limit | `handshake_rate_per_ip`, burst 2 s worth | `relay.toml` | caps initiations per source (IPv4 address or IPv6 /64) |
 | Forwarding budget | 1,000,000 mac1 checks/s, burst 1 s | `FORWARDING_WORK_PER_SEC` | caps CPU spent finding forwarded handshakes' destinations |
@@ -750,10 +749,9 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    main["main.rs<br/>parse CLI, logging, report errors"] --> app["app.rs<br/>Cli, startup, main thread: timers, signals"]
-    app --> wrk["app/workers.rs<br/>the other forwarding threads"]
-    app --> loop["app/forwarding.rs<br/>socket loop: batch, GSO runs, outbox"]
-    wrk --> loop
+    main["main.rs<br/>parse CLI, logging, report errors"] --> app["app.rs<br/>Cli, startup, main thread: stats, signals"]
+    app --> wrk["app/workers.rs<br/>the forwarding threads: start, watch, stop"]
+    wrk --> loop["app/forwarding.rs<br/>one forwarding thread: batch, GSO runs,<br/>ticks, outbox"]
     loop --> udp["udp.rs + udp/runs.rs<br/>SO_REUSEPORT sockets, batched I/O<br/>on quinn-udp, GRO split, GSO runs"]
     app --> cfg["config/<br/>relay.toml, Rate, Summary, ConfigError"]
     app --> relay["relay/mod.rs<br/>Relay: handle, tick, reload, metrics;<br/>settle"]
@@ -764,7 +762,7 @@ flowchart TD
     dsp --> fwd["relay/control/forward.rs<br/>forward_initiation, forward_response,<br/>forward_cookie_reply, forward_data"]
     dsp --> regm["relay/control/registration.rs<br/>start_registration_handshake,<br/>feed_tunnel, ICMP"]
     ctl --> rel["relay/control/reload.rs<br/>reload"]
-    ctl --> tmr["relay/control/timers.rs<br/>tick: registration tunnel timers,<br/>expiry sweep"]
+    ctl --> tmr["relay/control/timers.rs<br/>tick: its cadence, registration<br/>tunnel timers, expiry sweep"]
     relay --> rsn["relay/reason.rs + metrics.rs<br/>Reason, Verdict, counters"]
     ctl --> tbl["tables/<br/>Registry, SessionTable and its Ledger,<br/>OpenSessions, RateLimiter, WorkBudget"]
     fwdr --> pkt["packet/<br/>parse, mac1, SessionIdx"]
